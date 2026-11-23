@@ -1,6 +1,6 @@
 # Agent Instructions
 
-This repository is the Rust template. Projects created from it start with these files; update this file when the stack or workflow changes.
+This repository is `surfcult`, a Rust project created from `project-template-rust`. The product idea is in `docs/idea.md`; it is a specification, not yet implemented. Update this file when the stack or workflow changes.
 
 ## Checks
 

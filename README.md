@@ -1,6 +1,6 @@
-# Rust Template
+# surfcult
 
-A minimal Rust crate with a library, a binary and a unit test.
+A self-hosted, offline-first television channel simulator for Raspberry Pi and Linux. It plays your own media as continuously broadcasting channels with schedules, commercials and a program guide. The planned design is in [`docs/idea.md`](docs/idea.md), which uses the codename BROADCAST. Nothing in it is implemented yet; the code is still the template's `greet` example.
 
 ## What it contains
 
@@ -9,35 +9,10 @@ A minimal Rust crate with a library, a binary and a unit test.
 - `Cargo.toml`, `Cargo.lock`: package metadata (edition 2024, no dependencies) and the lockfile
 - `Makefile`: `make verify` runs every check; `make help` lists the targets
 - `.github/workflows/pr-ci.yml`: the `PR CI` workflow; runs on every pull request and ends with the `CI gate` job
-- `.github/rulesets/main.json`: a ruleset for `main` that requires pull requests and `CI gate`
+- `.github/rulesets/main.json`: the ruleset applied to `main`; it requires pull requests and `CI gate`
 - `.github/ISSUE_TEMPLATE/`, `.github/pull_request_template.md`: bug, feature and task forms and the pull request template
-- `docs/`: folders for decision records, references, research notes and runbooks
+- `docs/`: the product idea, plus folders for decision records, references, research notes and runbooks
 - `CONTRIBUTING.md`, `SECURITY.md`, `AGENTS.md`: contribution, security and coding-agent guidance
-
-## Create a project
-
-```bash
-gh repo create subculture-collective/<name> --template subculture-collective/project-template-rust --private --clone
-cd <name>
-```
-
-## First steps
-
-1. Delete merged branches automatically, allow auto-merge, protect `main` and add the `hold` label:
-
-   ```bash
-   gh repo edit --delete-branch-on-merge --enable-auto-merge
-   gh api -X POST 'repos/{owner}/{repo}/rulesets' --input .github/rulesets/main.json
-   gh label create hold --description "Do not merge automatically"
-   ```
-
-   The ruleset makes `main` accept changes only through pull requests that pass `CI gate`. GitHub's Free plan does not support rulesets or auto-merge on private repositories: there the ruleset command fails with HTTP 403 and nothing stops a direct push to `main`. Pull requests are still merged only after `CI gate` passes (see below).
-
-2. On a branch, rename the template:
-   - `name` in `Cargo.toml` and `project_template_rust` in `src/main.rs`
-   - `PROJECT_NAME` in `.env.example`
-   - this README
-3. Run `make verify`, then open a pull request (see below).
 
 ## Run checks locally
 

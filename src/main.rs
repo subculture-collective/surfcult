@@ -1,3 +1,3 @@
 fn main() {
-    println!("{}", project_template_rust::greet("SUBCULT"));
+    println!("{}", surfcult::greet("SUBCULT"));
 }
