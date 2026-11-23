@@ -1,3 +1,5 @@
+pub mod library;
+
 pub fn greet(name: &str) -> String {
     let trimmed = name.trim();
     let target = if trimmed.is_empty() { "world" } else { trimmed };
