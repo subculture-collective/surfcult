@@ -1,0 +1,60 @@
+# Example channels.toml. Check a file with:
+#   surfcult check-config config/channels.example.toml
+
+# IANA time zone name. Grids and time-of-day blocks use it.
+timezone = "America/Chicago"
+
+# A channel with one source and one mode.
+# mode: sequential | shuffle | weighted | blocks
+[[channel]]
+number = 3
+name = "SATURDAY CARTOONS"
+source = { jellyfin_collection = "Cartoons" }
+mode = "shuffle"
+grid = "30m"                                          # programs start on the half hour; gaps are filled
+breaks = { every = "11m", length = "2m", pool = "ads-90s" }
+filler = "filler"                                     # pool used to fill grid gaps
+
+# Sources: jellyfin_library, jellyfin_collection, jellyfin_tag,
+# jellyfin_genre, jellyfin_series.
+[[channel]]
+number = 4
+name = "MOVIE NIGHT"
+source = { jellyfin_library = "Movies" }
+mode = "sequential"
+# No grid: long, irregular programs.
+
+# mode = "blocks": time-of-day windows, each with its own source and mode.
+# Times are HH:MM in the time zone above and do not cross midnight (use
+# "24:00" for the end of the day). Omit `days` for every day. Blocks on the
+# same channel must not overlap.
+[[channel]]
+number = 5
+name = "ALL DAY CARTOONS"
+mode = "blocks"
+
+[[channel.block]]
+days = ["sat", "sun"]
+start = "06:00"
+end = "12:00"
+source = { jellyfin_collection = "Cartoons" }
+mode = "shuffle"
+
+[[channel.block]]
+start = "12:00"
+end = "24:00"
+source = { jellyfin_genre = "Comedy" }
+mode = "weighted"
+
+# Pools of short local clips.
+[[interstitial_pool]]
+name = "tune-in"
+path = "/var/lib/surfcult/clips/tune-in"
+
+[[interstitial_pool]]
+name = "ads-90s"
+path = "/var/lib/surfcult/clips/ads-90s"
+
+[[interstitial_pool]]
+name = "filler"
+path = "/var/lib/surfcult/clips/filler"
