@@ -1,0 +1,77 @@
+# Raspberry Pi 4B (the surfcult TV box)
+
+Purpose: reach the Pi, know what is installed on it, and play video on its TV the way surfcult will.
+
+Observed 2026-11-22. Live state overrides this page.
+
+## The device
+
+| Item | Value |
+| --- | --- |
+| Hostname | `surfcult` |
+| Hardware | Raspberry Pi 4 Model B, 2 GB (1.8 GiB usable), 128 GB microSD, HDMI to a 4K TV |
+| OS | Raspberry Pi OS (Debian 13 trixie), Lite, no desktop, `multi-user.target` |
+| Wired address | `10.0.0.53` (Volga DHCP reservation, 1 Gbps; the Pi 4B port cannot go faster) |
+| Wi-Fi address | `10.0.0.54` (Volga DHCP reservation; backup path) |
+| SSH user | `patrick` |
+| SSH key | `~/.ssh/id_ed25519` on the operator's machine |
+| SSH host key | `SHA256:IgxEOAh0rjwSI3R3zltUuqz3gOnISidsbygwaIqwSaU` (ed25519) |
+| Estate inventory | `surfcult` in `estate-config` `inventory/hosts.yaml` |
+
+DHCP is owned by Volga (`10.0.0.1`). Both reservations are keyed by the interface MACs, which are not recorded here. Wired wins when both are up (default route metric 100 against 600).
+
+## Reach it
+
+```bash
+ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes patrick@10.0.0.53
+```
+
+An alias with a pinned host key avoids retyping this. Put the key line in `~/.ssh/fleet_known_hosts` and this block in `~/.ssh/config`:
+
+```
+Host surfcult
+  HostName 10.0.0.53
+  User patrick
+  IdentityFile ~/.ssh/id_ed25519
+  IdentitiesOnly yes
+  HostKeyAlias fleet-surfcult
+  StrictHostKeyChecking yes
+  UserKnownHostsFile ~/.ssh/fleet_known_hosts ~/.ssh/known_hosts
+  ConnectTimeout 5
+```
+
+If the login is refused with "Permission denied (publickey)", the user or key is wrong. The Pi takes keys only. The account is `patrick`, not `onnwee` or `pi`, and the accepted key is `id_ed25519`, not `id_ed25519_onnwee`.
+
+## What is installed
+
+- Installed: `mpv` 0.40, `ffmpeg` 7.1, `git`, `cec-utils`, `socat`, `jq`, plus the image's `v4l-utils`.
+- Not installed on purpose: Rust (CI builds the aarch64 binary), Docker, Tailscale.
+- `patrick` has passwordless sudo through `/etc/sudoers.d/010-patrick-nopasswd`, added 2026-11-22 at the owner's request. Remove it with `sudo rm /etc/sudoers.d/010-patrick-nopasswd`.
+- `patrick` is in the `video`, `render` and `input` groups, so MPV can use the display and the remote without a desktop session.
+
+## Play video the way surfcult will
+
+Run over SSH, with no desktop. MPV draws straight to the TV through KMS.
+
+```bash
+mpv --profile=fast --vo=gpu --gpu-context=drm --drm-mode=1920x1080@60 --hwdec=drm FILE
+```
+
+- `--profile=fast` is required. MPV's default video settings overload the Pi's GPU and drop about a third of the frames, even with hardware decode.
+- `--hwdec=drm` uses the Pi's H.265 decoder, including 10-bit, and hands frames to the display without copying them. For H.264 use `--hwdec=v4l2m2m`.
+- Content at 24 fps plays cleanly. 60 fps content is not reliable. See [the playback spike](../research/2026-11-22-pi-playback-spike.md).
+- The TV runs at 1920x1080 at 60 Hz. MPV's JSON IPC works with `--input-ipc-server=/tmp/mpv.sock` and `socat`.
+
+## Verify
+
+```bash
+ssh surfcult 'hostname; ip -br a; mpv --version | head -1; vcgencmd get_throttled; cec-client -l | head -3'
+```
+
+Expected: hostname `surfcult`, `eth0` on `10.0.0.53/24`, MPV 0.40, `throttled=0x0`, and a CEC adapter at `/dev/cec0`.
+
+## Roll back
+
+- Packages: `sudo apt-get remove mpv ffmpeg git cec-utils socat jq`, then `sudo apt-get autoremove`.
+- Sudo rule: see above.
+- Test media: `rm -rf ~/spike` on the Pi.

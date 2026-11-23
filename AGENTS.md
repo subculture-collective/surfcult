@@ -19,6 +19,10 @@ make verify
 - When `CI gate` passes and there are no conflicts, the organization merges the pull request automatically. To hold one back, keep it a draft (`gh pr create --draft`, or `gh pr ready --undo <number>` for an open one) or add the `hold` label (`gh pr edit <number> --add-label hold`). Open a draft when the work is not finished.
 - Keep one focused change per pull request.
 
+## Test device
+
+The target Raspberry Pi 4B is reachable as `ssh surfcult` once an alias is set up. The user is `patrick` and the key is `id_ed25519`. See `docs/runbooks/raspberry-pi.md` for access, installed tools and the MPV flags that work (`--profile=fast`, `--hwdec=drm`). Do not build Rust on the Pi; CI builds the aarch64 binary.
+
 ## Boundaries
 
 - Keep the template minimal and runnable.
