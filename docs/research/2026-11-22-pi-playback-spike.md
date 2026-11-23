@@ -71,7 +71,7 @@ Counted through the API on 2026-11-22: 1,440 movies, 170 series and 4,656 episod
 | Dynamic range | SDR 99%, HDR or Dolby Vision 53 items |
 | Default audio | AAC 42%, E-AC3 25%, AC3 19%, Opus 10%, TrueHD 2%, DTS 2%, FLAC 2% |
 
-The Pi plays H.265 and H.264 8-bit directly, so about 90% of the library direct-plays. The rest needs a transcode: AV1, H.264 10-bit (42 items), VVC (4), 4K and HDR, and TrueHD audio. The design does not say how small "small" is. About 10% is, in my judgment, small enough that its device profile stands. The profile should exclude AV1.
+The Pi plays H.265 and H.264 8-bit directly, so about 90% of the library direct-plays. The rest needs a transcode: AV1, H.264 10-bit (42 items), VVC (4), VC-1, MPEG-2, 4K and HDR. TrueHD does not: MPV decodes it in software, and one 5.1 TrueHD film direct-played in 0.66 s using about 0.1 more cores than an E-AC3 one. The design does not say how small "small" is. About 10% is, in my judgment, small enough that its device profile stands. The profile should exclude AV1.
 
 ## Tune time against Jellyfin
 

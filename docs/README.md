@@ -6,7 +6,7 @@
 - `runbooks/raspberry-pi.md`: reaching and operating the Pi 4B TV box
 - `research/2026-11-22-pi-playback-spike.md`: Phase 0 results: decode, Jellyfin tune time, overlay cost
 - `../tools/pi-spike/`: the scripts behind those measurements
-- `adr/`: architecture decision records
+- `adr/`: architecture decision records; [0001](adr/0001-pi-and-library-findings.md) records what the Pi 4B and the library showed in Phase 0
 - `reference/`: stable technical references
 - `research/`: exploratory notes and comparisons
 - `runbooks/`: repeatable operational procedures

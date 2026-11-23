@@ -33,7 +33,7 @@ Anti-goals (a failure even if it works):
 
 ## Constraints
 
-- Hardware: the target is the owner's Raspberry Pi 4B with 2 GB of RAM. It should decode H.265 and H.264 in hardware; this needs checking on the device (see Risks). A Pi 5 has no H.264 hardware decoder, so it is untested and not a v1 target. With 2 GB, MPV caches stay small and nothing else heavy runs on the box.
+- Hardware: the target is the owner's Raspberry Pi 4B with 2 GB of RAM. It decodes H.265 (8 and 10-bit) and H.264 (8-bit) in hardware through MPV; H.264 10-bit and AV1 are software only (measured 2026-11-22, [ADR 0001](../../adr/0001-pi-and-library-findings.md)). A Pi 5 has no H.264 hardware decoder, so it is untested and not a v1 target. With 2 GB, MPV caches stay small and nothing else heavy runs on the box.
 - Display: the TV is 4K, but most of the library is 1080p. v1 outputs 1080p and lets the TV upscale, which keeps the overlay bitmaps and compositing cheap on a Pi 4. 4K output is a later option.
 - Library: mostly H.265, with Tdarr converting the rest. Tdarr replaces files in place, so a file's duration can change after it was scheduled.
 - Network: the Pi reaches Jellyfin over the LAN. "Offline" here means no internet. It does not mean no LAN.
@@ -122,12 +122,13 @@ Changing channel runs a fixed sequence. The scheduler looks ahead, so the seek p
 ```
 t=0     key press; show static (~0.5 s)
 t=0.5   play a local tune-in clip of length L
-        meanwhile the program for time (0.5 + L) is loaded paused at its offset
+        meanwhile the program for time (0.5 + L) is queued behind the clip at its offset
+        and opened early by MPV's playlist prefetch
 t=0.5+L program starts at the live position
 ```
 
 - If the channel is already in a break at `0.5 + L`, the clip stands in for the break and no extra clip is played.
-- L is chosen from the expected start-up cost: a short clip for direct play, a longer one when Jellyfin must transcode first.
+- L is chosen from the expected start-up cost: a short clip for direct play (about a second), a longer one when Jellyfin must transcode first (4 to 7 s measured, with one slow cold start of 18.7 s, so the sequence waits for the program and does not promise a time). One MPV process cannot hold a second file paused, so the program is queued with `--prefetch-playlist`; the next item then starts 0.5 to 1.05 s after the clip ends. See [ADR 0001](../../adr/0001-pi-and-library-findings.md).
 - If the program starts late, one correction seek puts it back on the live position.
 - Switching again during the sequence cancels it and starts the sequence for the new channel.
 
@@ -138,21 +139,21 @@ Breaks are filled from pools of local clips (ads, station idents, bumpers, previ
 ### Media source: Jellyfin
 
 - The library sync reads items with runtime, codecs and streams, and caches them in SQLite.
-- Before playing, surfcult asks Jellyfin's playback-info endpoint with a device profile describing what the Pi can decode (H.265, H.264, common audio). Jellyfin answers with a direct-play URL or a transcode URL that accepts a start position.
-- Authentication uses an HTTP header, not a query parameter, so the key stays out of URLs, process arguments and logs.
+- Before playing, surfcult asks Jellyfin's playback-info endpoint with a device profile describing what the Pi can decode (H.265 8 and 10-bit, H.264 8-bit, up to 1080p SDR; AAC, MP3, FLAC, Opus, AC3, E-AC3, DTS and TrueHD). Jellyfin answers with a direct-play URL, or a transcode that surfcult asks for as a progressive MPEG-TS stream (`/Videos/{id}/stream.ts`, H.264 and AAC, 1080p, about 8 Mbps) with `StartTimeTicks`. HLS at an offset takes about 19 s to start and is not used.
+- Authentication uses an HTTP header, not a query parameter, so the key stays out of URLs, process arguments and logs. Jellyfin 12 accepts only `Authorization: MediaBrowser Token="KEY"`; `X-Emby-Token` and `api_key` return 401. MPV gets the header from a config file (`--include`), not from its command line.
 - surfcult acts as a dedicated Jellyfin user with read access to the libraries it schedules. It does not report playback, so the owner's watched and continue-watching lists stay clean. It stops any transcode it started when a channel changes or playback ends.
 - Items are identified by Jellyfin item id, with path as a fallback, and reconciled on each library sync. Whether Tdarr's in-place replacement keeps the item id is unverified (see Risks).
 - When Jellyfin is unreachable, local clips and the guide still work, and the screen shows a technical-difficulties slate.
 
 ### Player
 
-One MPV process, controlled over its JSON IPC socket. The app owns all scheduling and state, so MPV can be killed and restarted without losing anything. A watchdog restarts it and re-tunes to the current channel. Hardware decoding is requested through MPV and falls back to software.
+One MPV process, controlled over its JSON IPC socket. The app owns all scheduling and state, so MPV can be killed and restarted without losing anything. A watchdog restarts it and re-tunes to the current channel. Hardware decoding is requested through MPV and falls back to software. MPV runs with `--profile=fast --vo=gpu --gpu-context=drm --drm-mode=1920x1080@60 --hwdec=drm,v4l2m2m`; `--profile=fast` is required because MPV's defaults overload the Pi's GPU ([ADR 0001](../../adr/0001-pi-and-library-findings.md)).
 
 ### TV screen
 
 MPV draws everything. Channel banner, volume, mute and static use MPV's overlay facilities. The guide is rendered by Rust into a bitmap and shown as an MPV overlay, with the video shrunk into a corner, in the style of the Prevue Guide: time header, channel column, a highlighted current cell and an info line. Typography and colour follow the owner's "90s cable" and "analog underground" directions; the visual design is a separate task.
 
-The overlay path is the biggest technical bet in this design, so the first milestone tests it on a Pi.
+The overlay path was the biggest technical bet, and it passed on a Pi 4B: a full-screen 1080p bitmap scrolled at 30 updates per second costs about 1.1 cores with no dropped video frames. The text-only fallback is not needed ([ADR 0001](../../adr/0001-pi-and-library-findings.md)).
 
 ### Remote control
 
@@ -168,7 +169,7 @@ No telemetry. The admin server is localhost-only unless configured, with optiona
 
 ## Phases
 
-0. **Hardware spike (throwaway).** On a real Pi: MPV playing a Jellyfin H.265 URL with hardware decoding, a seek to an offset, a preloaded second item, and one overlay frame. Measures tune time, CPU and overlay cost. The result can change this design. Pass thresholds: a direct-play tune completes in 3 seconds or less after the static starts; a transcoded tune is hidden by a tune-in clip of at most 15 seconds; a full-screen guide overlay uses at most about one core and updates smoothly enough to scroll. If the bitmap overlay fails these, the fallback is a text-only guide drawn with MPV's ASS overlays, which gives up the Prevue look but not the function.
+0. **Hardware spike (throwaway). Done 2026-11-23, see [ADR 0001](../../adr/0001-pi-and-library-findings.md).** On a real Pi: MPV playing a Jellyfin H.265 URL with hardware decoding, a seek to an offset, a preloaded second item, and one overlay frame. Measures tune time, CPU and overlay cost. The result can change this design. Pass thresholds: a direct-play tune completes in 3 seconds or less after the static starts; a transcoded tune is hidden by a tune-in clip of at most 15 seconds; a full-screen guide overlay uses at most about one core and updates smoothly enough to scroll. If the bitmap overlay fails these, the fallback is a text-only guide drawn with MPV's ASS overlays, which gives up the Prevue look but not the function.
 1. **Library and timeline.** Jellyfin sync, SQLite, `timeline` and `schedule` with tests, `channels.toml`. Milestone: a command prints what every channel is playing now and for the next day.
 2. **Playing.** MPV control, tuner, static, tune-in clips, channel up and down, banner. Milestone: the Pi boots into a TV you can channel-surf.
 3. **Television.** Breaks, idents, the guide overlay, remote control, grid scheduling. Milestone: operated entirely by remote.
@@ -184,17 +185,16 @@ No telemetry. The admin server is localhost-only unless configured, with optiona
 
 ## Risks to check early
 
-- Hardware H.265 and H.264 decode through MPV on the Pi 4B, including 10-bit.
-- Tune time over HTTP seeks and over a Jellyfin transcode.
-- CPU cost of bitmap overlays for the guide.
+Checked in Phase 0 and closed ([ADR 0001](../../adr/0001-pi-and-library-findings.md)): hardware decode through MPV including 10-bit, tune time over HTTP seeks and over a Jellyfin transcode, and the CPU cost of bitmap overlays. Still open:
+
 - Whether Jellyfin keeps an item's id when Tdarr replaces its file.
 - Reading remote and HDMI-CEC input without a desktop session.
 
 ## Owner inputs and the assumptions they led to
 
-Confirmed by the owner: a Raspberry Pi 4B with 2 GB for the Phase 0 spike; a 4K TV; a library that is mostly 1080p (the owner's recollection, not measured).
+Confirmed by the owner: a Raspberry Pi 4B with 2 GB; a 4K TV; a library that is mostly 1080p. Phase 0 measured the library (94% 1080p) and the Pi, and the assumptions below were replaced by results in [ADR 0001](../../adr/0001-pi-and-library-findings.md).
 
-Assumptions made from that, to be replaced by measurements:
+Original assumptions, kept for the record:
 
 - The device profile sent to Jellyfin allows H.264 and H.265 up to 1080p, 8 and 10-bit SDR, and the audio codecs AAC, MP3, FLAC, Opus, AC3, E-AC3 and DTS. Anything else (4K, HDR or Dolby Vision video; TrueHD or Atmos audio) is handled by a Jellyfin transcode, which the tune-in clip hides. Audio goes out over HDMI, downmixed to stereo by default and configurable.
 - Phase 0 starts by querying the Jellyfin library for codec, resolution, bit depth, HDR and audio-codec counts. If more than a small share needs a transcode, the profile and the Phase 0 thresholds are revisited before Phase 1.

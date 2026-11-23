@@ -71,7 +71,7 @@ Jellyfin 12.4.0 runs on Almaz at `http://10.0.0.200:8096` (LAN, plain HTTP). The
 - Send the API key as `Authorization: MediaBrowser Token="KEY"`. Jellyfin 12 returns 401 for `X-Emby-Token` and `api_key`.
 - On the Pi the key is in `~/spike/.jf-key` (mode 600). `~/spike/jf.conf` (mode 600) holds the header for MPV, so the key stays out of the process list: `mpv --include=$HOME/spike/jf.conf ...`. Never put the key on a command line, in a URL or in the repository.
 - Direct play: `/Videos/{id}/stream?static=true&mediaSourceId={source}`.
-- Transcode (AV1, 4K, HDR, TrueHD): ask for a progressive stream, `/Videos/{id}/stream.ts` with `VideoCodec=h264`, `AudioCodec=aac`, `VideoBitrate`, `maxWidth`, `maxHeight`, `StartTimeTicks` and a new `PlaySessionId`. Do not use HLS at an offset; it takes about 19 s to start.
+- Transcode (AV1, H.264 10-bit, 4K, HDR): ask for a progressive stream, `/Videos/{id}/stream.ts` with `VideoCodec=h264`, `AudioCodec=aac`, `VideoBitrate`, `maxWidth`, `maxHeight`, `StartTimeTicks` and a new `PlaySessionId`. Do not use HLS at an offset; it takes about 19 s to start.
 
 The test scripts are in `tools/pi-spike/`. Copy them to `~/spike/` on the Pi to run them.
 
