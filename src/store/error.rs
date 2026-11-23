@@ -11,6 +11,8 @@ pub enum StoreError {
     },
     /// The data to write is not allowed. Nothing was written.
     InvalidEvent(String),
+    /// The library data to write is not allowed. Nothing was written.
+    InvalidLibrary(String),
     /// The database was written by a newer build than this one.
     NewerSchema { found: u32, supported: u32 },
     /// A stored value cannot be turned back into its Rust type.
@@ -33,6 +35,7 @@ impl fmt::Display for StoreError {
                 write!(f, "database error while {action}: {message}")
             }
             Self::InvalidEvent(reason) => write!(f, "invalid event: {reason}"),
+            Self::InvalidLibrary(reason) => write!(f, "invalid library data: {reason}"),
             Self::NewerSchema { found, supported } => write!(
                 f,
                 "database schema version {found} is newer than this build supports ({supported})"

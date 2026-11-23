@@ -1,0 +1,29 @@
+{
+ "11111111-1111-1111-1111-111111111111": {
+  "Items": [
+   {
+    "Id": "1e0ff4a8-a553-6961-2793-0e218769b7b7",
+    "Type": "Movie",
+    "Name": "Fixture Movie 1"
+   },
+   {
+    "Id": "3282307a-d805-60f8-3e46-a3022f90087e",
+    "Type": "Movie",
+    "Name": "Fixture Movie 3"
+   }
+  ],
+  "TotalRecordCount": 2,
+  "StartIndex": 0
+ },
+ "22222222-2222-2222-2222-222222222222": {
+  "Items": [
+   {
+    "Id": "a57a957c-1ae6-5318-4137-e200281aa5af",
+    "Type": "Movie",
+    "Name": "Fixture Movie 4"
+   }
+  ],
+  "TotalRecordCount": 1,
+  "StartIndex": 0
+ }
+}

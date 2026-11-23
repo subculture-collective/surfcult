@@ -4,6 +4,7 @@
 - `superpowers/specs/2026-11-22-surfcult-design.md`: the current design (draft, awaiting approval)
 - `reference/stack.md`: tools, versions and commands for this stack
 - `reference/storage.md`: the SQLite tables, the cursor format and the migration rule
+- `reference/jellyfin.md`: the Jellyfin source: endpoints, the auth header, key sources, the SQLite cache and failed syncs
 - `reference/clips.md`: local clip pools, ffprobe durations, what is skipped and why
 - `reference/schedule.md`: how the schedule generator orders items, resumes and persists
 - `runbooks/raspberry-pi.md`: reaching and operating the Pi 4B TV box
