@@ -14,7 +14,7 @@ The design's three thresholds:
 
 | Threshold | Result |
 | --- | --- |
-| A direct-play tune takes 3 s or less | Pass. H.265 plays in 0.3 to 0.7 s. H.264 in MP4 takes 0.6 to 1.0 s from the start but 2.9 s at an offset, so it only just passes. |
+| A direct-play tune takes 3 s or less | Pass for H.265 (0.3 to 0.7 s) and H.264 8-bit (0.6 to 1.0 s from the start, 2.9 s at an offset, so it only just passes). H.264 10-bit fails (3.7 s at an offset, software decode), so it needs a transcode. |
 | A transcoded tune is hidden by a tune-in clip of 15 s or less | Pass for 1080p over progressive TS: 4 to 5 s for AV1, 6 to 7 s for H.265. Fail over HLS (19 s) and for 4K HDR (13 to 25 s progressive). |
 | A full-screen guide overlay uses at most about one core and scrolls smoothly | Pass. A 1080p bitmap scrolled at 10 updates per second costs 0.5 cores and at 30 per second about 1.1 cores, with no dropped video frames. The text-only fallback is not needed. |
 
@@ -87,12 +87,15 @@ Each row is the time from loading a stream into a running MPV until it reports a
 | Direct H.265 10-bit with TrueHD 6 channel, 40% in | 0.66, 0.62 | `drm` | 0.40 |
 | Direct 4K HDR10 H.265, 40% in | 0.94, 0.9 | `drm` | 0.28, but 53 of about 144 frames dropped in 6 s |
 | Direct AV1 10-bit, 40% in | 5.98, 5.95 | software | 3.01 |
+| Direct H.264 10-bit, from the start | 2.7, 0.98, 1.0 | software | 3.09, and 54 of about 144 frames dropped in 6 s |
+| Direct H.264 10-bit, 40% in | 3.68, 3.68, 3.65 | software | 1.96 |
 | Transcode AV1, HLS, from the start | 1.69, 2.51, 3.52 | `v4l2m2m` | 0.16 |
 | Transcode AV1, HLS, 40% in | 19.2, 20.0, 19.0 | `v4l2m2m` | 0.14 |
 | Transcode 4K HDR, HLS, 40% in | 54.0, 30.6 | `v4l2m2m` | 0.17 |
 | Transcode AV1, progressive TS, from the start | 1.64, 1.5, 2.02 | `v4l2m2m` | 0.15 |
 | Transcode AV1, progressive TS, 40% in | 4.63, 4.36, 4.05 | `v4l2m2m` | 0.16 |
 | Transcode H.265 1080p, progressive TS, 40% in | 7.11, 6.69, 6.2 | `v4l2m2m` | 0.47 |
+| Transcode H.264 10-bit, progressive TS, 40% in | 18.7, 9.95, 4.86 | `v4l2m2m` | 0.21 |
 | Transcode 4K HDR, progressive TS, 40% in | 25.2, 16.9, 12.7 | `v4l2m2m` | 0.30 |
 
 Notes:
@@ -101,11 +104,13 @@ Notes:
 - The H.264 MP4 at an offset is slower than the same file from the start, probably because the MP4 index has to be fetched. That was not confirmed.
 - The transcodes ran on Almaz while it did other work, and which encoder it used was not checked. Treat them as typical, not best case.
 - Direct-play AV1 works in software at 3 cores. That leaves nothing for the guide, so AV1 goes through a transcode.
+- H.264 10-bit has no hardware decoder on the Pi 4B. It decodes in software at 2 to 3 cores and takes 3.7 s at an offset, over the 3 s limit, so the device profile should send it through a transcode. It is about 42 items, and this was measured on one 1080p, 24 fps episode. The first transcode of it took 18.7 s and the next two 9.95 s and 4.86 s, so the first start after a pause can miss the 15 s limit.
 
 ## Seeking and the second item
 
 - Starting at an offset works through MPV's `start` option. The numbers above include it.
 - A second item appended to MPV's playlist starts 0.5 to 1.05 s after the first ends. Playlist prefetch trims 0 to 0.3 s of that. The slowest pair was H.265 into H.264, which switches decoders. A short ident or bumper hides gaps this size.
+- The spike asked for a second item preloaded paused. One MPV process cannot hold a paused second file. The closest it offers is `--prefetch-playlist`, which opens the next file early, and that is what the gap above measures. A truly paused preload needs a second MPV process. That was not tested, and its memory cost on a 1.8 GiB device is unknown.
 
 ## The guide overlay
 

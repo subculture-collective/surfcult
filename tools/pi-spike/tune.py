@@ -24,7 +24,9 @@ TESTS = [("direct hevc10 start=0", direct("hevc10_1080_24"), 0, 3), ("direct hev
          ("TRANSCODE hevc4k->h264 8M start=40%", lambda: hls("hevc_4k_hdr"), mid("hevc_4k_hdr"), 2),
          ("PROG-TS av1->h264 8M start=0", lambda: prog("av1_1080_24"), 0, 3), ("PROG-TS av1->h264 8M offset=40%", lambda: prog("av1_1080_24", mid("av1_1080_24")), 0, 3),
          ("PROG-TS hevc4k->h264 8M offset=40%", lambda: prog("hevc_4k_hdr", mid("hevc_4k_hdr")), 0, 3),
-         ("PROG-TS hevc10->h264 8M offset=40%", lambda: prog("hevc10_1080_24", mid("hevc10_1080_24")), 0, 3)]
+         ("PROG-TS hevc10->h264 8M offset=40%", lambda: prog("hevc10_1080_24", mid("hevc10_1080_24")), 0, 3),
+         ("direct h264 10-bit start=0", direct("h264_10bit_1080_24"), 0, 3), ("direct h264 10-bit start=40%", direct("h264_10bit_1080_24"), mid("h264_10bit_1080_24"), 3),
+         ("PROG-TS h264 10-bit->h264 8M offset=40%", lambda: prog("h264_10bit_1080_24", mid("h264_10bit_1080_24")), 0, 3)]
 only = sys.argv[1:] 
 subprocess.run(["rm", "-f", SOCK])
 p = subprocess.Popen(["mpv", "--no-config", f"--include={os.path.expanduser('~/spike/jf.conf')}", "--idle=yes", "--force-window=yes", "--profile=fast", "--vo=gpu", "--gpu-context=drm",
