@@ -60,7 +60,22 @@ mpv --profile=fast --vo=gpu --gpu-context=drm --drm-mode=1920x1080@60 --hwdec=dr
 - `--profile=fast` is required. MPV's default video settings overload the Pi's GPU and drop about a third of the frames, even with hardware decode.
 - `--hwdec=drm` uses the Pi's H.265 decoder, including 10-bit, and hands frames to the display without copying them. For H.264 use `--hwdec=v4l2m2m`.
 - Content at 24 fps plays cleanly. 60 fps content is not reliable. See [the playback spike](../research/2026-11-22-pi-playback-spike.md).
-- The TV runs at 1920x1080 at 60 Hz. MPV's JSON IPC works with `--input-ipc-server=/tmp/mpv.sock` and `socat`.
+- The TV runs at 1920x1080 at 60 Hz. MPV's JSON IPC works with `--input-ipc-server=/tmp/mpv.sock` and `socat`. Use `--hwdec=drm,v4l2m2m` when the codec is not known in advance.
+
+## Play from Jellyfin
+
+Jellyfin 12.4.0 runs on Almaz at `http://10.0.0.200:8096` (LAN, plain HTTP). The public name is `jellyfin.subcult.tv`.
+
+- Send the API key as `Authorization: MediaBrowser Token="KEY"`. Jellyfin 12 returns 401 for `X-Emby-Token` and `api_key`.
+- On the Pi the key is in `~/spike/.jf-key` (mode 600). `~/spike/jf.conf` (mode 600) holds the header for MPV, so the key stays out of the process list: `mpv --include=$HOME/spike/jf.conf ...`. Never put the key on a command line, in a URL or in the repository.
+- Direct play: `/Videos/{id}/stream?static=true&mediaSourceId={source}`.
+- Transcode (AV1, 4K, HDR, TrueHD): ask for a progressive stream, `/Videos/{id}/stream.ts` with `VideoCodec=h264`, `AudioCodec=aac`, `VideoBitrate`, `maxWidth`, `maxHeight`, `StartTimeTicks` and a new `PlaySessionId`. Do not use HLS at an offset; it takes about 19 s to start.
+
+The test scripts are in `tools/pi-spike/`. Copy them to `~/spike/` on the Pi to run them.
+
+## CEC and the remote
+
+The Pi's CEC adapter works (`cec-ctl -d /dev/cec0`), but the TV does not answer it. Turn on HDMI-CEC in the TV's settings (the name varies by brand, for example Anynet+, Bravia Sync or Simplink) and rerun `cec-ctl -d /dev/cec0 --playback --show-topology`; the TV should appear at logical address 0. Remote keys then arrive as input events on `/dev/input/event2`.
 
 ## Verify
 
