@@ -1,0 +1,31 @@
+name: Task
+description: Describe one focused change, such as documentation or maintenance.
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: One concrete outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Related files, constraints and anything that is out of scope.
+  - type: textarea
+    id: done-when
+    attributes:
+      label: Done when
+      description: Checkable conditions that show the task is complete.
+      placeholder: |
+        - [ ] make verify passes
+    validations:
+      required: true
+  - type: textarea
+    id: test-command
+    attributes:
+      label: Test command
+      description: A command that runs from the repository root and proves the change.
+      placeholder: make verify
+      render: shell
