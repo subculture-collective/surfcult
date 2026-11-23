@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a new capability.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: The outcome you want and who it is for.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Related files, current behavior and constraints.
+  - type: textarea
+    id: done-when
+    attributes:
+      label: Done when
+      description: Checkable conditions that show the feature works.
+      placeholder: |
+        - [ ] make verify passes
+    validations:
+      required: true
+  - type: textarea
+    id: test-command
+    attributes:
+      label: Test command
+      description: A command that runs from the repository root and proves the change.
+      placeholder: make verify
+      render: shell
