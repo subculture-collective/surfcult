@@ -14,6 +14,9 @@
 //! - `playback_history`: one row each time the tuner starts something, with a
 //!   short outcome word. Read newest first.
 //!
+//! - `library_*`: a copy of the Jellyfin library (items, chapters, streams,
+//!   collections), replaced as a whole by each sync. See [`LibraryEntry`].
+//!
 //! Times are Unix epoch milliseconds (`i64`), as in [`crate::timeline`].
 //!
 //! # Migrations
@@ -26,6 +29,7 @@
 //! one instead.
 
 mod error;
+mod library;
 mod migrate;
 #[cfg(test)]
 mod tests;
@@ -38,6 +42,7 @@ use rusqlite::{Connection, params};
 use crate::timeline::{Event, EventKind};
 
 pub use error::StoreError;
+pub use library::LibraryEntry;
 
 /// How long a call waits for another connection's lock before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);

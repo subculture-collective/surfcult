@@ -1,0 +1,347 @@
+{
+ "Items": [
+  {
+   "Name": "Fixture Movie 1",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "1e0ff4a8-a553-6961-2793-0e218769b7b7",
+   "RunTimeTicks": 58238400000,
+   "Container": "mkv",
+   "Path": "/media/fixtures/movie-1.mkv",
+   "Type": "Movie",
+   "IsFolder": false,
+   "MediaType": "Video",
+   "LocationType": "FileSystem",
+   "MediaSources": [
+    {
+     "Id": "1e0ff4a8-a553-6961-2793-0e218769b7b7",
+     "Container": "mkv",
+     "Size": 6314505327,
+     "Bitrate": 8674009,
+     "RunTimeTicks": 58238400000,
+     "Path": "/media/fixtures/movie-1.mkv",
+     "Protocol": "File",
+     "Type": "Default"
+    }
+   ],
+   "MediaStreams": [
+    {
+     "Type": "Video",
+     "Codec": "hevc",
+     "IsDefault": true,
+     "IsInterlaced": false,
+     "Index": 0,
+     "Width": 1920,
+     "Height": 1080,
+     "BitDepth": 10,
+     "BitRate": 8015609,
+     "RealFrameRate": 23.976025,
+     "AverageFrameRate": 23.976025,
+     "VideoRange": "SDR",
+     "VideoRangeType": "SDR",
+     "Profile": "Main 10",
+     "Level": 120,
+     "PixelFormat": "yuv420p10le"
+    },
+    {
+     "Type": "Audio",
+     "Codec": "eac3",
+     "Language": "eng",
+     "IsDefault": true,
+     "IsInterlaced": false,
+     "Index": 1,
+     "Channels": 6,
+     "ChannelLayout": "5.1",
+     "BitRate": 640000,
+     "VideoRange": "Unknown",
+     "VideoRangeType": "Unknown",
+     "SampleRate": 48000
+    }
+   ],
+   "Chapters": [
+    {
+     "StartPositionTicks": 0,
+     "Name": "Chapter 1"
+    },
+    {
+     "StartPositionTicks": 3287450000,
+     "Name": "Chapter 2"
+    },
+    {
+     "StartPositionTicks": 7825310000,
+     "Name": "Chapter 3"
+    },
+    {
+     "StartPositionTicks": 9258410000,
+     "Name": "Chapter 4"
+    },
+    {
+     "StartPositionTicks": 11018500000,
+     "Name": "Chapter 5"
+    },
+    {
+     "StartPositionTicks": 12725620000,
+     "Name": "Chapter 6"
+    }
+   ]
+  },
+  {
+   "Name": "Fixture Episode 2",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "010f6f59-58ca-cbc6-0c2f-14f3bde31d24",
+   "RunTimeTicks": 14361050000,
+   "Container": "mkv",
+   "Path": "/media/fixtures/episode-2.mkv",
+   "Type": "Episode",
+   "IsFolder": false,
+   "MediaType": "Video",
+   "LocationType": "FileSystem",
+   "SeriesName": "Fixture Series",
+   "SeasonName": "Season 1",
+   "IndexNumber": 2,
+   "ParentIndexNumber": 1,
+   "MediaSources": [
+    {
+     "Id": "010f6f59-58ca-cbc6-0c2f-14f3bde31d24",
+     "Container": "mkv",
+     "Size": 1082287964,
+     "Bitrate": 6029018,
+     "RunTimeTicks": 14361050000,
+     "Path": "/media/fixtures/episode-2.mkv",
+     "Protocol": "File",
+     "Type": "Default"
+    }
+   ],
+   "MediaStreams": [
+    {
+     "Type": "Video",
+     "Codec": "h264",
+     "IsDefault": false,
+     "IsInterlaced": false,
+     "Index": 0,
+     "Width": 1920,
+     "Height": 1080,
+     "BitDepth": 10,
+     "BitRate": 4563805,
+     "RealFrameRate": 23.976025,
+     "AverageFrameRate": 23.976025,
+     "VideoRange": "SDR",
+     "VideoRangeType": "SDR",
+     "Profile": "High 10",
+     "Level": 41,
+     "PixelFormat": "yuv420p10le"
+    },
+    {
+     "Type": "Audio",
+     "Codec": "flac",
+     "Language": "jpn",
+     "IsDefault": true,
+     "IsInterlaced": false,
+     "Index": 1,
+     "BitDepth": 24,
+     "Channels": 2,
+     "ChannelLayout": "stereo",
+     "BitRate": 1368067,
+     "VideoRange": "Unknown",
+     "VideoRangeType": "Unknown",
+     "SampleRate": 48000
+    }
+   ],
+   "Chapters": [
+    {
+     "StartPositionTicks": 0,
+     "Name": "Chapter 1"
+    },
+    {
+     "StartPositionTicks": 900070000,
+     "Name": "Chapter 2"
+    },
+    {
+     "StartPositionTicks": 7040370000,
+     "Name": "Chapter 3"
+    },
+    {
+     "StartPositionTicks": 13299950000,
+     "Name": "Chapter 4"
+    },
+    {
+     "StartPositionTicks": 14200020000,
+     "Name": "Chapter 5"
+    }
+   ]
+  },
+  {
+   "Name": "Fixture Movie 3",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "3282307a-d805-60f8-3e46-a3022f90087e",
+   "RunTimeTicks": 65879110000,
+   "Container": "mkv",
+   "Path": "/media/fixtures/movie-3.mkv",
+   "Type": "Movie",
+   "IsFolder": false,
+   "MediaType": "Video",
+   "LocationType": "FileSystem",
+   "MediaSources": [
+    {
+     "Id": "3282307a-d805-60f8-3e46-a3022f90087e",
+     "Container": "mkv",
+     "Size": 2657088487,
+     "Bitrate": 3226623,
+     "RunTimeTicks": 65879110000,
+     "Path": "/media/fixtures/movie-3.mkv",
+     "Protocol": "File",
+     "Type": "Default"
+    }
+   ],
+   "MediaStreams": [
+    {
+     "Type": "Video",
+     "Codec": "av1",
+     "Language": "eng",
+     "IsDefault": true,
+     "IsInterlaced": false,
+     "Index": 0,
+     "Width": 1920,
+     "Height": 1080,
+     "BitDepth": 10,
+     "BitRate": 2899738,
+     "RealFrameRate": 23.976025,
+     "AverageFrameRate": 23.976025,
+     "VideoRange": "SDR",
+     "VideoRangeType": "SDR",
+     "Profile": "Main",
+     "Level": 9,
+     "PixelFormat": "yuv420p10le"
+    },
+    {
+     "Type": "Audio",
+     "Codec": "opus",
+     "Language": "eng",
+     "IsDefault": true,
+     "IsInterlaced": false,
+     "Index": 1,
+     "Channels": 2,
+     "ChannelLayout": "stereo",
+     "BitRate": 320000,
+     "VideoRange": "Unknown",
+     "VideoRangeType": "Unknown",
+     "SampleRate": 48000
+    }
+   ],
+   "Chapters": []
+  },
+  {
+   "Name": "Fixture Movie 4",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "a57a957c-1ae6-5318-4137-e200281aa5af",
+   "RunTimeTicks": 67705920000,
+   "Container": "mkv",
+   "Path": "/media/fixtures/movie-4.mkv",
+   "Type": "Movie",
+   "IsFolder": false,
+   "MediaType": "Video",
+   "LocationType": "FileSystem",
+   "MediaSources": [
+    {
+     "Id": "a57a957c-1ae6-5318-4137-e200281aa5af",
+     "Container": "mkv",
+     "Size": 10063287102,
+     "Bitrate": 11890584,
+     "RunTimeTicks": 67705920000,
+     "Path": "/media/fixtures/movie-4.mkv",
+     "Protocol": "File",
+     "Type": "Default"
+    }
+   ],
+   "MediaStreams": [
+    {
+     "Type": "Video",
+     "Codec": "hevc",
+     "Language": "eng",
+     "IsDefault": true,
+     "IsInterlaced": false,
+     "Index": 0,
+     "Width": 1920,
+     "Height": 1080,
+     "BitDepth": 10,
+     "BitRate": 14016655,
+     "RealFrameRate": 23.976025,
+     "AverageFrameRate": 23.976025,
+     "VideoRange": "SDR",
+     "VideoRangeType": "SDR",
+     "Profile": "Main 10",
+     "Level": 120,
+     "PixelFormat": "yuv420p10le"
+    },
+    {
+     "Type": "Audio",
+     "Codec": "truehd",
+     "Language": "eng",
+     "IsDefault": true,
+     "IsInterlaced": false,
+     "Index": 1,
+     "BitDepth": 24,
+     "Channels": 6,
+     "ChannelLayout": "5.1",
+     "BitRate": 1684268,
+     "VideoRange": "Unknown",
+     "VideoRangeType": "Unknown",
+     "SampleRate": 48000
+    },
+    {
+     "Type": "Audio",
+     "Codec": "ac3",
+     "Language": "eng",
+     "IsDefault": false,
+     "IsInterlaced": false,
+     "Index": 2,
+     "Channels": 6,
+     "ChannelLayout": "5.1",
+     "BitRate": 640000,
+     "VideoRange": "Unknown",
+     "VideoRangeType": "Unknown",
+     "SampleRate": 48000
+    }
+   ],
+   "Chapters": [
+    {
+     "StartPositionTicks": 0,
+     "Name": "Chapter 1"
+    },
+    {
+     "StartPositionTicks": 2237650000,
+     "Name": "Chapter 2"
+    },
+    {
+     "StartPositionTicks": 4223380000,
+     "Name": "Chapter 3"
+    },
+    {
+     "StartPositionTicks": 6345080000,
+     "Name": "Chapter 4"
+    },
+    {
+     "StartPositionTicks": 9581230000,
+     "Name": "Chapter 5"
+    },
+    {
+     "StartPositionTicks": 11477710000,
+     "Name": "Chapter 6"
+    }
+   ]
+  },
+  {
+   "Name": "Fixture Episode (missing)",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "9dcf7a71-56f7-1431-f94d-63ec6d240e42",
+   "Type": "Episode",
+   "IsFolder": false,
+   "MediaType": "Video",
+   "LocationType": "Virtual",
+   "SeriesName": "Fixture Series",
+   "MediaStreams": [],
+   "Chapters": []
+  }
+ ],
+ "TotalRecordCount": 5,
+ "StartIndex": 0
+}

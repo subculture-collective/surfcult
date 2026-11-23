@@ -11,11 +11,18 @@ struct Migration {
 /// Every migration, in order. To change the schema, add a file to
 /// `migrations/` with the next number and add one line here. Never edit a
 /// migration that has shipped.
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "schedule",
-    sql: include_str!("../../migrations/0001_schedule.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "schedule",
+        sql: include_str!("../../migrations/0001_schedule.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "library_cache",
+        sql: include_str!("../../migrations/0002_library_cache.sql"),
+    },
+];
 
 /// Applies the migrations the database has not seen yet. Each one runs in its
 /// own transaction together with its `schema_migrations` row, so a failure

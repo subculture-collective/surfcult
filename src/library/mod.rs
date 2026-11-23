@@ -3,9 +3,11 @@
 //! [`MediaItem`] describes one playable item. [`MediaSource`] lists and
 //! resolves items without saying where they come from: Jellyfin is the first
 //! real source, and [`FakeMediaSource`] stands in for it in tests. The trait is
-//! synchronous; a network-backed source can run on a blocking thread.
+//! synchronous; a network-backed source can run on a blocking thread. The
+//! [`jellyfin`] module is the Jellyfin source and its SQLite cache.
 
 mod fake;
+pub mod jellyfin;
 mod model;
 mod source;
 
