@@ -77,6 +77,39 @@ The test scripts are in `tools/pi-spike/`. Copy them to `~/spike/` on the Pi to 
 
 The Pi's CEC adapter works (`cec-ctl -d /dev/cec0`), but the TV does not answer it. Turn on HDMI-CEC in the TV's settings (the name varies by brand, for example Anynet+, Bravia Sync or Simplink) and rerun `cec-ctl -d /dev/cec0 --playback --show-topology`; the TV should appear at logical address 0. Remote keys then arrive as input events on `/dev/input/event2`.
 
+## Updates: the Pi pulls the newest main build
+
+GitHub's job builds the aarch64 binary on every push to `main` and keeps it as the `surfcult-aarch64` artifact for 90 days, with its SHA-256. A timer on the Pi (`surfcult-updater.timer`, every 10 minutes) runs `/usr/local/sbin/surfcult-update`, which:
+
+1. asks GitHub for the newest successful push run of `pr-ci.yml` on `main`, and stops if that commit is already installed or failed on this Pi before;
+2. downloads the artifact (the token goes to GitHub only, not to the signed download URL) and checks the file list, the checksum and that it is a 64-bit aarch64 ELF;
+3. runs it once as the `nobody` user as a smoke test, then installs it as `/opt/surfcult/releases/<commit>/surfcult` and points `/opt/surfcult/current` at it, keeping the old target as `previous`;
+4. restarts `surfcult.service` if that unit exists, and rolls back to `previous` if the unit is not active afterwards. A build that failed is listed in `/opt/surfcult/failed` and not retried.
+
+It keeps the newest three releases. Nothing is built on the Pi.
+
+Install or update the updater from a checkout of this repository (`deploy/pi/`): `sudo ./install.sh`. It does nothing until a token exists.
+
+The token must be read-only and limited to this repository: a fine-grained GitHub token with only `Actions: read` and `Contents: read` on `subculture-collective/surfcult`, and an expiry. GitHub serves Actions artifacts only to signed-in callers, even for a public repository. Put it on the Pi without putting it on a command line:
+
+```bash
+ssh surfcult 'sudo install -m 600 -o root -g root /dev/stdin /etc/surfcult-updater/token' < token-file
+```
+
+Do not reuse a broader token. A classic token that can read private repositories or write is not acceptable on this device. Rotate by replacing the file; the next run uses it.
+
+Operate:
+
+```bash
+sudo systemctl start surfcult-updater      # check now
+journalctl -u surfcult-updater -n 20       # what it did
+ls -l /opt/surfcult/current                # which commit is installed
+```
+
+To pin a build and stop updates: `sudo systemctl disable --now surfcult-updater.timer`. To go back by hand: `sudo ln -sfn releases/<commit> /opt/surfcult/current` and restart the service. The tests are `make updater-test`.
+
+The smoke test runs the binary with no arguments and expects its usage text. Change it when the binary gains a `--version` or a health command.
+
 ## Verify
 
 ```bash
@@ -89,4 +122,5 @@ Expected: hostname `surfcult`, `eth0` on `10.0.0.53/24`, MPV 0.40, `throttled=0x
 
 - Packages: `sudo apt-get remove mpv ffmpeg git cec-utils socat jq`, then `sudo apt-get autoremove`.
 - Sudo rule: see above.
+- Updater: `sudo systemctl disable --now surfcult-updater.timer`, then `sudo rm -rf /usr/local/sbin/surfcult-update /etc/systemd/system/surfcult-updater.* /opt/surfcult /etc/surfcult-updater` and `sudo systemctl daemon-reload`. Revoke the token on GitHub.
 - Test media: `rm -rf ~/spike` on the Pi.

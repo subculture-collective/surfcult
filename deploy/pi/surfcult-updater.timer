@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for a new surfcult build
+
+[Timer]
+OnBootSec=3min
+OnUnitInactiveSec=10min
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

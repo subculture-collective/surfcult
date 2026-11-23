@@ -2,6 +2,9 @@ name: PR CI
 
 on:
   pull_request:
+  # A push to main rebuilds so the Pi's updater has an artifact for the merged commit.
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -40,12 +43,17 @@ jobs:
         run: cargo build --locked --release
       - name: Check that it is an aarch64 executable
         run: file target/release/surfcult | tee /dev/stderr | grep -q 'ARM aarch64'
+      - name: Write the checksum the Pi's updater verifies
+        run: cd target/release && sha256sum surfcult > surfcult.sha256
       - uses: actions/upload-artifact@v7
         with:
           name: surfcult-aarch64
-          path: target/release/surfcult
+          path: |
+            target/release/surfcult
+            target/release/surfcult.sha256
           if-no-files-found: error
-          retention-days: 14
+          # Long enough that a Pi that was off for a few weeks still finds the latest build.
+          retention-days: 90
 
   ci-gate:
     name: CI gate
