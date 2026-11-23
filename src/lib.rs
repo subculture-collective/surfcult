@@ -1,4 +1,5 @@
 pub mod library;
+pub mod timeline;
 
 pub fn greet(name: &str) -> String {
     let trimmed = name.trim();
