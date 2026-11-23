@@ -1,0 +1,16 @@
+[Unit]
+Description=Install the newest surfcult build from GitHub Actions
+After=network-online.target time-sync.target
+Wants=network-online.target
+# Does nothing until the read-only GitHub token is in place.
+ConditionPathExists=/etc/surfcult-updater/token
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/surfcult-update
+Nice=10
+ProtectSystem=strict
+ReadWritePaths=/opt/surfcult
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
