@@ -1,3 +1,4 @@
+pub mod config;
 pub mod library;
 
 pub fn greet(name: &str) -> String {
