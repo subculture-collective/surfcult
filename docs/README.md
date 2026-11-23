@@ -7,6 +7,7 @@
 - `reference/jellyfin.md`: the Jellyfin source: endpoints, the auth header, key sources, the SQLite cache and failed syncs
 - `reference/clips.md`: local clip pools, ffprobe durations, what is skipped and why
 - `reference/schedule.md`: how the schedule generator orders items, resumes and persists
+- `reference/tuner.md`: the tune-in sequence, clip choice, break stand-in, late-start seek and how the tuner is driven
 - `runbooks/raspberry-pi.md`: reaching and operating the Pi 4B TV box
 - `research/2026-11-22-pi-playback-spike.md`: Phase 0 results: decode, Jellyfin tune time, overlay cost
 - `../tools/pi-spike/`: the scripts behind those measurements
