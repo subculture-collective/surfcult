@@ -14,7 +14,7 @@ Goals:
 
 - Channel changes join the broadcast in progress. A show never restarts because someone switched away and back.
 - Every channel has one deterministic timeline, so the guide, the screen and a restart all agree.
-- Runs on a Raspberry Pi 4 or 5 with no transcoding on the Pi.
+- Runs on a Raspberry Pi 4B (2 GB) with no transcoding on the Pi.
 - Works with a half-converted library: H.265 plays directly, anything else still plays.
 - Operated with a remote control alone.
 
@@ -33,7 +33,8 @@ Anti-goals (a failure even if it works):
 
 ## Constraints
 
-- Hardware: Raspberry Pi 4 or 5. Both decode H.265 in hardware; the Pi 5 has no H.264 hardware decoder, so H.264 there is decoded in software. Both points need checking on the real device (see Risks).
+- Hardware: the target is the owner's Raspberry Pi 4B with 2 GB of RAM. It should decode H.265 and H.264 in hardware; this needs checking on the device (see Risks). A Pi 5 has no H.264 hardware decoder, so it is untested and not a v1 target. With 2 GB, MPV caches stay small and nothing else heavy runs on the box.
+- Display: the TV is 4K, but most of the library is 1080p. v1 outputs 1080p and lets the TV upscale, which keeps the overlay bitmaps and compositing cheap on a Pi 4. 4K output is a later option.
 - Library: mostly H.265, with Tdarr converting the rest. Tdarr replaces files in place, so a file's duration can change after it was scheduled.
 - Network: the Pi reaches Jellyfin over the LAN. "Offline" here means no internet. It does not mean no LAN.
 - Secrets: the Jellyfin API key comes from the environment or a secret file. It never goes in the repository, a URL or a log.
@@ -179,20 +180,24 @@ No telemetry. The admin server is localhost-only unless configured, with optiona
 - `timeline` and `schedule` are pure and carry most of the tests: position lookup, the look-ahead seek, grid fill, break fill, DST days, determinism for a fixed seed, and regeneration freezing the next 30 minutes.
 - Jellyfin and MPV sit behind traits with fakes, so the tuner state machine runs in tests without hardware.
 - A few integration tests run against a real MPV and a recorded Jellyfin response.
-- Hardware tests on a Pi 4 and a Pi 5: hardware decoding, tune time, long-duration playback, restart recovery, network loss.
+- Hardware tests on the Pi 4B: hardware decoding, tune time, long-duration playback, restart recovery, network loss.
 
 ## Risks to check early
 
-- Hardware H.265 decode through MPV on the Pi 4 and Pi 5, including 10-bit.
+- Hardware H.265 and H.264 decode through MPV on the Pi 4B, including 10-bit.
 - Tune time over HTTP seeks and over a Jellyfin transcode.
 - CPU cost of bitmap overlays for the guide.
 - Whether Jellyfin keeps an item's id when Tdarr replaces its file.
 - Reading remote and HDMI-CEC input without a desktop session.
 
-## Inputs still needed from the owner
+## Owner inputs and the assumptions they led to
 
-- Which Pi (4 or 5, how much memory) is available for the Phase 0 spike. Every hardware claim above stays unverified until it runs on one.
-- The TV and library characteristics: TV resolution, whether the library has 4K, HDR or Dolby Vision, 10-bit video, and DTS, TrueHD or Atmos audio, and whether audio goes over HDMI only. These set the device profile sent to Jellyfin and how often the slow transcode path is used.
+Confirmed by the owner: a Raspberry Pi 4B with 2 GB for the Phase 0 spike; a 4K TV; a library that is mostly 1080p (the owner's recollection, not measured).
+
+Assumptions made from that, to be replaced by measurements:
+
+- The device profile sent to Jellyfin allows H.264 and H.265 up to 1080p, 8 and 10-bit SDR, and the audio codecs AAC, MP3, FLAC, Opus, AC3, E-AC3 and DTS. Anything else (4K, HDR or Dolby Vision video; TrueHD or Atmos audio) is handled by a Jellyfin transcode, which the tune-in clip hides. Audio goes out over HDMI, downmixed to stereo by default and configurable.
+- Phase 0 starts by querying the Jellyfin library for codec, resolution, bit depth, HDR and audio-codec counts. If more than a small share needs a transcode, the profile and the Phase 0 thresholds are revisited before Phase 1.
 
 ## Left to the builder
 
