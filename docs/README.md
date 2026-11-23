@@ -4,6 +4,7 @@
 - `superpowers/specs/2026-11-22-surfcult-design.md`: the current design (draft, awaiting approval)
 - `reference/stack.md`: tools, versions and commands for this stack
 - `reference/storage.md`: the SQLite tables, the cursor format and the migration rule
+- `reference/clips.md`: local clip pools, ffprobe durations, what is skipped and why
 - `runbooks/raspberry-pi.md`: reaching and operating the Pi 4B TV box
 - `research/2026-11-22-pi-playback-spike.md`: Phase 0 results: decode, Jellyfin tune time, overlay cost
 - `../tools/pi-spike/`: the scripts behind those measurements
