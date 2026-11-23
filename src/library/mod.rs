@@ -9,6 +9,7 @@
 mod fake;
 pub mod jellyfin;
 mod model;
+pub mod profile;
 mod source;
 
 pub use fake::FakeMediaSource;
