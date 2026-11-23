@@ -1,6 +1,7 @@
 pub mod clips;
 pub mod config;
 pub mod library;
+pub mod schedule;
 pub mod store;
 pub mod timeline;
 
