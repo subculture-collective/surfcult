@@ -128,9 +128,9 @@ An IPC call takes 20 to 27 ms, so 60 updates per second cannot be reached throug
 
 ## Audio, CEC and input
 
-- Audio over HDMI: MPV opens the ALSA device `plughw:CARD=vc4hdmi0,DEV=0` as stereo 16-bit and plays without errors. Whether sound is audible was not checked.
-- CEC: the adapter (`vc4-hdmi-0`) works and the Pi registers as Playback Device 1 at physical address 1.0.0.0. The TV does not acknowledge any CEC message, so HDMI-CEC is probably disabled in the TV's settings. Until it is enabled, CEC remote keys cannot be tested.
-- Input without a desktop: the CEC adapter appears as a keyboard input device (`/dev/input/event2`), and `patrick` can read it through the `input` group. No key presses were captured.
+- Audio over HDMI: MPV opens the ALSA device `plughw:CARD=vc4hdmi0,DEV=0` as stereo and plays without errors. On a second TV (2026-11-23) the owner confirmed both picture and sound from a 14-second film clip decoded in hardware.
+- CEC: the adapter (`vc4-hdmi-0`) works. The first TV never answered, because HDMI-CEC was off. The second TV answered at once: it showed the TV, an audio system and the Pi in the topology.
+- Input without a desktop: the CEC adapter appears as a keyboard input device that `patrick` can read through the `input` group. Its number changes between boots (`event2`, then `event0`), so find it by the name `vc4-hdmi-0`. Remote keys arrived: up, down, left, right, channel up, channel down and OK (`KEY_OK`, code 352). Number keys, Back, Menu and volume were not seen; they may not have been pressed, and volume normally goes to the audio system.
 
 ## Jellyfin details the client needs
 
@@ -142,7 +142,7 @@ An IPC call takes 20 to 27 ms, so 60 updates per second cannot be reached throug
 ## Still open
 
 - Whether Jellyfin keeps an item's id when Tdarr replaces its file. It would need a file to be replaced.
-- Whether sound is audible, and CEC and remote keys, once CEC is enabled on the TV.
+- Number keys, Back and Menu from the remote, which were not seen in the one recording.
 - Long-duration playback, restart recovery and network loss.
 - The 4K HDR tune of 13 to 25 s, if those 16 items matter.
 

@@ -77,7 +77,9 @@ The test scripts are in `tools/pi-spike/`. Copy them to `~/spike/` on the Pi to 
 
 ## CEC and the remote
 
-The Pi's CEC adapter works (`cec-ctl -d /dev/cec0`), but the TV does not answer it. Turn on HDMI-CEC in the TV's settings (the name varies by brand, for example Anynet+, Bravia Sync or Simplink) and rerun `cec-ctl -d /dev/cec0 --playback --show-topology`; the TV should appear at logical address 0. Remote keys then arrive as input events on `/dev/input/event2`.
+The Pi's CEC adapter works (`cec-ctl -d /dev/cec0`). Check it with `cec-ctl -d /dev/cec0 --playback --show-topology`: the TV should appear at logical address 0. On the first TV tried, HDMI-CEC was off in the TV's settings (the name varies by brand, for example Anynet+, Bravia Sync or Simplink) and the TV never answered. On the second TV it worked at once: the TV, an audio system at `1.0.0.0` and the Pi at `2.0.0.0` all showed.
+
+Remote keys arrive as Linux input events from the input device named `vc4-hdmi-0`. Find it by that name: its number changed between boots (`event2`, then `event0`). Read it with `patrick`'s `input` group; no desktop session is needed. On 2026-11-23 these keys arrived: up, down, left, right, channel up, channel down and OK (reported as `KEY_OK`, code 352). Number keys, Back, Menu and volume were not seen: they may not have been pressed, and volume normally goes to the audio system, not the Pi. If keys do not arrive, send `cec-ctl -d /dev/cec0 --active-source phys-addr=PHYSICAL_ADDRESS` so the TV treats the Pi as the source.
 
 ## Updates: the Pi pulls the newest main build
 

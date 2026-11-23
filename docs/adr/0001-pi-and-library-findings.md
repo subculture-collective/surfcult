@@ -51,4 +51,4 @@ Other facts that matter:
 - The tuner and player issues (#19, #22, #23) build on a queue-behind-the-clip sequence and need tests for a late program and a slow transcode. The design's "loaded paused" wording is replaced.
 - The Jellyfin issues (#18, #21) send the header form above, never put the key in a URL or process arguments, and build a transcode URL with `StartTimeTicks`.
 - The device profile in code follows decision 3, not the original design text.
-- Sound over HDMI, CEC and remote keys, whether Jellyfin keeps an item's id when Tdarr replaces its file, and long-duration and network-loss behaviour are not covered by this record. HDMI-CEC is off on the owner's TV, so remote keys cannot be tested until it is on.
+- Whether Jellyfin keeps an item's id when Tdarr replaces its file, and long-duration and network-loss behaviour, are not covered by this record. HDMI sound and CEC remote keys (arrows, OK, channel up and down) were confirmed afterwards on a second TV; see the runbook.
