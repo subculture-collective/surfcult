@@ -16,6 +16,7 @@ Observed 2026-11-22. Live state overrides this page.
 | SSH user | `patrick` |
 | SSH key | `~/.ssh/id_ed25519` on the operator's machine |
 | SSH host key | `SHA256:IgxEOAh0rjwSI3R3zltUuqz3gOnISidsbygwaIqwSaU` (ed25519) |
+| Tailscale | `100.108.254.88`, `surfcult.mooneye-mintaka.ts.net` (owner `onnwee@`; the address can change if the device is removed and rejoined) |
 | Estate inventory | `surfcult` in `estate-config` `inventory/hosts.yaml` |
 
 DHCP is owned by Volga (`10.0.0.1`). Both reservations are keyed by the interface MACs, which are not recorded here. Wired wins when both are up (default route metric 100 against 600).
@@ -45,7 +46,8 @@ If the login is refused with "Permission denied (publickey)", the user or key is
 ## What is installed
 
 - Installed: `mpv` 0.40, `ffmpeg` 7.1, `git`, `cec-utils`, `socat`, `jq`, plus the image's `v4l-utils`.
-- Not installed on purpose: Rust (CI builds the aarch64 binary), Docker, Tailscale.
+- Also installed: Tailscale 1.104.7, Node.js 20.19.2 and npm (from Debian), and the T3 CLI in `~/.local` (see below).
+- Not installed on purpose: Rust (CI builds the aarch64 binary), Docker, mise, and the agent CLIs (Codex, Claude). T3 on the Pi therefore logs agent health-check warnings.
 - `patrick` has passwordless sudo through `/etc/sudoers.d/010-patrick-nopasswd`, added 2026-11-22 at the owner's request. Remove it with `sudo rm /etc/sudoers.d/010-patrick-nopasswd`.
 - `patrick` is in the `video`, `render` and `input` groups, so MPV can use the display and the remote without a desktop session.
 
@@ -110,6 +112,23 @@ To pin a build and stop updates: `sudo systemctl disable --now surfcult-updater.
 
 The smoke test runs the binary with no arguments and expects its usage text. Change it when the binary gains a `--version` or a health command.
 
+## Tailscale and the T3 server
+
+Tailscale joined with `sudo tailscale up --accept-dns=false --operator=patrick --hostname=surfcult`, the flags the other headless hosts use. Subnet routes are not accepted, so the Pi's LAN routing is untouched. Because MagicDNS is not used, a machine that wants the name `surfcult.mooneye-mintaka.ts.net` needs an `/etc/hosts` line for `100.108.254.88`.
+
+T3 runs as the user service `t3code.service` for `patrick` (lingering is on, so it survives logout). It listens on `127.0.0.1:3773` only. Tailscale Serve proxies HTTPS 443 and HTTP 3775 to it, bound to the tailnet addresses, so nothing answers on `10.0.0.53`.
+
+The Pi has 1.8 GiB of RAM and its job is video, so T3 is set to yield. The drop-in `~/.config/systemd/user/t3code.service.d/10-surfcult.conf` sets `CPUWeight=20`, `IOWeight=20`, `MemoryLow=0` and `OOMScoreAdjust=500`. T3's own unit asks for `MemoryLow=1536M`, and `t3 service protect` shields T3 from agents under memory pressure; neither suits this device, so do not apply them. T3 uses about 410 MB resident.
+
+Update T3 with `t3 update` on the Pi, or reinstall with `npm install -g --prefix ~/.local t3@VERSION` and `t3 service install`. Use the version the rest of the fleet runs. Check it with:
+
+```bash
+ssh surfcult 'export PATH=$HOME/.local/bin:$PATH; t3 --version; systemctl --user is-active t3code.service; tailscale serve status'
+curl -s -o /dev/null -w '%{http_code}\n' --resolve surfcult.mooneye-mintaka.ts.net:443:100.108.254.88 https://surfcult.mooneye-mintaka.ts.net/api/orchestration/shell   # 401 without credentials
+```
+
+Another T3 environment links to it with a pairing code from `t3 pair --ttl 10m` on the Pi, passed over stdin: `printf '%s %s\n' https://surfcult.mooneye-mintaka.ts.net CODE | t3 environment link --from - --access full-access`. Linked environments must be on (`linkedEnvironmentsEnabled` in `~/.t3/userdata/settings.json`). Revoke a link under Settings, Sharing and access, or with `t3 environment unlink surfcult` on the linking machine. A pairing code is a credential: keep it out of command lines and logs.
+
 ## Verify
 
 ```bash
@@ -123,4 +142,5 @@ Expected: hostname `surfcult`, `eth0` on `10.0.0.53/24`, MPV 0.40, `throttled=0x
 - Packages: `sudo apt-get remove mpv ffmpeg git cec-utils socat jq`, then `sudo apt-get autoremove`.
 - Sudo rule: see above.
 - Updater: `sudo systemctl disable --now surfcult-updater.timer`, then `sudo rm -rf /usr/local/sbin/surfcult-update /etc/systemd/system/surfcult-updater.* /opt/surfcult /etc/surfcult-updater` and `sudo systemctl daemon-reload`. Revoke the token on GitHub.
+- T3 and Tailscale: `t3 environment unlink surfcult` on the linking machine. On the Pi: `tailscale serve --https=443 off`, `tailscale serve --http=3775 off`, `t3 service uninstall`, `t3 uninstall`, `rm -rf ~/.t3 ~/.config/systemd/user/t3code.service.d`, `sudo loginctl disable-linger patrick`, `sudo tailscale logout`, `sudo apt-get remove tailscale nodejs npm`. Delete the `surfcult` machine in the Tailscale admin console.
 - Test media: `rm -rf ~/spike` on the Pi.
