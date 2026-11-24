@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use super::{Overlay, Player, PlayerError, PlayerEvent};
 use crate::library::MediaId;
+use crate::overlay::Banner;
 
 /// A clock that only moves when a test moves it. Clones share the time, so
 /// the test keeps one and gives another to the [`FakePlayer`].
@@ -36,6 +37,11 @@ pub enum Command {
         media_id: MediaId,
         start_ms: u64,
     },
+    PlayProgram {
+        media_id: MediaId,
+        start_ms: u64,
+    },
+    QueueClip(PathBuf),
     Seek(u64),
     Stop,
     /// The overlay's place and size; the pixels are not recorded.
@@ -47,6 +53,8 @@ pub enum Command {
         height: u32,
     },
     ClearOverlay(u8),
+    ShowBanner(Banner),
+    ClearBanner,
 }
 
 /// A command and the virtual time it was issued.
@@ -146,6 +154,17 @@ impl Player for FakePlayer {
         })
     }
 
+    fn play_program(&mut self, media: &MediaId, start_ms: u64) -> Result<(), PlayerError> {
+        self.record(Command::PlayProgram {
+            media_id: media.clone(),
+            start_ms,
+        })
+    }
+
+    fn queue_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
+        self.record(Command::QueueClip(path.to_path_buf()))
+    }
+
     fn seek(&mut self, position_ms: u64) -> Result<(), PlayerError> {
         self.record(Command::Seek(position_ms))
     }
@@ -168,6 +187,14 @@ impl Player for FakePlayer {
         self.record(Command::ClearOverlay(id))
     }
 
+    fn show_banner(&mut self, banner: &Banner) -> Result<(), PlayerError> {
+        self.record(Command::ShowBanner(banner.clone()))
+    }
+
+    fn clear_banner(&mut self) -> Result<(), PlayerError> {
+        self.record(Command::ClearBanner)
+    }
+
     fn poll_event(&mut self) -> Option<PlayerEvent> {
         self.events.pop_front()
     }
@@ -186,6 +213,8 @@ mod tests {
         clock.set(1_500);
         player.play_clip(Path::new("/clips/a.mp4")).unwrap();
         player.queue_program(&MediaId::new("m"), 4_000).unwrap();
+        player.play_program(&MediaId::new("n"), 5_000).unwrap();
+        player.queue_clip(Path::new("/clips/b.mp4")).unwrap();
         player.seek(9_000).unwrap();
         player.stop().unwrap();
         let overlay = Overlay {
@@ -197,6 +226,14 @@ mod tests {
         };
         player.show_overlay(3, &overlay).unwrap();
         player.clear_overlay(3).unwrap();
+        let banner = Banner {
+            number: 3,
+            name: "CARTOONS".into(),
+            title: "Show".into(),
+            times: "19:00–19:30".into(),
+        };
+        player.show_banner(&banner).unwrap();
+        player.clear_banner().unwrap();
         let expected = [
             (1_000, Command::ShowStatic),
             (1_000, Command::ShowStandby),
@@ -208,6 +245,14 @@ mod tests {
                     start_ms: 4_000,
                 },
             ),
+            (
+                1_500,
+                Command::PlayProgram {
+                    media_id: MediaId::new("n"),
+                    start_ms: 5_000,
+                },
+            ),
+            (1_500, Command::QueueClip(PathBuf::from("/clips/b.mp4"))),
             (1_500, Command::Seek(9_000)),
             (1_500, Command::Stop),
             (
@@ -221,6 +266,8 @@ mod tests {
                 },
             ),
             (1_500, Command::ClearOverlay(3)),
+            (1_500, Command::ShowBanner(banner)),
+            (1_500, Command::ClearBanner),
         ];
         let issued: Vec<_> = player
             .issued()

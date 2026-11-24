@@ -1,9 +1,12 @@
 pub mod clips;
 pub mod config;
 pub mod guide;
+pub mod input;
 pub mod jellyfin;
 pub mod library;
+pub mod overlay;
 pub mod player;
+pub mod run;
 pub mod schedule;
 pub mod server;
 pub mod store;

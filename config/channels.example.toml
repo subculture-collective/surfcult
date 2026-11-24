@@ -4,6 +4,10 @@
 # IANA time zone name. Grids and time-of-day blocks use it.
 timezone = "America/Chicago"
 
+# The interstitial pool the tune-in clips come from when the viewer changes
+# channel (optional; the default is "tune-in"). A pool named here must exist.
+tune_in_pool = "tune-in"
+
 # A channel with one source and one mode.
 # mode: sequential | shuffle | weighted | blocks
 [[channel]]

@@ -81,6 +81,36 @@ The Pi's CEC adapter works (`cec-ctl -d /dev/cec0`). Check it with `cec-ctl -d /
 
 Remote keys arrive as Linux input events from the input device named `vc4-hdmi-0`. Find it by that name: its number changed between boots (`event2`, then `event0`). Read it with `patrick`'s `input` group; no desktop session is needed. On 2026-11-23 these keys arrived: up, down, left, right, channel up, channel down and OK (reported as `KEY_OK`, code 352). Number keys, Back, Menu and volume were not seen: they may not have been pressed, and volume normally goes to the audio system, not the Pi. If keys do not arrive, send `cec-ctl -d /dev/cec0 --active-source phys-addr=PHYSICAL_ADDRESS` so the TV treats the Pi as the source.
 
+## Run the TV
+
+`surfcult run` is the TV: remote, channel changes, schedules, MPV and the banner ([run reference](../reference/run.md)). Until the boot-time service exists (issue #36), start it by hand over SSH. Nothing else may hold the display: stop any MPV left from a test first.
+
+1. Get the binary. The updater installs each `main` build as `/opt/surfcult/current/surfcult` (see Updates below). Without the updater, copy the `surfcult-aarch64` artifact of a `main` run to the Pi. Do not build on the Pi.
+2. Put a `channels.toml` and the clip pools on the Pi. Every `[[interstitial_pool]]` path must exist and hold clips, at least the tune-in pool (`tune_in_pool`, default `tune-in`). The example config uses `/var/lib/surfcult/clips/<pool>`. Check the file with `surfcult check-config`.
+3. Check the clock: `timedatectl show -p NTPSynchronized --value` must print `yes`, or schedules are not written.
+4. Start it. The paths below are examples; the key file is the one from the playback checks.
+
+```bash
+ssh surfcult
+export SURFCULT_JELLYFIN_URL=http://10.0.0.200:8096
+export SURFCULT_JELLYFIN_API_KEY_FILE=$HOME/spike/.jf-key
+# export SURFCULT_JELLYFIN_USER_ID=<user id>   # optional; else the first enabled user
+/opt/surfcult/current/surfcult check-config ~/surfcult/channels.toml
+/opt/surfcult/current/surfcult run ~/surfcult/channels.toml ~/surfcult/surfcult.db
+```
+
+On the first start the library cache is empty, so every channel is logged as unresolvable and shows the stand-by card until the first library sync is written; then the schedules are filled and the tuned channel starts playing. Logs go to the terminal, each line starting `surfcult:`.
+
+Use the TV remote: up or channel up for the next channel, down or channel down for the previous one, OK for the banner. If no key arrives, see CEC and the remote above. Stop with Ctrl-C, or Q on a USB keyboard; both stop the transcodes and MPV. Closing the SSH session stops it too.
+
+Check what the TV shows against the schedule from a second SSH session:
+
+```bash
+/opt/surfcult/current/surfcult now ~/surfcult/channels.toml ~/surfcult/surfcult.db
+```
+
+Each line has the channel, the program on now, its start and end, and the position the TV should be at.
+
 ## Updates: the Pi pulls the newest main build
 
 GitHub's job builds the aarch64 binary on every push to `main` and keeps it as the `surfcult-aarch64` artifact for 90 days, with its SHA-256. A timer on the Pi (`surfcult-updater.timer`, every 10 minutes) runs `/usr/local/sbin/surfcult-update`, which:

@@ -54,8 +54,10 @@ impl ApiKey {
     }
 
     /// The only place the key leaves this type: the value of the
-    /// `Authorization` header Jellyfin 12 accepts.
-    pub(super) fn authorization_header(&self) -> String {
+    /// `Authorization` header Jellyfin 12 accepts. The client sends it, and
+    /// the run loop's stream resolver gives it to MPV as an HTTP header.
+    /// Never log it or put it in a URL or a command line.
+    pub fn authorization_header(&self) -> String {
         format!("MediaBrowser Token=\"{}\"", self.0)
     }
 

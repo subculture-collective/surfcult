@@ -80,6 +80,7 @@
 //! position rather than where it was when MPV died. Commands sent while MPV
 //! is down fail with a [`PlayerError`].
 
+mod banner;
 mod card;
 mod glitch;
 mod ipc;
@@ -101,6 +102,7 @@ use super::{
 };
 use crate::config::Display;
 use crate::library::MediaId;
+use crate::overlay::Banner;
 use glitch::{Flicker, Glitch, Step};
 use ipc::{IpcError, Session};
 
@@ -619,6 +621,15 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
         self.with_session(|s| s.queue_program(&stream, start_ms))
     }
 
+    fn play_program(&mut self, media: &MediaId, start_ms: u64) -> Result<(), PlayerError> {
+        let stream = self.resolver.stream(media, start_ms)?;
+        self.with_session(|s| s.play_program(&stream, start_ms))
+    }
+
+    fn queue_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
+        self.with_session(|s| s.queue_clip(path))
+    }
+
     fn seek(&mut self, position_ms: u64) -> Result<(), PlayerError> {
         self.with_session(|s| s.seek(position_ms))
     }
@@ -657,6 +668,15 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
             return Err(PlayerError(format!("overlay layer {id} is not 0 to 63")));
         }
         self.with_session(|s| s.overlay_remove(id))
+    }
+
+    fn show_banner(&mut self, banner: &Banner) -> Result<(), PlayerError> {
+        let ass = banner::banner_ass(banner);
+        self.with_session(|s| s.show_banner(&ass))
+    }
+
+    fn clear_banner(&mut self) -> Result<(), PlayerError> {
+        self.with_session(Session::hide_banner)
     }
 
     fn poll_event(&mut self) -> Option<PlayerEvent> {

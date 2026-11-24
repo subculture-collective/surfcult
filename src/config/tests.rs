@@ -865,3 +865,27 @@ fn rejects_unknown_display_keys_as_a_parse_error() {
     assert!(matches!(err, ConfigError::Parse(_)), "{err:?}");
     assert!(err.to_string().contains("shader"), "{err}");
 }
+
+#[test]
+fn the_tune_in_pool_defaults_to_tune_in_and_need_not_exist() {
+    let config = Config::parse(&with_channel(PLAIN)).unwrap();
+    assert_eq!(config.tune_in_pool, "tune-in");
+    assert_eq!(config.tune_in_pool, DEFAULT_TUNE_IN_POOL);
+}
+
+#[test]
+fn a_tune_in_pool_must_name_an_interstitial_pool() {
+    let text = with_channel(PLAIN).replace(
+        "timezone = \"UTC\"",
+        "timezone = \"UTC\"\ntune_in_pool = \"ads\"",
+    );
+    assert_eq!(Config::parse(&text).unwrap().tune_in_pool, "ads");
+    let text = text.replace("tune_in_pool = \"ads\"", "tune_in_pool = \"bumpers\"");
+    assert_eq!(
+        problems(&text),
+        [Problem {
+            field: "tune_in_pool".into(),
+            message: "no interstitial_pool named \"bumpers\"".into(),
+        }]
+    );
+}

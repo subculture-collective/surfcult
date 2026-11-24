@@ -10,6 +10,7 @@
 - `reference/guide.md`: guide cells from the schedule: merging a program's segments, the window, progress
 - `reference/api.md`: the read API: endpoints, JSON shapes, the listen address and the bearer token
 - `reference/player.md`: the player and MPV: commands, the stand-by card, display filters (the CRT shader and the glitch), the Jellyfin key, events and the watchdog
+- `reference/run.md`: `surfcult run` and `surfcult now`: environment, startup, clock trust, keys, the playback driver, the banner and failure behaviour
 - `reference/tuner.md`: the tune-in sequence, clip choice, break stand-in, late-start seek, the stand-by card and how the tuner is driven
 - `runbooks/raspberry-pi.md`: reaching and operating the Pi 4B TV box
 - `research/2026-11-22-pi-playback-spike.md`: Phase 0 results: decode, Jellyfin tune time, overlay cost

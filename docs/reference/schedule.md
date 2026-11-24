@@ -86,7 +86,7 @@ A `blocks` channel lists `[[channel.block]]` entries, each with `days`, `start`,
 - A block plays its own pool in its own mode. Its first program starts at the block's start.
 - A program still on at the block's end is cut there: the event ends at the boundary and keeps the item's runtime as `media_duration_ms`. A break or clip on at that moment is cut the same way, and break clips after it are dropped. Breaks that would start at or after the block's end are not filled and do not count toward `Note::ShortBreaks`. The break rotation continues after the last break clip that was kept, and dropped clips do not count toward `repeat_after`.
 - Time no block covers plays the `default` when there is one. Otherwise it plays the channel's `filler` pool: its clips in pool order, over and over, counted from the start of the uncovered stretch, with the last clip cut at the stretch's end. Because the cycle is counted from the stretch's start, a run that resumes in the middle of it plays the same clips.
-- Such a filler stretch can last hours, unlike a break. The tuner cannot play filler clips yet, and it does not queue the next block's first program early: when filler is on as the tune-in clip ends and the next program starts more than 10 minutes later, it shows the stand-by card with `Reason::NoProgramSoon` ([tuner.md](tuner.md), "A break when the clip ends").
+- Such a filler stretch can last hours, unlike a break. The tuner does not play filler clips, and it does not queue the next block's first program early: when filler is on as the tune-in clip ends and the next program starts more than 10 minutes later, it shows the stand-by card with `Reason::NoProgramSoon` ([tuner.md](tuner.md), "A break when the clip ends"). The run loop's playback driver then plays the filler from its next clip ([run.md](run.md#the-playback-driver)).
 - With no default and no filler clip, uncovered time has no events. The tuner treats that time as a gap ([tuner.md](tuner.md), "When there is nothing to show"). `Note::DeadAir { ms }` says how much there was.
 - A block whose pool has nothing playable falls back the same way, and `Note::NoPlayableItems` is reported.
 
@@ -154,7 +154,7 @@ Each `[[interstitial_pool]]` takes two optional keys that apply when it is a cha
 
 ### Clip ids
 
-A clip's `media_id` is its canonical path as text (`schedule::clip_media_id`). Clips whose path is not valid UTF-8 are left out. The event kind tells a clip (`Break`, `Filler`, `Ident`) from a Jellyfin item (`Program`). The tuner already joins at the program after a break (`timeline::program_from`), so it plays no break clips yet.
+A clip's `media_id` is its canonical path as text (`schedule::clip_media_id`). Clips whose path is not valid UTF-8 are left out. The event kind tells a clip (`Break`, `Filler`, `Ident`) from a Jellyfin item (`Program`). The tuner joins at the program after a break (`timeline::program_from`); the run loop's playback driver plays break, filler and ident clips by this id ([run.md](run.md#the-playback-driver)).
 
 ### Determinism
 
@@ -179,9 +179,9 @@ The schedule never slips: at play time the scheduled end wins. A kept event, or 
 - **Long file** (`Fit::Long`). If the event reaches the item's scheduled end (`media_duration_ms`) and the file is longer, the event is unchanged and the file is cut at its end. A segment that ends at a break or at a block's end is cut there anyway, so it is not a mismatch.
 - A difference of up to 500 ms either way (`schedule::FIT_TOLERANCE_MS`, the tuner's late tolerance) is `Fit::Exact`: a player or probe often reports a length a few milliseconds off the library's runtime.
 - Break, filler and ident events are never fitted.
-- `schedule::record_fit(&mut store, channel, &event, fit, at_ms)` writes one playback-history row under the program's media id with the outcome `padded`, `short` (no filler clip) or `cut`, and nothing for `Fit::Exact`. It writes one row per call. The caller (#23) fits and records each program event, so a short file in a program cut by breaks writes one row for each segment it falls short in: the segment where the file ends and every later segment of that program.
+- `schedule::record_fit(&mut store, channel, &event, fit, at_ms)` writes one playback-history row under the program's media id with the outcome `padded`, `short` (no filler clip) or `cut`, and nothing for `Fit::Exact`. It writes one row per call. A caller fits and records each program event, so a short file in a program cut by breaks writes one row for each segment it falls short in: the segment where the file ends and every later segment of that program.
 
-`fit` does not change the stored schedule, and the events after it start on time. The tuner does not follow event boundaries yet, so nothing calls `fit` during playback; the playback loop on the Pi (#23) is where it belongs.
+`fit` does not change the stored schedule, and the events after it start on time. Nothing calls `fit` during playback yet. The playback driver (`src/run/driver.rs`) is where it belongs, but it needs the file's real length, which only the player knows once it has opened the file; until then a short file leaves the screen black until its event ends and a long one is cut there ([run.md](run.md#the-playback-driver)).
 
 ## Notes for later work
 

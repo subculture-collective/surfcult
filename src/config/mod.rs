@@ -23,7 +23,14 @@ pub struct Config {
     pub channels: Vec<Channel>,
     pub pools: Vec<InterstitialPool>,
     pub display: Display,
+    /// The interstitial pool the tuner draws tune-in clips from, the
+    /// top-level `tune_in_pool` key ([`DEFAULT_TUNE_IN_POOL`] when it is not
+    /// set). A pool named by the key must exist; the default need not.
+    pub tune_in_pool: String,
 }
+
+/// The tune-in pool's name when `tune_in_pool` is not set.
+pub const DEFAULT_TUNE_IN_POOL: &str = "tune-in";
 
 /// The optional `[display]` table: which display filters are on.
 #[derive(Debug, Clone, PartialEq, Eq)]

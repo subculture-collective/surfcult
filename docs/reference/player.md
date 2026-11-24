@@ -1,6 +1,6 @@
 # Player
 
-The `Player` trait in `src/player/` is the screen as the tuner sees it: show static or the stand-by card, play a local clip, queue a program, seek, stop, and show or clear an overlay. `MpvPlayer` also applies the display filters. `FakePlayer` records these for tests. `MpvPlayer` in `src/player/mpv/` sends them to a real MPV process over its JSON IPC socket.
+The `Player` trait in `src/player/` is the screen as the tuner and the run loop see it: show static or the stand-by card, play or queue a local clip, play or queue a program, seek, stop, show or clear an overlay, and show or clear the channel banner. `MpvPlayer` also applies the display filters. `FakePlayer` records these for tests. `MpvPlayer` in `src/player/mpv/` sends them to a real MPV process over its JSON IPC socket.
 
 ## Starting MPV
 
@@ -34,12 +34,16 @@ Hardware decoding: `--hwdec=drm,v4l2m2m` asks for the Pi's H.265 decoder, then i
 | `show_standby` | writes `standby.ass` to the runtime directory, `set_property glsl-shaders [...]` with the card's shaders if MPV has others, then `loadfile <standby_source> replace` with `loop-file=inf`, `sub-files-append=<runtime_dir>/standby.ass`, `blend-subtitles=yes` and `secondary-sub-ass-override=no` |
 | `play_clip(path)` | `loadfile <absolute path> replace` |
 | `queue_program(media, start_ms)` | `set_property http-header-fields [...]`, then `loadfile <url> append` with `start=<seconds>` and `sid=no`, so a program never shows a subtitle track from its file |
+| `play_program(media, start_ms)` | the same with `loadfile <url> replace` |
+| `queue_clip(path)` | `loadfile <absolute path> append` |
 | `seek(position_ms)` | `seek <seconds> absolute` |
 | `stop` | `stop` |
 | `show_overlay(id, overlay)` | writes the BGRA pixels to `overlay-<id>.bgra` in the runtime directory, then `overlay-add <id> <x> <y> <file> 0 bgra <w> <h> <w*4>` |
 | `clear_overlay(id)` | `overlay-remove <id>` |
+| `show_banner(banner)` | `osd-overlay` id 1, format `ass-events`, `res_x` 1920, `res_y` 1080, with the banner's ASS events (`src/player/mpv/banner.rs`) |
+| `clear_banner` | `osd-overlay` id 1 with format `none`, only when the banner is up |
 
-`replace` empties MPV's playlist, so static, the stand-by card and a clip drop anything queued. `loop-file=inf` only matters for a configured source that ends; the default sources are `lavfi` generators that never end, so nothing loops and there is no seam. A program is appended behind the clip and opened early by the playlist prefetch. It is not preloaded paused, because one MPV process cannot hold a second file paused (ADR 0001, decision 5).
+`replace` empties MPV's playlist, so static, the stand-by card, a clip and `play_program` drop anything queued. Those four and `stop` also remove the banner; queueing leaves it up. The banner is OSD, drawn after the display filters, in DejaVu Sans; see [run.md](run.md#the-banner). `loop-file=inf` only matters for a configured source that ends; the default sources are `lavfi` generators that never end, so nothing loops and there is no seam. A program is appended behind the clip and opened early by the playlist prefetch. It is not preloaded paused, because one MPV process cannot hold a second file paused (ADR 0001, decision 5).
 
 Overlay layers are numbered 0 to 63. The pixels are blue, green, red and alpha bytes, with the colour already multiplied by alpha, and there must be exactly `width * height * 4` of them. Overlays stay up when the item on screen changes.
 
