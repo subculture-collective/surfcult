@@ -48,7 +48,7 @@ The words surfcult's code and documentation use, and the code item each one name
 
 ## Running
 
-- **Store**: the one SQLite file, `store::Store`. It holds the channel schedules, the playback history and the library cache. The composition root owns it and passes it to each call (`&mut` to write, `&` to read); nothing else keeps a store between calls.
+- **Store**: the one SQLite file, `store::Store`. It holds the channel schedules, the playback history and the library cache. The composition root owns it and passes it to each call (`&mut` to write, `&` to read); nothing else keeps a store between calls, except the read API, which opens its own read-only connection (`Store::open_read_only`, no create, no migration) to the same file.
 - **Composition root**: the code in the binary that creates the store, the player and the tuner and drives them on the Pi. It is not written yet (#23).
 - **Player**: the screen as the tuner sees it, `player::Player`: static, a clip, a queued program, seek, stop and overlays. `player::MpvPlayer` drives a real MPV over its JSON IPC socket; `player::FakePlayer` records commands for tests.
 - **Stream resolver**: what turns a program's media id and start position into a URL, its HTTP headers and the media position the stream begins at, `player::mpv::StreamResolver`. It keeps Jellyfin out of the player.
@@ -57,3 +57,6 @@ The words surfcult's code and documentation use, and the code item each one name
 - **Look-ahead**: the tuner looks up the schedule at the moment the tune-in clip will end, not at the key press, with `timeline::program_from`, so the program is queued at the right offset. If a break is on then, it gets the program after the break at that event's `media_offset_ms`.
 - **Live position**: where the schedule says the media should be at a given moment, the `offset_ms` of the event `timeline::lookup` finds.
 - **Late start**: a program that starts more than `Timing::late_tolerance_ms` (500 ms) behind its live position. The tuner seeks forward to the live position once.
+- **Read API**: `server::router`, served by `surfcult serve`. Fixed `GET` routes for channels, the schedule of a time range and health, as JSON. It listens on `127.0.0.1:8090` unless `SURFCULT_API_ADDR` says otherwise and reads the store through its own connection. See `docs/reference/api.md`.
+- **API token**: `server::ApiToken`, the optional bearer token from `SURFCULT_API_TOKEN` or `SURFCULT_API_TOKEN_FILE`. With one configured, a request without exactly `Authorization: Bearer <token>` gets `401`.
+- **Scheduled until**: in health, when a channel's last stored event ends, `Store::schedule_end_ms`. It shows how far the channel's schedule reaches.

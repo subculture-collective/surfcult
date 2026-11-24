@@ -726,3 +726,62 @@ fn the_error_type_works_as_a_std_error() {
     fn takes_error(_: &dyn std::error::Error) {}
     takes_error(&StoreError::Corrupt("x".into()));
 }
+
+#[test]
+fn the_schedule_end_is_the_end_of_the_last_event() {
+    let mut store = Store::open_in_memory().unwrap();
+    assert_eq!(store.schedule_end_ms(1).unwrap(), None);
+
+    store.write_events(1, &schedule()).unwrap();
+
+    assert_eq!(store.schedule_end_ms(1).unwrap(), Some(40_000));
+    assert_eq!(store.schedule_end_ms(2).unwrap(), None);
+}
+
+#[test]
+fn the_schema_version_is_the_newest_migration() {
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(store.schema_version().unwrap(), migrate::latest_version());
+    assert_eq!(Store::supported_schema_version(), migrate::latest_version());
+}
+
+#[test]
+fn opening_read_only_needs_an_existing_file() {
+    let db = TempDb::new();
+
+    assert!(Store::open_read_only(db.path()).is_err());
+    assert!(!db.path().exists());
+}
+
+#[test]
+fn a_read_only_store_sees_the_writer_and_cannot_write() {
+    let db = TempDb::new();
+    let mut writer = Store::open(db.path()).unwrap();
+    let mut reader = Store::open_read_only(db.path()).unwrap();
+
+    writer.write_events(1, &schedule()).unwrap();
+
+    assert_eq!(reader.schedule_end_ms(1).unwrap(), Some(40_000));
+    assert!(reader.write_events(2, &schedule()).is_err());
+}
+
+#[test]
+fn a_read_only_store_does_not_migrate() {
+    let db = TempDb::new();
+    let store = Store::open(db.path()).unwrap();
+    store
+        .conn
+        .execute(
+            "DELETE FROM schema_migrations WHERE version = ?1",
+            [migrate::latest_version()],
+        )
+        .unwrap();
+    drop(store);
+
+    let reader = Store::open_read_only(db.path()).unwrap();
+
+    assert_eq!(
+        reader.schema_version().unwrap(),
+        migrate::latest_version() - 1
+    );
+}

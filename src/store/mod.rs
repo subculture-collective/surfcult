@@ -37,7 +37,7 @@ mod tests;
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::library::MediaId;
 use crate::timeline::{Event, EventKind};
@@ -88,6 +88,19 @@ impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let conn = Connection::open(path).map_err(StoreError::database("opening the database"))?;
         Self::init(conn, true)
+    }
+
+    /// Opens the existing database at `path` for reading only. Unlike
+    /// [`Store::open`] it does not create the file, change the journal mode
+    /// or migrate, so a missing file is an error and the schema stays at
+    /// whatever version the writer left it. Every write through it fails.
+    pub fn open_read_only(path: impl AsRef<Path>) -> Result<Self, StoreError> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)
+            .map_err(StoreError::database("opening the database"))?;
+        conn.busy_timeout(BUSY_TIMEOUT)
+            .map_err(StoreError::database("configuring the database"))?;
+        Ok(Self { conn })
     }
 
     /// An empty database that lives in memory. For tests.
@@ -261,6 +274,38 @@ impl Store {
                     .optional()
             })
             .map_err(StoreError::database("reading the last break"))
+    }
+
+    /// When the channel's last stored event ends, or `None` if it has none.
+    /// Events do not overlap, so this is the end of the event that starts
+    /// last; reading it walks one row of the primary key.
+    pub fn schedule_end_ms(&self, channel: u32) -> Result<Option<i64>, StoreError> {
+        self.conn
+            .prepare_cached(
+                "SELECT end_ms FROM events WHERE channel = ?1 ORDER BY start_ms DESC LIMIT 1",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![channel], |row| row.get(0))
+                    .optional()
+            })
+            .map_err(StoreError::database("reading the schedule end"))
+    }
+
+    /// The newest migration applied to this database.
+    pub fn schema_version(&self) -> Result<u32, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StoreError::database("reading the schema version"))
+    }
+
+    /// The schema version this build migrates to and expects to read.
+    pub fn supported_schema_version() -> u32 {
+        migrate::latest_version()
     }
 
     /// Adds one row to the playback history.
