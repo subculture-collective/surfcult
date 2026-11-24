@@ -16,8 +16,14 @@
 //! `Authorization: MediaBrowser Token="..."` header, the one form Jellyfin 12
 //! accepts. It is never put in a URL, an error message or `Debug` output.
 //!
-//! Out of scope here: playback URLs and turning collections, libraries, tags
-//! or series into episodes for a channel. See `docs/reference/jellyfin.md`.
+//! [`JellyfinClient::playback`] asks Jellyfin how to play one item with the
+//! device profile from [`crate::library::profile`] and returns a [`Playback`]:
+//! a direct-play URL or a progressive MPEG-TS transcode URL that starts at a
+//! given position. [`JellyfinClient::stop_transcode`] stops that transcode.
+//! Playback is never reported to Jellyfin.
+//!
+//! Out of scope here: turning collections, libraries, tags or series into
+//! episodes for a channel. See `docs/reference/jellyfin.md`.
 //!
 //! [`MediaSource`]: crate::library::MediaSource
 //! [`Store`]: crate::store::Store
@@ -25,6 +31,7 @@
 mod client;
 mod config;
 mod http;
+mod playback;
 mod sync;
 #[cfg(test)]
 mod tests;
@@ -34,5 +41,6 @@ mod worker;
 pub use client::{JellyfinClient, JellyfinError};
 pub use config::{ApiKey, JellyfinConfig, KEY_ENV, KEY_FILE_ENV, KeyError};
 pub use http::{HttpError, JellyfinHttp, UreqHttp};
+pub use playback::{DEVICE_ID, Playback, TranscodeSession};
 pub use sync::{SyncReport, sync};
 pub use worker::SyncWorker;

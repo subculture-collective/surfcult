@@ -24,6 +24,12 @@ pub enum JellyfinError {
     Status(u16),
     /// The answer was not the JSON surfcult expects.
     BadResponse(String),
+    /// Jellyfin offered no way to play the item, or refused to (its
+    /// `ErrorCode`, such as `NoCompatibleStream`).
+    NoPlayback(String),
+    /// Jellyfin's transcode URL is for another item than the one asked for.
+    /// Holds the item id the URL names.
+    WrongItem(String),
     /// The local cache could not be read or written.
     Store(StoreError),
 }
@@ -36,6 +42,10 @@ impl fmt::Display for JellyfinError {
             Self::Status(code) => write!(f, "Jellyfin answered with HTTP status {code}"),
             Self::BadResponse(reason) => {
                 write!(f, "Jellyfin sent a response surfcult cannot read: {reason}")
+            }
+            Self::NoPlayback(reason) => write!(f, "Jellyfin cannot play the item: {reason}"),
+            Self::WrongItem(other) => {
+                write!(f, "Jellyfin offered a transcode of another item ({other})")
             }
             Self::Store(source) => write!(f, "library cache: {source}"),
         }
@@ -85,14 +95,39 @@ impl JellyfinClient {
     fn get(&self, path_and_query: &str) -> Result<String, JellyfinError> {
         self.http
             .get(path_and_query, &self.key.authorization_header())
-            .map_err(|error| match error {
-                HttpError::Unreachable(reason) => {
-                    // The text comes from outside; make sure it cannot repeat the key.
-                    JellyfinError::Unreachable(self.key.scrub(&reason))
-                }
-                HttpError::Status(401 | 403) => JellyfinError::Unauthorized,
-                HttpError::Status(code) => JellyfinError::Status(code),
-            })
+            .map_err(|error| self.http_error(error))
+    }
+
+    pub(super) fn post_json(
+        &self,
+        path_and_query: &str,
+        json: &str,
+    ) -> Result<String, JellyfinError> {
+        self.http
+            .post_json(path_and_query, json, &self.key.authorization_header())
+            .map_err(|error| self.http_error(error))
+    }
+
+    pub(super) fn delete(&self, path_and_query: &str) -> Result<(), JellyfinError> {
+        self.http
+            .delete(path_and_query, &self.key.authorization_header())
+            .map_err(|error| self.http_error(error))
+    }
+
+    fn http_error(&self, error: HttpError) -> JellyfinError {
+        match error {
+            HttpError::Unreachable(reason) => {
+                // The text comes from outside; make sure it cannot repeat the key.
+                JellyfinError::Unreachable(self.scrub(&reason))
+            }
+            HttpError::Status(401 | 403) => JellyfinError::Unauthorized,
+            HttpError::Status(code) => JellyfinError::Status(code),
+        }
+    }
+
+    /// `text` with every copy of the key replaced.
+    pub(super) fn scrub(&self, text: &str) -> String {
+        self.key.scrub(text)
     }
 
     /// Reads every page of `/Items?{query}` and returns the raw items.
@@ -207,7 +242,7 @@ fn normalize_id(id: &str) -> String {
 }
 
 /// Percent-encodes a query value, leaving only unreserved characters as they are.
-fn encode(value: &str) -> String {
+pub(super) fn encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {

@@ -1,0 +1,59 @@
+{
+  "MediaSources": [
+    {
+      "Protocol": "File",
+      "Id": "1e0ff4a8a553696127930e218769b7b7",
+      "Path": "/media/fixtures/movie-1.mkv",
+      "Type": "Default",
+      "Container": "mkv",
+      "Size": 4831838208,
+      "Name": "movie-1",
+      "IsRemote": false,
+      "ETag": "6d1b0a2c4f1e0c8b3a7d9e5f2c1b0a98",
+      "RunTimeTicks": 58238400000,
+      "ReadAtNativeFramerate": false,
+      "IgnoreDts": false,
+      "IgnoreIndex": false,
+      "GenPtsInput": false,
+      "SupportsTranscoding": true,
+      "SupportsDirectStream": true,
+      "SupportsDirectPlay": true,
+      "IsInfiniteStream": false,
+      "UseMostCompatibleTranscodingProfile": false,
+      "RequiresOpening": false,
+      "RequiresClosing": false,
+      "RequiresLooping": false,
+      "SupportsProbing": true,
+      "VideoType": "VideoFile",
+      "MediaStreams": [
+        {
+          "Codec": "hevc",
+          "BitDepth": 10,
+          "VideoRange": "SDR",
+          "VideoRangeType": "SDR",
+          "Height": 1080,
+          "Width": 1920,
+          "Type": "Video",
+          "Index": 0,
+          "IsDefault": true
+        },
+        {
+          "Codec": "eac3",
+          "Language": "eng",
+          "Channels": 6,
+          "Type": "Audio",
+          "Index": 1,
+          "IsDefault": true
+        }
+      ],
+      "MediaAttachments": [],
+      "Formats": [],
+      "Bitrate": 6637144,
+      "RequiredHttpHeaders": {},
+      "TranscodingSubProtocol": "http",
+      "DefaultAudioStreamIndex": 1,
+      "HasSegments": false
+    }
+  ],
+  "PlaySessionId": "5f0d7e3c2b1a49e8a6c4d2b0f9e8d7c6"
+}

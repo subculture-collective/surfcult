@@ -1,32 +1,98 @@
 //! What the Pi can play directly, and what Jellyfin must transcode first.
 //!
-//! The rules are decision 3 of [ADR 0001](../../docs/adr/0001-pi-and-library-findings.md):
+//! This file is the one place the device profile lives. The rules are
+//! decisions 3 and 4 of [ADR 0001](../../docs/adr/0001-pi-and-library-findings.md):
 //!
 //! - Video plays directly when it is H.265 at 8 or 10 bit, or H.264 at 8 bit,
-//!   and is at most 1080 pixels tall.
+//!   SDR, and at most 1080 pixels tall ([`DIRECT_VIDEO`], [`MAX_DIRECT_HEIGHT`],
+//!   [`DIRECT_VIDEO_RANGES`]).
 //! - Audio plays directly when it is AAC, MP3, FLAC, Opus, AC3, E-AC3, DTS or
-//!   TrueHD.
+//!   TrueHD ([`DIRECT_AUDIO`]).
 //! - Everything else needs a transcode: AV1, H.264 at 10 bit, VVC, VC-1,
-//!   MPEG-2, VP9, MPEG-1, anything taller than 1080, and any other audio codec.
+//!   MPEG-2, VP9, MPEG-1, anything taller than 1080, HDR or Dolby Vision, and
+//!   any other audio codec. Jellyfin transcodes to [`TRANSCODE`]: a progressive
+//!   MPEG-TS stream of H.264 and AAC, at most 1080p and about 8 Mbps.
 //!
-//! [`needs_transcode`] answers for a whole item. It only looks at the item's
-//! first video stream and first audio stream, which is what Jellyfin plays by
-//! default. The tuner uses it to pick a longer tune-in clip; playback URLs
-//! will use it later.
+//! [`needs_transcode`] answers for a whole item from the library cache; the
+//! tuner uses it to pick a longer tune-in clip. `JellyfinClient::playback`
+//! builds the device profile it sends to Jellyfin from the same constants, and
+//! Jellyfin then makes the real decision. A change to the ADR edits this file
+//! only.
 //!
-//! Limits of what [`MediaItem`] records:
+//! [`needs_transcode`] only looks at the item's first video stream and first
+//! audio stream, which is what Jellyfin plays by default. Limits of what
+//! [`MediaItem`] records:
 //!
-//! - There is no HDR flag, so HDR and Dolby Vision cannot be detected here. ADR
-//!   0001 counts them as transcodes; this function treats them as direct play
-//!   until the model gains the flag.
+//! - There is no HDR flag, so HDR and Dolby Vision cannot be detected here.
+//!   [`needs_transcode`] treats them as direct play; the profile sent to
+//!   Jellyfin does not, so Jellyfin transcodes them.
 //! - A missing bit depth is read as 8 bit, because almost all H.264 is 8 bit.
+//!   The profile sent to Jellyfin reads it the same way.
 //! - An item with no video stream is treated as a transcode, since nothing
 //!   shows that it plays directly. An item with no audio stream is fine.
 
 use super::model::{AudioStream, MediaItem, VideoStream};
 
+/// A video codec the Pi decodes in hardware.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirectVideo {
+    /// The codec's names in lower case. The first is the one Jellyfin uses;
+    /// the others are spellings other tools use for the same codec.
+    pub names: &'static [&'static str],
+    /// The deepest bit depth that still plays directly.
+    pub max_bit_depth: u8,
+}
+
+/// The video codecs that play directly, and up to what bit depth.
+pub const DIRECT_VIDEO: &[DirectVideo] = &[
+    DirectVideo {
+        names: &["hevc", "h265"],
+        max_bit_depth: 10,
+    },
+    DirectVideo {
+        names: &["h264", "avc"],
+        max_bit_depth: 8,
+    },
+];
+
 /// The tallest picture the Pi plays directly.
 pub const MAX_DIRECT_HEIGHT: u32 = 1080;
+
+/// The video ranges that play directly, by Jellyfin's `VideoRangeType` names.
+/// HDR10, HLG and Dolby Vision are transcoded.
+pub const DIRECT_VIDEO_RANGES: &[&str] = &["SDR"];
+
+/// The audio codecs that play directly, by Jellyfin's names. MPV decodes
+/// TrueHD in software for about 0.1 extra cores.
+pub const DIRECT_AUDIO: &[&str] = &["aac", "mp3", "flac", "opus", "ac3", "eac3", "dts", "truehd"];
+
+/// What Jellyfin transcodes to when an item does not play directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TranscodeTarget {
+    /// The container, by Jellyfin's name. `ts` asks for a progressive MPEG-TS
+    /// stream; HLS took about 19 s to start at an offset and is not used.
+    pub container: &'static str,
+    pub video_codec: &'static str,
+    pub audio_codec: &'static str,
+    pub max_width: u32,
+    pub max_height: u32,
+    /// The video bitrate in bits per second.
+    pub video_bitrate: u32,
+    /// The bit depth of the transcoded video. The Pi decodes H.264 only at
+    /// 8 bit, so a 10-bit H.264 source must be re-encoded, not stream-copied.
+    pub video_bit_depth: u8,
+}
+
+/// The transcode ADR 0001 measured: 4 to 7 s to start at an offset for 1080p.
+pub const TRANSCODE: TranscodeTarget = TranscodeTarget {
+    container: "ts",
+    video_codec: "h264",
+    audio_codec: "aac",
+    max_width: 1920,
+    max_height: 1080,
+    video_bitrate: 8_000_000,
+    video_bit_depth: 8,
+};
 
 /// Whether Jellyfin must transcode `item` before the Pi can play it.
 pub fn needs_transcode(item: &MediaItem) -> bool {
@@ -42,19 +108,15 @@ pub fn video_plays_directly(video: &VideoStream) -> bool {
     }
     let codec = video.codec.to_ascii_lowercase();
     let depth = video.bit_depth.unwrap_or(8);
-    match codec.as_str() {
-        "hevc" | "h265" => depth <= 10,
-        "h264" | "avc" => depth <= 8,
-        _ => false,
-    }
+    DIRECT_VIDEO
+        .iter()
+        .find(|rule| rule.names.contains(&codec.as_str()))
+        .is_some_and(|rule| depth <= rule.max_bit_depth)
 }
 
 /// Whether MPV plays this audio stream without a transcode.
 pub fn audio_plays_directly(audio: &AudioStream) -> bool {
-    matches!(
-        audio.codec.to_ascii_lowercase().as_str(),
-        "aac" | "mp3" | "flac" | "opus" | "ac3" | "eac3" | "dts" | "truehd"
-    )
+    DIRECT_AUDIO.contains(&audio.codec.to_ascii_lowercase().as_str())
 }
 
 #[cfg(test)]

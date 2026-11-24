@@ -36,7 +36,7 @@ The tuner owns a `Player` (the screen). `tick` and `pump` also take a `&Store` (
 
 The clip comes from the tune-in pool. It is the shortest clip that is at least as long as the expected start-up cost, or the longest clip if none is. The cost is about 1 s when the program direct-plays and about 7 s when Jellyfin must transcode it (`Timing::direct_start_ms` and `Timing::transcode_start_ms`).
 
-Whether an item needs a transcode is `library::profile::needs_transcode`, which follows ADR 0001, decision 3: direct play for H.265 at 8 or 10 bit and H.264 at 8 bit, up to 1080 pixels tall, with AAC, MP3, FLAC, Opus, AC3, E-AC3, DTS or TrueHD audio. Everything else needs a transcode. `MediaItem` has no HDR flag yet, so HDR cannot be detected.
+Whether an item needs a transcode is `library::profile::needs_transcode`, which follows ADR 0001, decision 3: direct play for H.265 at 8 or 10 bit and H.264 at 8 bit, up to 1080 pixels tall, with AAC, MP3, FLAC, Opus, AC3, E-AC3, DTS or TrueHD audio. Everything else needs a transcode. The rules are constants in `src/library/profile.rs`, and the device profile sent to Jellyfin is built from the same constants (see `jellyfin.md`). `MediaItem` has no HDR flag yet, so HDR cannot be detected here, although Jellyfin transcodes it.
 
 The program depends on the clip length and the clip depends on the program, so the tuner plans twice at most. It plans with the direct-play cost first. If that program needs a transcode, it plans again with the transcode cost and keeps the second plan.
 

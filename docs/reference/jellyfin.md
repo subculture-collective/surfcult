@@ -12,15 +12,40 @@ A sync that fails for any reason (server down, 401, a body that is not JSON, a f
 
 ## Endpoints used
 
-All requests are `GET`. `StartIndex` and `Limit` (500) page every list.
+The sync sends only `GET` requests. `StartIndex` and `Limit` (500) page every list.
 
 | What | Request |
 |---|---|
-| Items | `/Items?Recursive=true&IncludeItemTypes=Movie,Episode&Fields=MediaStreams,Chapters,Path,MediaSources&SortBy=SortName` |
-| Collections | `/Items?Recursive=true&IncludeItemTypes=BoxSet&SortBy=SortName` |
-| One collection's members | `/Items?ParentId=<collection id>&IncludeItemTypes=Movie,Episode` |
+| Items | `GET /Items?Recursive=true&IncludeItemTypes=Movie,Episode&Fields=MediaStreams,Chapters,Path,MediaSources&SortBy=SortName` |
+| Collections | `GET /Items?Recursive=true&IncludeItemTypes=BoxSet&SortBy=SortName` |
+| One collection's members | `GET /Items?ParentId=<collection id>&IncludeItemTypes=Movie,Episode` |
+| How to play one item | `POST /Items/<id>/PlaybackInfo` with a JSON body |
+| Stop a transcode | `DELETE /Videos/ActiveEncodings?DeviceId=surfcult&PlaySessionId=<session>` |
 
 Paging follows `TotalRecordCount`. If a list ends before its count, the sync fails rather than caching a partial library. An item that appears on two pages is cached once.
+
+surfcult never calls a `/Sessions/Playing` endpoint or anything else that reports playback, so the owner's watched and continue-watching lists stay as they are. A test checks every request path.
+
+## Playback URLs
+
+`client.playback(&id, start_ms)` asks Jellyfin how the Pi should play an item, starting `start_ms` into it, and returns a `Playback`. Jellyfin makes the decision by comparing the item with the device profile surfcult sends. The request also carries `StartTimeTicks` (milliseconds times 10,000), a 200 Mbps bitrate ceiling so bitrate never rules out direct play on the LAN, `SubtitleStreamIndex: -1` so subtitles never force a transcode, and `EnableDirectStream: false`. Jellyfin's first media source is used.
+
+- `Playback::Direct { path_and_query, seek_ms }` when Jellyfin reports `SupportsDirectPlay`: `/Videos/<id>/stream?static=true&mediaSourceId=<source>`, the file as stored. The stream starts at the beginning, so the player seeks to `seek_ms`.
+- `Playback::Transcode { path_and_query, session }` otherwise: Jellyfin's `TranscodingUrl`, a progressive MPEG-TS stream `/videos/<id>/stream.ts?...` that already starts at the position, so the player must not seek. surfcult removes every `api_key` or `ApiKey` parameter Jellyfin puts in it, in any case, and sets `DeviceId=surfcult`, `PlaySessionId` (from the response), `VideoCodec=h264`, `h264-videobitdepth=8` (so a 10-bit H.264 source is re-encoded, never stream-copied to the Pi), `AudioCodec=aac`, `VideoBitrate=8000000`, `MaxWidth=1920`, `MaxHeight=1080` and `StartTimeTicks`, replacing whatever Jellyfin wrote. Other parameters, such as `MediaSourceId` and `AudioStreamIndex`, are kept. A transcode URL that is not `stream.ts` (an HLS `master.m3u8`, for example) is refused: HLS took about 19 s to start at an offset. A transcode URL for an item other than the one asked for is `JellyfinError::WrongItem`; ids match with or without dashes and in any case.
+
+`Playback::url(base_url)` joins the path to the server address. The URLs carry no key; the player must send the `Authorization` header itself (#22 passes it to MPV through a config file). Jellyfin's `ErrorCode` (such as `NoCompatibleStream`), a response with no media source, or one that offers neither direct play nor a transcode is `JellyfinError::NoPlayback`.
+
+When playback ends or the channel changes, `client.stop_transcode(&session)` sends the `DELETE` above, and Jellyfin stops encoding. A 404 means Jellyfin no longer has that session, so it counts as stopped. `Playback::transcode()` returns the session, or `None` for direct play. Nothing calls these yet; the composition root (#23) will.
+
+### The device profile
+
+The rules live in one file, `src/library/profile.rs`, which follows ADR 0001 decisions 3 and 4. The tuner's `needs_transcode` and the `DeviceProfile` sent to Jellyfin both read its constants, so changing the ADR means editing that file only.
+
+- One direct-play entry with video codecs `hevc,h264` and audio codecs `aac,mp3,flac,opus,ac3,eac3,dts,truehd`. It names no container, so any container plays directly.
+- A codec profile for each video codec: bit depth at most 10 for `hevc` and 8 for `h264`, height at most 1080, and `VideoRangeType` `SDR` only, so HDR10, HLG and Dolby Vision are transcoded. The conditions are not required, so a stream with an unknown bit depth still plays directly, the way `needs_transcode` reads a missing depth as 8 bit.
+- One transcoding profile: container `ts`, H.264 and AAC, protocol `http` (progressive, not HLS).
+
+`needs_transcode` cannot see HDR, because the cache stores no video range; Jellyfin can, so an HDR item may get a transcode the tuner did not plan a long clip for.
 
 ## The API key
 
@@ -45,7 +70,7 @@ For each kept item: id (the Jellyfin item id), title, kind (`movie` or `episode`
 - Items come back in the order Jellyfin listed them (sorted by name). Chapters and streams keep their order.
 - The file path is in the cache and in `Store::library_items()`, but not in `MediaItem`, which is unchanged. The path is for reconciling items by path when an id changes.
 - Collections are Jellyfin `BoxSet` items. Each keeps its members in Jellyfin's order. A member that is not a cached item (a series, or an item that was skipped) is left out. `library::resolve_pool` turns a `jellyfin_collection` source into a channel's pool from the cached collection. Libraries, tags, genres and series are not resolved yet; that is #30.
-- Playback URLs are not built here.
+- Playback URLs are not cached; `playback` asks Jellyfin each time.
 
 ## What is skipped
 
@@ -59,4 +84,6 @@ Unknown fields never matter. Apart from an item's `Id`, every field may be missi
 
 ## Tests
 
-No test needs a Jellyfin server. The fixtures in `tests/fixtures/jellyfin/` are real Jellyfin 12.4.0 responses with fake names, paths and ids. Tests give the client a fake transport (the `JellyfinHttp` trait) that serves them. A few tests start a listener on `127.0.0.1` to check the real `ureq` transport (header sent, 401, redirect not followed, closed port); they do not leave the machine.
+No test needs a Jellyfin server. The fixtures in `tests/fixtures/jellyfin/` are real Jellyfin 12.4.0 responses with fake names, paths and ids. Tests give the client a fake transport (the `JellyfinHttp` trait: `get`, `post_json` and `delete`) that serves them. The two `playback-info-*.json` fixtures are made up in the shape of Jellyfin's `PlaybackInfoResponse`, and the transcode one puts a key in `TranscodingUrl` as Jellyfin does. For playback tests the fake applies the device profile the client sent to the item's streams and answers with the direct-play or the transcode fixture, rewritten to name the requested item; a census test checks that profile against every case in ADR 0001 decision 3 and against `needs_transcode`. A few tests start a listener on `127.0.0.1` to check the real `ureq` transport (header sent, POST body, DELETE, 401, redirect not followed, closed port); they do not leave the machine.
+
+Not covered by tests: whether the URLs play in MPV on the owner's network. That needs a manual check on the Pi.
