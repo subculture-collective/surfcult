@@ -2,7 +2,7 @@ use chrono::{TimeZone, Utc};
 
 use super::*;
 use crate::config::{Channel, Mode, Plan, Source, Tz};
-use crate::library::{FakeMediaSource, MediaItem, MediaKind};
+use crate::library::{FakeMediaSource, MediaId, MediaItem, MediaKind, resolve_pool};
 use crate::store::Store;
 use crate::timeline::{Event, EventKind};
 
@@ -20,13 +20,6 @@ fn pool(ids: &[&str]) -> Vec<MediaItem> {
         .enumerate()
         .map(|(i, id)| item(id, 20 + 7 * i as u64))
         .collect()
-}
-
-fn source(items: &[MediaItem]) -> FakeMediaSource {
-    items
-        .iter()
-        .cloned()
-        .fold(FakeMediaSource::new(), FakeMediaSource::with_item)
 }
 
 fn channel(number: u32, mode: Mode) -> Channel {
@@ -63,7 +56,7 @@ fn ids(events: &[Event]) -> Vec<&str> {
 
 fn resume(cursor: &str) -> Resume {
     Resume {
-        cursor: Some(cursor.into()),
+        cursor: Some(MediaId::new(cursor)),
         played: Vec::new(),
     }
 }
@@ -151,7 +144,10 @@ fn sequential_continues_after_the_cursor_and_wraps() {
 
     assert_eq!(&ids(&out.events)[..6], ["d", "a", "b", "c", "d", "a"]);
     let last = out.events.last().unwrap();
-    assert_eq!(out.cursor.as_deref(), Some(last.media_id.as_str()));
+    assert_eq!(
+        out.cursor.as_ref().map(MediaId::as_str),
+        Some(last.media_id.as_str())
+    );
 }
 
 #[test]
@@ -159,7 +155,7 @@ fn sequential_starts_at_the_beginning_without_a_cursor() {
     let items = pool(&["a", "b", "c"]);
     let out = generate(&params(Mode::Sequential), &items, &Resume::default(), 0, 1).unwrap();
     assert_eq!(ids(&out.events), ["a"]);
-    assert_eq!(out.cursor.as_deref(), Some("a"));
+    assert_eq!(out.cursor.as_ref().map(MediaId::as_str), Some("a"));
 }
 
 #[test]
@@ -172,7 +168,7 @@ fn sequential_restarts_and_says_so_when_the_cursor_item_vanished() {
     assert_eq!(
         out.notes,
         [Note::CursorNotInPool {
-            media_id: "gone".into()
+            media_id: MediaId::new("gone")
         }]
     );
 }
@@ -207,7 +203,7 @@ fn an_empty_or_unplayable_pool_gives_no_events_and_a_note() {
     for mode in [Mode::Sequential, Mode::Shuffle] {
         let none = generate(&params(mode), &[], &resume("x"), 0, DAY).unwrap();
         assert!(none.events.is_empty());
-        assert_eq!(none.cursor.as_deref(), Some("x"));
+        assert_eq!(none.cursor.as_ref().map(MediaId::as_str), Some("x"));
         assert_eq!(none.notes, [Note::NoPlayableItems]);
 
         let zeros = vec![item("a", 0), item("b", 0)];
@@ -225,7 +221,7 @@ fn an_empty_window_gives_no_events_and_keeps_the_cursor() {
     let items = pool(&["a", "b"]);
     let out = generate(&params(Mode::Sequential), &items, &resume("a"), 100, 100).unwrap();
     assert!(out.events.is_empty());
-    assert_eq!(out.cursor.as_deref(), Some("a"));
+    assert_eq!(out.cursor.as_ref().map(MediaId::as_str), Some("a"));
 }
 
 #[test]
@@ -308,7 +304,7 @@ fn a_shuffle_resumes_inside_its_pass_without_a_repeat() {
     .unwrap();
     // Cut so the run ends partway through a pass.
     assert!(!first.events.len().is_multiple_of(6));
-    let played: Vec<String> = first.events.iter().map(|e| e.media_id.clone()).collect();
+    let played: Vec<MediaId> = first.events.iter().map(|e| e.media_id.clone()).collect();
 
     let second = generate(
         &params(Mode::Shuffle),
@@ -324,7 +320,7 @@ fn a_shuffle_resumes_inside_its_pass_without_a_repeat() {
 
     let all: Vec<&str> = played
         .iter()
-        .map(String::as_str)
+        .map(MediaId::as_str)
         .chain(ids(&second.events))
         .collect();
     assert_passes_are_permutations(&all, 6);
@@ -343,7 +339,7 @@ fn a_shuffle_resumed_on_the_same_date_matches_an_unbroken_run() {
     )
     .unwrap();
     let cut = 2;
-    let played: Vec<String> = whole.events[..cut]
+    let played: Vec<MediaId> = whole.events[..cut]
         .iter()
         .map(|e| e.media_id.clone())
         .collect();
@@ -369,7 +365,7 @@ fn a_shuffle_with_only_a_cursor_does_not_open_with_it() {
     let items = pool(&["a", "b", "c"]);
     for cursor in ["a", "b", "c"] {
         let out = generate(&params(Mode::Shuffle), &items, &resume(cursor), 0, 1).unwrap();
-        assert_ne!(out.events[0].media_id, cursor);
+        assert_ne!(out.events[0].media_id.as_str(), cursor);
     }
 }
 
@@ -459,46 +455,46 @@ fn seven_days_across_a_daylight_saving_change_have_no_gaps() {
 
 // The wrapper.
 
-fn setup(items: &[MediaItem]) -> (Store, FakeMediaSource) {
-    (Store::open_in_memory().unwrap(), source(items))
+fn setup() -> Store {
+    Store::open_in_memory().unwrap()
 }
 
 #[test]
 fn nothing_is_generated_while_the_clock_is_not_trusted() {
     let items = pool(&["a", "b"]);
-    let (mut store, media) = setup(&items);
+    let mut store = setup();
     let channel = channel(3, Mode::Sequential);
 
-    let result = refill_channel(
+    let result = extend(
         &mut store,
-        &media,
         &channel,
+        &items,
         CHICAGO,
         at(1970, 1, 1, 0, 0),
         false,
     )
     .unwrap();
 
-    assert_eq!(result, Refill::ClockNotTrusted);
+    assert_eq!(result, Extended::ClockNotTrusted);
     assert!(
         store
             .events_between(3, i64::MIN, i64::MAX)
             .unwrap()
             .is_empty()
     );
-    assert_eq!(store.cursor(3).unwrap(), None);
+    assert!(store.programs_before(3, i64::MAX).unwrap().is_empty());
 }
 
 #[test]
-fn a_refill_stores_seven_days_with_no_gaps_and_sets_the_cursor() {
+fn an_extend_stores_seven_days_with_no_gaps_and_ends_on_the_last_program() {
     let items = pool(&["a", "b", "c", "d"]);
-    let (mut store, media) = setup(&items);
+    let mut store = setup();
     let channel = channel(3, Mode::Sequential);
     let now = at(2026, 6, 1, 12, 0);
 
-    let result = refill_channel(&mut store, &media, &channel, CHICAGO, now, true).unwrap();
+    let result = extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
 
-    let Refill::Generated {
+    let Extended::Generated {
         from_ms,
         to_ms,
         written,
@@ -513,22 +509,44 @@ fn a_refill_stores_seven_days_with_no_gaps_and_sets_the_cursor() {
     assert_eq!(stored.len(), written);
     assert_covers(&stored, now, now + HORIZON_MS);
     assert_eq!(
-        store.cursor(3).unwrap().as_deref(),
-        Some(stored.last().unwrap().media_id.as_str())
+        store.programs_before(3, i64::MAX).unwrap().last(),
+        Some(&stored.last().unwrap().media_id)
     );
 }
 
-#[test]
-fn a_sequential_refill_continues_from_the_stored_cursor() {
-    let items = pool(&["a", "b", "c", "d"]);
-    let (mut store, media) = setup(&items);
-    store.set_cursor(3, "b").unwrap();
-    let now = at(2026, 6, 1, 12, 0);
+/// A stored event of `kind` for `media` covering `[start_ms, end_ms)`.
+fn stored(start_ms: i64, end_ms: i64, media: &str, kind: EventKind) -> Event {
+    Event {
+        start_ms,
+        end_ms,
+        media_id: MediaId::new(media),
+        media_offset_ms: 0,
+        media_duration_ms: (end_ms - start_ms) as u64,
+        kind,
+    }
+}
 
-    refill_channel(
+#[test]
+fn a_sequential_extend_continues_after_the_last_stored_program() {
+    let items = pool(&["a", "b", "c", "d"]);
+    let mut store = setup();
+    let now = at(2026, 6, 1, 12, 0);
+    store
+        .write_events(
+            3,
+            &[stored(
+                now - 120 * MINUTE,
+                now - 60 * MINUTE,
+                "b",
+                EventKind::Program,
+            )],
+        )
+        .unwrap();
+
+    extend(
         &mut store,
-        &media,
         &channel(3, Mode::Sequential),
+        &items,
         CHICAGO,
         now,
         true,
@@ -540,20 +558,95 @@ fn a_sequential_refill_continues_from_the_stored_cursor() {
 }
 
 #[test]
-fn later_refills_extend_the_schedule_without_a_gap_or_a_repeat() {
+fn the_resume_point_ignores_a_break_after_the_last_program() {
+    let items = pool(&["a", "b", "c", "d"]);
+    let mut store = setup();
+    let now = at(2026, 6, 1, 12, 0);
+    store
+        .write_events(
+            3,
+            &[
+                stored(
+                    now - 120 * MINUTE,
+                    now - 60 * MINUTE,
+                    "b",
+                    EventKind::Program,
+                ),
+                stored(now - 60 * MINUTE, now - 58 * MINUTE, "ad", EventKind::Break),
+            ],
+        )
+        .unwrap();
+
+    extend(
+        &mut store,
+        &channel(3, Mode::Sequential),
+        &items,
+        CHICAGO,
+        now,
+        true,
+    )
+    .unwrap();
+
+    let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
+    assert_eq!(ids(&stored)[0], "c");
+}
+
+#[test]
+fn a_sequential_channel_resumes_where_it_stopped_after_a_long_gap() {
+    let items = pool(&["a", "b", "c"]);
+    let mut store = setup();
+    let channel = channel(3, Mode::Sequential);
+    let then = at(2026, 6, 1, 12, 0);
+    extend(&mut store, &channel, &items, CHICAGO, then, true).unwrap();
+    let last_old = store.programs_before(3, i64::MAX).unwrap().pop().unwrap();
+    let now = then + 30 * DAY;
+
+    extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
+
+    let first_new = &store.events_between(3, now, now + HORIZON_MS).unwrap()[0];
+    let after = items.iter().position(|i| i.id == last_old).unwrap();
+    assert_eq!(first_new.media_id, items[(after + 1) % 3].id);
+}
+
+#[test]
+fn a_reopened_store_continues_where_it_stopped() {
+    let items = pool(&["a", "b", "c", "d", "e"]);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("schedule.db");
+    let channel = channel(3, Mode::Sequential);
+    let now = at(2026, 6, 1, 12, 0);
+    let later = now + 3 * DAY + 37 * MINUTE;
+
+    let mut store = Store::open(&path).unwrap();
+    extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    extend(&mut store, &channel, &items, CHICAGO, later, true).unwrap();
+
+    let stored = store.events_between(3, now, later + HORIZON_MS).unwrap();
+    assert_covers(&stored, now, later + HORIZON_MS);
+    let played = ids(&stored);
+    for pair in played.windows(2) {
+        let next = items.iter().position(|i| i.id.as_str() == pair[0]).unwrap();
+        assert_eq!(items[(next + 1) % 5].id.as_str(), pair[1]);
+    }
+}
+
+#[test]
+fn later_extends_continue_the_schedule_without_a_gap_or_a_repeat() {
     let items = pool(&["a", "b", "c", "d", "e", "f"]);
     for mode in [Mode::Sequential, Mode::Shuffle] {
-        let (mut store, media) = setup(&items);
+        let mut store = setup();
         let channel = channel(3, mode);
         let now = at(2026, 6, 1, 12, 0);
 
-        refill_channel(&mut store, &media, &channel, CHICAGO, now, true).unwrap();
+        extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
         // Up to date: the same moment again has nothing to add.
-        let again = refill_channel(&mut store, &media, &channel, CHICAGO, now, true).unwrap();
-        assert!(matches!(again, Refill::UpToDate { .. }), "{mode:?}");
+        let again = extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
+        assert!(matches!(again, Extended::UpToDate { .. }), "{mode:?}");
         // Three days on, the next run fills the gap at the far end.
         let later = now + 3 * DAY + 37 * MINUTE;
-        refill_channel(&mut store, &media, &channel, CHICAGO, later, true).unwrap();
+        extend(&mut store, &channel, &items, CHICAGO, later, true).unwrap();
 
         let stored = store.events_between(3, now, later + HORIZON_MS).unwrap();
         assert_covers(&stored, now, later + HORIZON_MS);
@@ -571,15 +664,15 @@ fn later_refills_extend_the_schedule_without_a_gap_or_a_repeat() {
 }
 
 #[test]
-fn a_refill_after_a_long_gap_starts_at_now() {
+fn an_extend_after_a_long_gap_starts_at_now() {
     let items = pool(&["a", "b", "c"]);
-    let (mut store, media) = setup(&items);
+    let mut store = setup();
     let channel = channel(3, Mode::Sequential);
     let then = at(2026, 6, 1, 12, 0);
-    refill_channel(&mut store, &media, &channel, CHICAGO, then, true).unwrap();
+    extend(&mut store, &channel, &items, CHICAGO, then, true).unwrap();
     let now = then + 30 * DAY;
 
-    refill_channel(&mut store, &media, &channel, CHICAGO, now, true).unwrap();
+    extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
 
     let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
     assert_covers(&stored, now, now + HORIZON_MS);
@@ -587,13 +680,14 @@ fn a_refill_after_a_long_gap_starts_at_now() {
 
 #[test]
 fn an_unplayable_library_writes_nothing_and_reports_it() {
-    let (mut store, media) = setup(&[item("a", 0)]);
+    let items = [item("a", 0)];
+    let mut store = setup();
     let now = at(2026, 6, 1, 12, 0);
 
-    let result = refill_channel(
+    let result = extend(
         &mut store,
-        &media,
         &channel(3, Mode::Shuffle),
+        &items,
         CHICAGO,
         now,
         true,
@@ -602,23 +696,54 @@ fn an_unplayable_library_writes_nothing_and_reports_it() {
 
     assert_eq!(
         result,
-        Refill::Generated {
+        Extended::Generated {
             from_ms: now,
             to_ms: now + HORIZON_MS,
             written: 0,
             notes: vec![Note::SkippedZeroRuntime { count: 1 }, Note::NoPlayableItems],
         }
     );
-    assert_eq!(store.cursor(3).unwrap(), None);
+    assert!(store.programs_before(3, i64::MAX).unwrap().is_empty());
+    assert!(
+        store
+            .events_between(3, i64::MIN, i64::MAX)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
 fn a_blocks_channel_is_refused() {
-    let (mut store, media) = setup(&pool(&["a"]));
+    let mut store = setup();
     let mut channel = channel(3, Mode::Sequential);
     channel.plan = Plan::Blocks(Vec::new());
 
-    let result = refill_channel(&mut store, &media, &channel, CHICAGO, 0, true);
+    let result = extend(&mut store, &channel, &pool(&["a"]), CHICAGO, 0, true);
 
     assert!(matches!(result, Err(ScheduleError::UnsupportedPlan)));
+}
+
+#[test]
+fn a_resolved_collection_pool_schedules_only_its_items() {
+    let media = pool(&["a", "b", "c", "d"])
+        .into_iter()
+        .fold(FakeMediaSource::new(), FakeMediaSource::with_item)
+        .with_collection("Cartoons", &["d", "b"]);
+    let mut channel = channel(3, Mode::Sequential);
+    channel.plan = Plan::Fixed {
+        source: Source::JellyfinCollection("Cartoons".into()),
+        mode: Mode::Sequential,
+    };
+    let Plan::Fixed { source, .. } = &channel.plan else {
+        unreachable!()
+    };
+    let items = resolve_pool(source, &media).unwrap();
+    let mut store = setup();
+    let now = at(2026, 6, 1, 12, 0);
+
+    extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
+
+    let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
+    assert_eq!(ids(&stored[..4]), ["d", "b", "d", "b"]);
+    assert!(ids(&stored).iter().all(|id| ["d", "b"].contains(id)));
 }

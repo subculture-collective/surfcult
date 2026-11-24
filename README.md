@@ -1,16 +1,17 @@
 # surfcult
 
-A self-hosted, offline-first television channel simulator for Raspberry Pi and Linux. It plays your own media as continuously broadcasting channels with schedules, commercials and a program guide. The planned design is in [`docs/idea.md`](docs/idea.md), which uses the codename BROADCAST. Nothing in it is implemented yet; the code is still the template's `greet` example.
+A self-hosted, offline-first television channel simulator for Raspberry Pi and Linux. It plays your own media as continuously broadcasting channels with schedules, commercials and a program guide. The planned design is in [`docs/idea.md`](docs/idea.md), which uses the codename BROADCAST. The library parts exist: config parsing, a Jellyfin sync into a SQLite cache, schedule generation, and the tuner's tune-in sequence, tested against a fake player. There is no real MPV player yet and nothing wires the parts together on the Pi, so the binary only checks a config file.
 
 ## What it contains
 
-- `src/lib.rs`: the `greet` function and its test
-- `src/main.rs`: the binary; prints a greeting
-- `Cargo.toml`, `Cargo.lock`: package metadata (edition 2024, no dependencies) and the lockfile
+- `src/lib.rs`: declares the library modules
+- `src/main.rs`: the binary, `surfcult check-config <channels.toml>`
+- `Cargo.toml`, `Cargo.lock`: package metadata (edition 2024; chrono, chrono-tz, rusqlite, serde, serde_json, toml and ureq; tempfile for tests) and the lockfile
 - `Makefile`: `make verify` runs every check; `make help` lists the targets
 - `.github/workflows/pr-ci.yml`: the `PR CI` workflow; runs on every pull request and ends with the `CI gate` job
 - `.github/rulesets/main.json`: the ruleset applied to `main`; it requires pull requests and `CI gate`
 - `.github/ISSUE_TEMPLATE/`, `.github/pull_request_template.md`: bug, feature and task forms and the pull request template
+- `CONTEXT.md`: a glossary of the domain terms the code uses
 - `docs/`: the product idea, plus folders for decision records, references, research notes and runbooks
 - `CONTRIBUTING.md`, `SECURITY.md`, `AGENTS.md`: contribution, security and coding-agent guidance
 

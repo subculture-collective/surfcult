@@ -4,6 +4,10 @@
 //! The cache is replaced as a whole. [`Store::replace_library`] deletes
 //! everything and writes the new snapshot in one transaction, so a reader sees
 //! either the old library or the new one, and a failed write changes nothing.
+//!
+//! The cache is what the rest of surfcult reads: [`Store`] is the library's
+//! [`MediaSource`], and its reads never reach Jellyfin. The Jellyfin sync step
+//! (`jellyfin::sync`) is what fills it.
 
 use std::collections::HashMap;
 
@@ -11,7 +15,8 @@ use rusqlite::{Transaction, params};
 
 use super::{Store, StoreError};
 use crate::library::{
-    AudioStream, Chapter, Collection, MediaId, MediaItem, MediaKind, VideoStream,
+    AudioStream, Chapter, Collection, MediaId, MediaItem, MediaKind, MediaSource, SourceError,
+    VideoStream,
 };
 
 /// One cached item and the file path the source reported for it. The path is
@@ -230,6 +235,30 @@ impl Store {
             })
             .map_err(StoreError::database("reading the sync time"))
     }
+}
+
+/// The library as the cache holds it. Items and collections come back in the
+/// order the last sync wrote them.
+impl MediaSource for Store {
+    fn list_items(&self) -> Result<Vec<MediaItem>, SourceError> {
+        let entries = self.library_items().map_err(unavailable)?;
+        Ok(entries.into_iter().map(|entry| entry.item).collect())
+    }
+
+    fn resolve(&self, id: &MediaId) -> Result<MediaItem, SourceError> {
+        match self.library_item(id).map_err(unavailable)? {
+            Some(entry) => Ok(entry.item),
+            None => Err(SourceError::NotFound(id.clone())),
+        }
+    }
+
+    fn list_collections(&self) -> Result<Vec<Collection>, SourceError> {
+        self.library_collections().map_err(unavailable)
+    }
+}
+
+fn unavailable(source: StoreError) -> SourceError {
+    SourceError::Unavailable(format!("library cache: {source}"))
 }
 
 enum Stream {
@@ -667,5 +696,27 @@ mod tests {
         assert_eq!(store.library_items().unwrap(), entries);
         assert_eq!(store.library_collections().unwrap(), collections);
         assert_eq!(store.library_synced_at_ms().unwrap(), Some(9));
+    }
+
+    #[test]
+    fn the_library_cache_is_a_media_source() {
+        let mut store = Store::open_in_memory().unwrap();
+        assert!(store.list_items().unwrap().is_empty());
+        assert!(store.list_collections().unwrap().is_empty());
+        let entries = vec![entry("b", MediaKind::Movie), entry("a", MediaKind::Episode)];
+        let collections = vec![collection("Picks", &["a", "b"])];
+
+        store
+            .replace_library(&entries, &collections, 5_000)
+            .unwrap();
+
+        let items: Vec<MediaItem> = entries.iter().map(|e| e.item.clone()).collect();
+        assert_eq!(store.list_items().unwrap(), items, "sync order");
+        assert_eq!(store.resolve(&MediaId::new("a")).unwrap(), items[1]);
+        assert_eq!(
+            store.resolve(&MediaId::new("nope")).unwrap_err(),
+            SourceError::NotFound(MediaId::new("nope"))
+        );
+        assert_eq!(store.list_collections().unwrap(), collections);
     }
 }

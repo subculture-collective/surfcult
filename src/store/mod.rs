@@ -8,9 +8,8 @@
 //!   index for reading a time range. Events of one channel must not overlap;
 //!   the store checks that each event ends after it starts, not that they
 //!   never overlap, because that is the generator's job.
-//! - `cursors`: where a sequential channel stopped. The cursor is the media id
-//!   of the last item scheduled, which stays correct when the library gains or
-//!   loses items. The generator finds that item and continues after it.
+//!   A sequential channel's position is read from its last program event, so
+//!   there is no separate cursor; migration 3 dropped the old `cursors` table.
 //! - `playback_history`: one row each time the tuner starts something, with a
 //!   short outcome word. Read newest first.
 //!
@@ -37,12 +36,19 @@ mod tests;
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
+use crate::library::MediaId;
 use crate::timeline::{Event, EventKind};
 
 pub use error::StoreError;
 pub use library::LibraryEntry;
+
+/// The query behind [`Store::last_program_before`]; a test checks its plan.
+const LAST_PROGRAM_BEFORE: &str = "SELECT media_id FROM events
+     WHERE channel = ?1 AND kind = 'program' AND start_ms < ?2
+     ORDER BY start_ms DESC
+     LIMIT 1";
 
 /// How long a call waits for another connection's lock before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -51,12 +57,12 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaybackRecord {
     pub channel: u32,
-    pub media_id: String,
+    pub media_id: MediaId,
     pub started_at_ms: i64,
     pub outcome: String,
 }
 
-/// A SQLite database of schedule events, cursors and playback history.
+/// A SQLite database of schedule events, playback history and the library cache.
 ///
 /// Reads take `&self`; anything that writes takes `&mut self`.
 pub struct Store {
@@ -174,37 +180,57 @@ impl Store {
         tx.commit().map_err(StoreError::database(action))
     }
 
-    /// The media id of the last item a sequential channel scheduled, if any.
-    pub fn cursor(&self, channel: u32) -> Result<Option<String>, StoreError> {
+    /// Media ids of the channel's program events that start before
+    /// `before_ms`, oldest first. Break, filler and ident events are left out;
+    /// a program cut into several events appears once per event.
+    pub fn programs_before(
+        &self,
+        channel: u32,
+        before_ms: i64,
+    ) -> Result<Vec<MediaId>, StoreError> {
+        let action = "reading program history";
         let mut statement = self
             .conn
-            .prepare_cached("SELECT last_media_id FROM cursors WHERE channel = ?1")
-            .map_err(StoreError::database("reading a cursor"))?;
-        let mut rows = statement
-            .query_map([channel], |row| row.get(0))
-            .map_err(StoreError::database("reading a cursor"))?;
-        rows.next()
-            .transpose()
-            .map_err(StoreError::database("reading a cursor"))
+            .prepare_cached(
+                "SELECT media_id FROM events
+                 WHERE channel = ?1 AND kind = 'program' AND start_ms < ?2
+                 ORDER BY start_ms",
+            )
+            .map_err(StoreError::database(action))?;
+        let rows = statement
+            .query_map(params![channel, before_ms], |row| {
+                row.get::<_, String>(0).map(MediaId::new)
+            })
+            .map_err(StoreError::database(action))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(StoreError::database(action))
     }
 
-    /// Sets the cursor of `channel` to `last_media_id`, replacing any earlier one.
-    pub fn set_cursor(&mut self, channel: u32, last_media_id: &str) -> Result<(), StoreError> {
+    /// The media id of the channel's last program event that starts before
+    /// `before_ms`, or `None` if it has none. Reads one row, walking back from
+    /// `before_ms` on the primary key, so its cost does not grow with history.
+    pub fn last_program_before(
+        &self,
+        channel: u32,
+        before_ms: i64,
+    ) -> Result<Option<MediaId>, StoreError> {
         self.conn
-            .execute(
-                "INSERT INTO cursors (channel, last_media_id) VALUES (?1, ?2)
-                 ON CONFLICT (channel) DO UPDATE SET last_media_id = excluded.last_media_id",
-                params![channel, last_media_id],
-            )
-            .map_err(StoreError::database("writing a cursor"))?;
-        Ok(())
+            .prepare_cached(LAST_PROGRAM_BEFORE)
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![channel, before_ms], |row| {
+                        row.get::<_, String>(0).map(MediaId::new)
+                    })
+                    .optional()
+            })
+            .map_err(StoreError::database("reading the last program"))
     }
 
     /// Adds one row to the playback history.
     pub fn record_playback(
         &mut self,
         channel: u32,
-        media_id: &str,
+        media_id: &MediaId,
         started_at_ms: i64,
         outcome: &str,
     ) -> Result<(), StoreError> {
@@ -212,7 +238,7 @@ impl Store {
             .execute(
                 "INSERT INTO playback_history (channel, media_id, started_at_ms, outcome)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![channel, media_id, started_at_ms, outcome],
+                params![channel, media_id.as_str(), started_at_ms, outcome],
             )
             .map_err(StoreError::database("recording playback"))?;
         Ok(())
@@ -240,7 +266,7 @@ impl Store {
             .query_map(params![channel, limit], |row| {
                 Ok(PlaybackRecord {
                     channel: row.get(0)?,
-                    media_id: row.get(1)?,
+                    media_id: MediaId::new(row.get::<_, String>(1)?),
                     started_at_ms: row.get(2)?,
                     outcome: row.get(3)?,
                 })
@@ -294,7 +320,7 @@ fn insert_events(
                 channel,
                 event.start_ms,
                 event.end_ms,
-                event.media_id,
+                event.media_id.as_str(),
                 event.media_offset_ms as i64,
                 event.media_duration_ms as i64,
                 kind_name(event.kind),
@@ -356,7 +382,7 @@ fn build_event(
     Ok(Event {
         start_ms,
         end_ms,
-        media_id,
+        media_id: MediaId::new(media_id),
         media_offset_ms: unsigned("media_offset_ms", media_offset_ms)?,
         media_duration_ms: unsigned("media_duration_ms", media_duration_ms)?,
         kind: kind_from_name(kind)?,

@@ -15,7 +15,7 @@ t=500+L           the clip ends and the queued program starts at the live positi
 t=500+L+d         the player reports the start; if it was late, one seek to the live position
 ```
 
-The program is queued behind the clip, not loaded paused, because one MPV process cannot hold a second file paused ([ADR 0001](../adr/0001-pi-and-library-findings.md), decision 5). The offset comes from `timeline::look_ahead`, so it is right for the moment the clip ends.
+The program is queued behind the clip, not loaded paused, because one MPV process cannot hold a second file paused ([ADR 0001](../adr/0001-pi-and-library-findings.md), decision 5). The program and its offset come from `timeline::program_from` at the moment the clip ends, so they are right for that moment. If a break is on then, the program after the break is queued at its event's `media_offset_ms`.
 
 ## How it is driven
 
@@ -24,13 +24,13 @@ The tuner has no clock and never sleeps. Each method takes the time in epoch mil
 | Call | When |
 | --- | --- |
 | `tune(channel, now)` | the viewer picks a channel |
-| `tick(now)` | the time from `next_wakeup()` arrives |
+| `tick(now, store, media)` | the time from `next_wakeup()` arrives |
 | `clip_ended()` | the player says the clip reached its end |
 | `program_started(now, position_ms)` | the player says the program is on screen |
 
-`pump(now)` reads the player's pending events with `Player::poll_event`, passes them on, and ticks. `state()` tells where the sequence is: `Static`, `ClipPlaying`, `AwaitingProgram`, `Live`, `Failed` or `Idle`.
+`pump(now, store, media)` reads the player's pending events with `Player::poll_event`, passes them on, and ticks. `state()` tells where the sequence is: `Static`, `ClipPlaying`, `AwaitingProgram`, `Live`, `Failed` or `Idle`.
 
-The tuner reaches the outside world through three ports: `Player` (the screen), `ScheduleSource` (a channel's events; `Store` implements it) and `MediaSource` (to look up each program's codecs).
+The tuner owns a `Player` (the screen). `tick` and `pump` also take a `&Store` (the channel's events) and a `&impl MediaSource` (each program's codecs). In production the caller passes the same `&store` for both and keeps ownership of it, so it can extend schedules and sync the library between calls.
 
 ## Choosing the clip
 
@@ -42,7 +42,7 @@ The program depends on the clip length and the clip depends on the program, so t
 
 ## A break when the clip ends
 
-If a break, filler or ident event is on when the clip ends, the clip stands in for the break and no second clip plays. The tuner queues the first program event after the break (a break can be several events in a row) at the offset where that event starts. That program starts when the clip ends, so it is early by at most the time left in the break. The tuner does not correct that. The next event boundary puts the screen back on the schedule.
+If a break, filler or ident event is on when the clip ends, the clip stands in for the break and no second clip plays. The tuner queues the first program event after the break (a break can be several events in a row) at the offset where that event starts. `timeline::program_from` holds this rule. That program starts when the clip ends, so it is early by at most the time left in the break. The tuner does not correct that. The next event boundary puts the screen back on the schedule.
 
 ## A late start
 

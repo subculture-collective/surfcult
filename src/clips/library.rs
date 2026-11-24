@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use super::pool::{Clip, Issue, IssueKind, PathRefused, Pool};
+use super::pool::{Clip, Issue, IssueKind, PathRefused, Pool, confine};
 use super::probe::{ProbeError, Prober};
 use crate::config::InterstitialPool;
 
@@ -76,7 +76,7 @@ impl ClipLibrary {
     pub fn confine(&self, path: &Path) -> Result<(&Pool, PathBuf), PathRefused> {
         let mut refused = PathRefused::Outside;
         for pool in &self.pools {
-            match pool.confine(path) {
+            match confine(pool.dir(), path) {
                 Ok(canonical) => return Ok((pool, canonical)),
                 Err(PathRefused::Outside) => {}
                 // Report a resolve error only if no pool accepts the path.

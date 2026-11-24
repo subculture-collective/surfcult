@@ -41,7 +41,7 @@ fn event(start_ms: i64, end_ms: i64, media: &str, offset_ms: u64, kind: EventKin
     Event {
         start_ms,
         end_ms,
-        media_id: media.to_string(),
+        media_id: MediaId::new(media),
         media_offset_ms: offset_ms,
         media_duration_ms: 3_600_000,
         kind,
@@ -84,7 +84,9 @@ fn transcoded(id: &str) -> MediaItem {
 }
 
 struct Rig {
-    tuner: Tuner<FakePlayer, Store, FakeMediaSource>,
+    tuner: Tuner<FakePlayer>,
+    store: Store,
+    media: FakeMediaSource,
     clock: VirtualClock,
 }
 
@@ -107,14 +109,13 @@ impl Rig {
             .into_iter()
             .fold(FakeMediaSource::new(), FakeMediaSource::with_item);
         let clock = VirtualClock::new(T);
-        let tuner = Tuner::new(
-            FakePlayer::new(clock.clone()),
+        let tuner = Tuner::new(FakePlayer::new(clock.clone()), clips, Timing::default());
+        Self {
+            tuner,
             store,
             media,
-            clips,
-            Timing::default(),
-        );
-        Self { tuner, clock }
+            clock,
+        }
     }
 
     fn tune(&mut self, channel: u32, now: i64) {
@@ -125,7 +126,7 @@ impl Rig {
     /// Moves the clock to `now` and lets the tuner handle what is due.
     fn at(&mut self, now: i64) {
         self.clock.set(now);
-        self.tuner.pump(now);
+        self.tuner.pump(now, &self.store, &self.media);
     }
 
     fn issued(&self) -> Vec<(i64, Command)> {
@@ -557,8 +558,6 @@ fn a_second_tune_during_static_cancels_the_first() {
         .with_item(direct("other"));
     let mut tuner = Tuner::new(
         FakePlayer::new(clock.clone()),
-        store,
-        media,
         tune_in_clips(),
         Timing::default(),
     );
@@ -576,11 +575,11 @@ fn a_second_tune_during_static_cancels_the_first() {
 
     // The first sequence's deadline passes and nothing happens.
     clock.set(T + 500);
-    tuner.pump(T + 500);
+    tuner.pump(T + 500, &store, &media);
     assert_eq!(tuner.player().commands().len(), 2);
 
     clock.set(T + 700);
-    tuner.pump(T + 700);
+    tuner.pump(T + 700, &store, &media);
     assert_eq!(
         tuner.player().commands(),
         [
@@ -730,4 +729,41 @@ fn a_late_tick_plans_from_the_time_the_clip_actually_starts() {
     rig.at(T + 800);
     assert_eq!(rig.issued()[1], (T + 800, play("b-short.mp4")));
     assert_eq!(rig.commands()[2], queue("show", 102_000));
+}
+
+#[test]
+fn a_store_that_cannot_be_read_leaves_static_up_with_the_store_error() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("schedule.db");
+    let mut rig = Rig::new(Vec::new(), vec![direct("show")], tune_in_clips());
+    rig.store = Store::open(&path).unwrap();
+    rig.store.write_events(CHANNEL, &long_program()).unwrap();
+    // Another connection breaks the schema under the open store.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE events")
+        .unwrap();
+
+    rig.tune(CHANNEL, T);
+    rig.at(T + 500);
+
+    assert!(
+        matches!(
+            rig.failed_with(),
+            Some(Reason::Schedule(StoreError::Database { .. }))
+        ),
+        "{:?}",
+        rig.failed_with()
+    );
+    assert_eq!(rig.commands(), [Command::ShowStatic]);
+    assert_eq!(rig.tuner.next_wakeup(), None);
+}
+
+#[test]
+fn a_schedule_failure_keeps_the_store_error() {
+    let reason = Reason::Schedule(StoreError::Corrupt("bad row".to_owned()));
+    assert_eq!(
+        reason.to_string(),
+        "cannot read the schedule: stored data is unreadable: bad row"
+    );
 }

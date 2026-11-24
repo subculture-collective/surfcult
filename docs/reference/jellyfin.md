@@ -1,12 +1,12 @@
 # Jellyfin source
 
-`surfcult` reads its media library from Jellyfin and keeps a copy in SQLite. The code is in `src/library/jellyfin/`; the cache tables are in `migrations/0002_library_cache.sql`.
+`surfcult` reads its media library from Jellyfin and keeps a copy in SQLite. The code is in `src/jellyfin/`; the cache tables are in `migrations/0002_library_cache.sql`.
 
 ## How it works
 
-`JellyfinSource::sync()` fetches every playable movie and episode and every collection from Jellyfin, then replaces the cache in one transaction. `JellyfinSource` implements the `MediaSource` trait, and `list_items`, `resolve` and `list_collections` read only the cache. They never call Jellyfin, so they keep working with the data of the last good sync when Jellyfin is down. A caller decides when to sync; nothing runs on a timer yet.
+`jellyfin::sync(&client, &mut store, now_ms)` fetches every playable movie and episode and every collection from Jellyfin, then replaces the cache in the `Store` in one transaction, recording `now_ms` as the sync time. The caller supplies the time; the sync step never reads the clock. `Store` implements the `MediaSource` trait, and `list_items`, `resolve` and `list_collections` read only the cache. They never call Jellyfin, so they keep working with the data of the last good sync when Jellyfin is down. A caller decides when to sync; nothing runs on a timer yet. `Store` is not `Sync`, so a sync moved to a blocking thread should fetch there and hand the result back to the thread that owns the store to write.
 
-A sync that fails for any reason (server down, 401, a body that is not JSON, a failure while listing a collection, a cache write error) changes nothing. The cache keeps the previous library and `sync()` returns an error. Before the first successful sync the cache is empty.
+A sync that fails for any reason (server down, 401, a body that is not JSON, a failure while listing a collection, a cache write error) changes nothing. The cache keeps the previous library and `sync` returns an error. Before the first successful sync the cache is empty.
 
 ## Endpoints used
 
@@ -41,8 +41,8 @@ For each kept item: id (the Jellyfin item id), title, kind (`movie` or `episode`
 
 - Jellyfin counts time in ticks of 100 ns. Runtime and chapter starts are stored in milliseconds, ticks divided by 10,000.
 - Items come back in the order Jellyfin listed them (sorted by name). Chapters and streams keep their order.
-- The file path is in the cache and in `JellyfinSource::cached_entries()`, but not in `MediaItem`, which is unchanged. The path is for reconciling items by path when an id changes.
-- Collections are Jellyfin `BoxSet` items. Each keeps its members in Jellyfin's order. A member that is not a cached item (a series, or an item that was skipped) is left out. Turning collections, libraries, tags and series into episodes for a channel is not done here.
+- The file path is in the cache and in `Store::library_items()`, but not in `MediaItem`, which is unchanged. The path is for reconciling items by path when an id changes.
+- Collections are Jellyfin `BoxSet` items. Each keeps its members in Jellyfin's order. A member that is not a cached item (a series, or an item that was skipped) is left out. `library::resolve_pool` turns a `jellyfin_collection` source into a channel's pool from the cached collection. Libraries, tags, genres and series are not resolved yet; that is #30.
 - Playback URLs are not built here.
 
 ## What is skipped

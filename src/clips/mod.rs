@@ -13,8 +13,7 @@
 //!
 //! Paths are confined to the configured directories: a file whose canonical
 //! path is outside its pool directory, for example through a symlink, is
-//! refused, and [`confine`] and [`ClipLibrary::confine`] apply the same rule to
-//! any path.
+//! refused, and [`ClipLibrary::confine`] applies the same rule to any path.
 //!
 //! [`ClipLibrary::rescan`] picks up added and removed files. Durations are
 //! cached by path, modified time and size, so a rescan only probes files that
@@ -28,7 +27,7 @@ mod pool;
 mod probe;
 
 pub use library::ClipLibrary;
-pub use pool::{Clip, Issue, IssueKind, PathRefused, Pool, confine};
+pub use pool::{Clip, Issue, IssueKind, PathRefused, Pool};
 pub use probe::{FfprobeProber, ProbeError, Prober};
 
 #[cfg(test)]
