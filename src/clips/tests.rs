@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
+use super::pool::confine;
 use super::probe::parse_seconds;
 use super::*;
 use crate::config::InterstitialPool;
@@ -48,6 +49,12 @@ impl Prober for FakeProber {
             Some(secs) => Ok(Duration::from_secs_f64(*secs)),
             None => Err(ProbeError::Failed(Some(1))),
         }
+    }
+}
+
+impl Prober for Arc<FakeProber> {
+    fn duration(&self, path: &Path) -> Result<Duration, ProbeError> {
+        (**self).duration(path)
     }
 }
 

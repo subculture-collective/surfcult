@@ -97,12 +97,6 @@ impl Pool {
     pub fn total_duration(&self) -> Duration {
         self.clips.iter().map(|c| c.duration).sum()
     }
-
-    /// Checks that `path` is inside this pool's directory and returns its
-    /// canonical form. See [`confine`].
-    pub fn confine(&self, path: &Path) -> Result<PathBuf, PathRefused> {
-        confine(&self.dir, path)
-    }
 }
 
 /// Why a path was refused.
@@ -131,7 +125,7 @@ impl std::error::Error for PathRefused {}
 /// Both are resolved first, so `..` components and symlinks are followed
 /// before the check: a link inside `dir` that points elsewhere is refused. A
 /// path that does not exist is refused too, because it cannot be resolved.
-pub fn confine(dir: &Path, path: &Path) -> Result<PathBuf, PathRefused> {
+pub(super) fn confine(dir: &Path, path: &Path) -> Result<PathBuf, PathRefused> {
     let dir = dir.canonicalize().map_err(PathRefused::Unresolvable)?;
     let path = path.canonicalize().map_err(PathRefused::Unresolvable)?;
     if path != dir && path.starts_with(&dir) {

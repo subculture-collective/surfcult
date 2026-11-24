@@ -37,7 +37,7 @@ Subdirectories and files whose name starts with `.` are ignored without a report
 
 ## Paths stay inside the pool
 
-Every path is resolved before it is checked: `..` and symlinks are followed, and the result must be inside the pool's resolved directory. A symlink inside a pool that points elsewhere is refused. `confine` (and `ClipLibrary::confine`, which finds the pool for you) applies the same rule to any path and refuses a path outside every configured directory. Clips carry their resolved path, so what plays is what was checked.
+Every path is resolved before it is checked: `..` and symlinks are followed, and the result must be inside the pool's resolved directory. A symlink inside a pool that points elsewhere is refused. `ClipLibrary::confine` applies the same rule to any path: it returns the pool that holds the path, or refuses a path outside every configured directory. Clips carry their resolved path, so what plays is what was checked.
 
 ## Rescanning
 

@@ -2,7 +2,6 @@ use std::fmt;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Why a duration could not be read from a file.
@@ -40,12 +39,6 @@ impl std::error::Error for ProbeError {}
 /// Reads how long a media file plays.
 pub trait Prober: Send + Sync {
     fn duration(&self, path: &Path) -> Result<Duration, ProbeError>;
-}
-
-impl<T: Prober + ?Sized> Prober for Arc<T> {
-    fn duration(&self, path: &Path) -> Result<Duration, ProbeError> {
-        (**self).duration(path)
-    }
 }
 
 /// A [`Prober`] that runs `ffprobe`. It needs no shell: the path is passed as
