@@ -1,6 +1,6 @@
 # Schedule generator
 
-The code is in `src/schedule/`. It turns pools of media items into `timeline::Event`s for one channel: `sequential`, `shuffle` and `weighted` channels and `blocks` channels, programs back to back with commercial breaks, seven days ahead. Grids and regeneration are not done yet.
+The code is in `src/schedule/`. It turns pools of media items into `timeline::Event`s for one channel: `sequential`, `shuffle` and `weighted` channels and `blocks` channels, programs back to back with commercial breaks, seven days ahead, and regenerates the future after a change. Grids are not done yet.
 
 ## Two layers
 
@@ -112,6 +112,29 @@ A clip's `media_id` is its canonical path as text (`schedule::clip_media_id`). C
 ### Determinism
 
 Cuts, fill and padding use no randomness. They depend only on the item, its chapters, the two pools and the last stored break clip and its start time, and the shuffle still seeds each program from the channel and the program's first start time. A run resumed at a program boundary, as `extend` always resumes, gives the same events as an unbroken run. The shuffle cooldown counts a cut program once.
+
+## Regeneration
+
+`schedule::regenerate` takes the same arguments as `extend`. Call it when a channel's config or the runtime of an item in its pools changed. Events that start within the next 30 minutes (`schedule::FREEZE_MS`) never change.
+
+- The boundary is the first place at or after `now_ms` plus 30 minutes where the generator can pick up exactly where the stored schedule is: the start of a program (a `Program` event with `media_offset_ms` 0); a `Filler` event that follows another `Filler` event, which is a blocks channel's uncovered time (a break's padding follows a break clip or a program); or time with no events, at its start or at the freeze point if that falls inside it. Every event before the boundary is kept, so a program and its breaks that run past the freeze point are kept whole and the new schedule never starts inside a break. On a blocks channel a new or moved block therefore reaches the filler or dead air after the freeze point, not only the next program.
+- In one transaction `Store::replace_events_from` deletes the events from the boundary on and writes the new ones, generated from the boundary to `now_ms` plus seven days. The generator resumes from the stored history before the boundary, exactly as `extend` does: the last program, the shuffle cooldown, each block's place and the last break clip.
+- With unchanged inputs the schedule comes out the same. A changed runtime changes only the events from the item's next slot after the boundary; a kept event of that item keeps the runtime it was generated with.
+- When the stored schedule ends before any boundary, the time after its end is filled as `extend` fills it.
+- If the new events have no program and the replaced ones do, the stored schedule is kept and nothing is written (`written` is 0, and the notes say why, such as `NoPlayableItems`). An empty pool more often means a library fetch or sync failed than that the channel should go dark, so callers should not need their own guard.
+- It returns `Extended`, like `extend`, and does nothing without a trusted clock.
+
+## When a file's length differs from its event
+
+The schedule never slips: at play time the scheduled end wins. A kept event, or one generated before a sync corrected an item's runtime, can disagree with the file. `schedule::fit(&event, real_ms, filler)` takes a program event, the file's real length (the library's runtime after a sync, or the length the player reports) and the channel's filler clips, and returns `Fitted { events, fit }`: what plays in the event's time.
+
+- **Short file** (`Fit::Short`). The event plays the media from `media_offset_ms` for its length. If the file ends before that, the program part ends where the file does and the rest, up to the event's end, is filled from the filler pool: its clips from the first, in pool order, whole, over and over, the last one cut at the event's end. A segment the file does not reach at all is all filler. Without a filler clip the rest is empty: the events end where the file ends, and for a segment the file does not reach the list is empty and nothing plays until the segment's end.
+- **Long file** (`Fit::Long`). If the event reaches the item's scheduled end (`media_duration_ms`) and the file is longer, the event is unchanged and the file is cut at its end. A segment that ends at a break or at a block's end is cut there anyway, so it is not a mismatch.
+- A difference of up to 500 ms either way (`schedule::FIT_TOLERANCE_MS`, the tuner's late tolerance) is `Fit::Exact`: a player or probe often reports a length a few milliseconds off the library's runtime.
+- Break, filler and ident events are never fitted.
+- `schedule::record_fit(&mut store, channel, &event, fit, at_ms)` writes one playback-history row under the program's media id with the outcome `padded`, `short` (no filler clip) or `cut`, and nothing for `Fit::Exact`. It writes one row per call. The caller (#23) fits and records each program event, so a short file in a program cut by breaks writes one row for each segment it falls short in: the segment where the file ends and every later segment of that program.
+
+`fit` does not change the stored schedule, and the events after it start on time. The tuner does not follow event boundaries yet, so nothing calls `fit` during playback; the playback loop on the Pi (#23) is where it belongs.
 
 ## Notes for later work
 

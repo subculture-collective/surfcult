@@ -22,8 +22,8 @@
 //! may run past the end, and a program cut by breaks is always written whole,
 //! so a run ends on a program's last segment. Items with a runtime of 0 are
 //! skipped, and an item id that appears twice in the pool is used once (the
-//! first). Grids and regeneration are later work; a channel's `grid` setting
-//! is ignored for now. A blocks channel differs: see "Blocks".
+//! first). Grids are later work; a channel's `grid` setting is ignored for
+//! now. A blocks channel differs: see "Blocks".
 //!
 //! # Breaks
 //!
@@ -190,11 +190,35 @@
 //! is read from the events, `Store::replace_events_from` also moves it back to
 //! the last program it keeps. `extend` never reads the system clock; the
 //! caller passes `now_ms`.
+//!
+//! # Regenerating
+//!
+//! [`regenerate`] takes the same arguments as [`extend`] and replaces the
+//! schedule after the freeze point, `now` plus [`FREEZE_MS`] (30 minutes),
+//! when a channel's config or an item's runtime changed. It starts at the
+//! first boundary at or after the freeze point: a program's start, a blocks
+//! channel's uncovered filler, or time with no events. It keeps every event
+//! before it (so a program and its breaks running past the freeze point are
+//! kept whole), and resumes from the history before it as `extend` does.
+//! With unchanged inputs the schedule comes out the same; a changed runtime
+//! changes only events from the item's next slot after the boundary.
+//!
+//! # When a file's length differs
+//!
+//! A kept event still has the runtime it was generated with. At play time the
+//! scheduled end wins: [`fit`] takes a program event and the file's real
+//! length and returns what plays in the event's time. A short file is padded
+//! from the filler pool to the event's end; a long one is cut there. A
+//! difference of up to [`FIT_TOLERANCE_MS`] is no mismatch.
+//! [`record_fit`] writes the mismatch to playback history as `padded`, `short`
+//! (no filler clip) or `cut`. Neither changes the stored schedule.
 
 mod blocks;
 mod breaks;
 mod extend;
+mod fit;
 mod generate;
+mod regenerate;
 mod rng;
 #[cfg(test)]
 mod tests;
@@ -209,9 +233,11 @@ use crate::timeline::Event;
 pub(crate) use breaks::BreakPlan;
 pub use breaks::{ROTATION_MEMORY_MS, SNAP_MS, clip_media_id};
 pub use extend::{Extended, HORIZON_MS, extend};
+pub use fit::{FIT_TOLERANCE_MS, Fit, Fitted, fit, record_fit};
 pub(crate) use generate::{
     Lane, Layout, Params, Resume, cooling_target, generate, generate_blocks,
 };
+pub use regenerate::{FREEZE_MS, regenerate};
 
 /// The most events one run will produce. A run over seven days that reaches
 /// this has items only seconds long, which means the library data is wrong.
