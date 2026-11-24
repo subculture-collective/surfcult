@@ -634,6 +634,70 @@ fn stop_cancels_the_sequence_and_stops_the_player() {
     assert_eq!(rig.commands(), [Command::ShowStatic, Command::Stop]);
 }
 
+// A restarted player
+
+#[test]
+fn a_restarted_player_is_tuned_to_the_same_channel_again() {
+    let mut rig = Rig::new(long_program(), vec![direct("show")], tune_in_clips());
+    rig.tune(CHANNEL, T);
+    rig.at(T + 500);
+    rig.tuner.player_mut().clip_ended();
+    rig.tuner.player_mut().program_started(101_700);
+    rig.at(T + 1_700);
+    assert_eq!(rig.tuner.state(), &State::Live { channel: CHANNEL });
+    rig.tuner.player_mut().clear();
+
+    // MPV died a minute later. The tuner runs the whole sequence again and
+    // queues the program where the schedule is then.
+    rig.tuner.player_mut().restarted();
+    rig.at(T + 60_000);
+    assert_eq!(
+        rig.tuner.state(),
+        &State::Static {
+            channel: CHANNEL,
+            until_ms: T + 60_500
+        }
+    );
+    rig.at(T + 60_500);
+    assert_eq!(
+        rig.commands(),
+        [
+            Command::ShowStatic,
+            play("b-short.mp4"),
+            queue("show", 161_700)
+        ]
+    );
+}
+
+#[test]
+fn a_restart_after_a_player_failure_tunes_again() {
+    let mut rig = Rig::new(long_program(), vec![direct("show")], tune_in_clips());
+    rig.tuner.player_mut().fail_commands("socket closed");
+    rig.tune(CHANNEL, T);
+    assert!(matches!(rig.failed_with(), Some(Reason::Player(_))));
+
+    let mut fresh = FakePlayer::new(rig.clock.clone());
+    fresh.restarted();
+    *rig.tuner.player_mut() = fresh;
+    rig.at(T + 1_000);
+    assert_eq!(
+        rig.tuner.state(),
+        &State::Static {
+            channel: CHANNEL,
+            until_ms: T + 1_500
+        }
+    );
+}
+
+#[test]
+fn a_restart_with_nothing_tuned_does_nothing() {
+    let mut rig = Rig::new(long_program(), vec![direct("show")], tune_in_clips());
+    rig.tuner.player_mut().restarted();
+    rig.at(T);
+    assert_eq!(rig.tuner.state(), &State::Idle);
+    assert!(rig.commands().is_empty());
+}
+
 // Nothing to show
 
 #[test]

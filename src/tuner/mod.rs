@@ -107,6 +107,15 @@
 //! - the player rejects a command ([`Reason::Player`]).
 //!
 //! Static stays up until the next [`Tuner::tune`]. The tuner does not retry.
+//!
+//! # When the player restarts
+//!
+//! If the player reports [`PlayerEvent::Restarted`] (MPV died and its
+//! watchdog started a new one), the tuner tunes the current channel again, as
+//! if the viewer had picked it: static, a tune-in clip, then the program at
+//! its live position. This also applies after a failure, since a dead MPV is
+//! a common reason for one. The schedule lives in the store, so nothing about
+//! it is lost.
 
 mod plan;
 #[cfg(test)]
@@ -333,7 +342,24 @@ impl<P: Player> Tuner<P> {
             PlayerEvent::ProgramStarted { position_ms } => {
                 self.program_started(now_ms, position_ms)
             }
+            PlayerEvent::Restarted => self.restarted(now_ms),
         }
+    }
+
+    /// The player lost everything on screen. Tunes the channel again from
+    /// the start of the sequence, so the program comes back at its live
+    /// position; the schedule is in the store and is not touched. Ignored
+    /// when nothing is tuned.
+    pub fn restarted(&mut self, now_ms: i64) {
+        let channel = match &self.state {
+            State::Idle => return,
+            State::Static { channel, .. }
+            | State::ClipPlaying { channel }
+            | State::AwaitingProgram { channel }
+            | State::Live { channel }
+            | State::Failed { channel, .. } => *channel,
+        };
+        self.tune(channel, now_ms);
     }
 
     /// Hands every pending player event to [`Tuner::handle`], then ticks.

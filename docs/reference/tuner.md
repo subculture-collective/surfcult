@@ -1,6 +1,6 @@
 # Tuner
 
-The tuner decides what is on screen when the viewer changes channel. The code is in `src/tuner/`. The screen it controls is the `Player` trait in `src/player/`. There is no real MPV control yet (issue #22); everything here runs against `FakePlayer`.
+The tuner decides what is on screen when the viewer changes channel. The code is in `src/tuner/`. The screen it controls is the `Player` trait in `src/player/` ([player reference](player.md)). The tests here run against `FakePlayer`; `MpvPlayer` is the real one.
 
 ## The sequence
 
@@ -27,6 +27,8 @@ The tuner has no clock and never sleeps. Each method takes the time in epoch mil
 | `tick(now, store, media)` | the time from `next_wakeup()` arrives |
 | `clip_ended()` | the player says the clip reached its end |
 | `program_started(now, position_ms)` | the player says the program is on screen |
+
+`restarted(now)` is a fifth call, for when the player says it restarted MPV.
 
 `pump(now, store, media)` reads the player's pending events with `Player::poll_event`, passes them on, and ticks. `state()` tells where the sequence is: `Static`, `ClipPlaying`, `AwaitingProgram`, `Live`, `Failed` or `Idle`.
 
@@ -63,6 +65,10 @@ The tuner leaves static on screen and sets `State::Failed` with a `Reason` when:
 - the player rejects a command (`Player`).
 
 It does not retry. Static stays up until the next `tune`.
+
+## When the player restarts
+
+When the player reports `Restarted` (MPV died and the watchdog started a new one), the tuner tunes the current channel again, as if the viewer had picked it: static, a tune-in clip, then the program at its live position. This also happens from `Failed`, since a dead MPV is a common cause of a player failure. Nothing happens when the tuner is `Idle`. The schedule is in the store, so nothing about it is lost.
 
 ## What it does not do
 

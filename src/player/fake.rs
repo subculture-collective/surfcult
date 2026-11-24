@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use super::{Player, PlayerError, PlayerEvent};
+use super::{Overlay, Player, PlayerError, PlayerEvent};
 use crate::library::MediaId;
 
 /// A clock that only moves when a test moves it. Clones share the time, so
@@ -31,9 +31,21 @@ impl VirtualClock {
 pub enum Command {
     ShowStatic,
     PlayClip(PathBuf),
-    QueueProgram { media_id: MediaId, start_ms: u64 },
+    QueueProgram {
+        media_id: MediaId,
+        start_ms: u64,
+    },
     Seek(u64),
     Stop,
+    /// The overlay's place and size; the pixels are not recorded.
+    ShowOverlay {
+        id: u8,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    },
+    ClearOverlay(u8),
 }
 
 /// A command and the virtual time it was issued.
@@ -96,6 +108,11 @@ impl FakePlayer {
             .push_back(PlayerEvent::ProgramStarted { position_ms });
     }
 
+    /// Tells the player its video player was restarted.
+    pub fn restarted(&mut self) {
+        self.events.push_back(PlayerEvent::Restarted);
+    }
+
     fn record(&mut self, command: Command) -> Result<(), PlayerError> {
         if let Some(reason) = &self.failure {
             return Err(PlayerError(reason.clone()));
@@ -132,6 +149,20 @@ impl Player for FakePlayer {
         self.record(Command::Stop)
     }
 
+    fn show_overlay(&mut self, id: u8, overlay: &Overlay) -> Result<(), PlayerError> {
+        self.record(Command::ShowOverlay {
+            id,
+            x: overlay.x,
+            y: overlay.y,
+            width: overlay.width,
+            height: overlay.height,
+        })
+    }
+
+    fn clear_overlay(&mut self, id: u8) -> Result<(), PlayerError> {
+        self.record(Command::ClearOverlay(id))
+    }
+
     fn poll_event(&mut self) -> Option<PlayerEvent> {
         self.events.pop_front()
     }
@@ -151,6 +182,15 @@ mod tests {
         player.queue_program(&MediaId::new("m"), 4_000).unwrap();
         player.seek(9_000).unwrap();
         player.stop().unwrap();
+        let overlay = Overlay {
+            x: 10,
+            y: 20,
+            width: 2,
+            height: 1,
+            bgra: vec![0; 8],
+        };
+        player.show_overlay(3, &overlay).unwrap();
+        player.clear_overlay(3).unwrap();
         let expected = [
             (1_000, Command::ShowStatic),
             (1_500, Command::PlayClip(PathBuf::from("/clips/a.mp4"))),
@@ -163,6 +203,17 @@ mod tests {
             ),
             (1_500, Command::Seek(9_000)),
             (1_500, Command::Stop),
+            (
+                1_500,
+                Command::ShowOverlay {
+                    id: 3,
+                    x: 10,
+                    y: 20,
+                    width: 2,
+                    height: 1,
+                },
+            ),
+            (1_500, Command::ClearOverlay(3)),
         ];
         let issued: Vec<_> = player
             .issued()
@@ -178,6 +229,7 @@ mod tests {
         assert_eq!(player.poll_event(), None);
         player.clip_ended();
         player.program_started(12_000);
+        player.restarted();
         assert_eq!(player.poll_event(), Some(PlayerEvent::ClipEnded));
         assert_eq!(
             player.poll_event(),
@@ -185,6 +237,7 @@ mod tests {
                 position_ms: 12_000
             })
         );
+        assert_eq!(player.poll_event(), Some(PlayerEvent::Restarted));
         assert_eq!(player.poll_event(), None);
     }
 
