@@ -42,7 +42,7 @@ For each kept item: id (the Jellyfin item id), title, kind (`movie` or `episode`
 - Jellyfin counts time in ticks of 100 ns. Runtime and chapter starts are stored in milliseconds, ticks divided by 10,000.
 - Items come back in the order Jellyfin listed them (sorted by name). Chapters and streams keep their order.
 - The file path is in the cache and in `Store::library_items()`, but not in `MediaItem`, which is unchanged. The path is for reconciling items by path when an id changes.
-- Collections are Jellyfin `BoxSet` items. Each keeps its members in Jellyfin's order. A member that is not a cached item (a series, or an item that was skipped) is left out. Turning collections, libraries, tags and series into episodes for a channel is not done here.
+- Collections are Jellyfin `BoxSet` items. Each keeps its members in Jellyfin's order. A member that is not a cached item (a series, or an item that was skipped) is left out. `library::resolve_pool` turns a `jellyfin_collection` source into a channel's pool from the cached collection. Libraries, tags, genres and series are not resolved yet; that is #30.
 - Playback URLs are not built here.
 
 ## What is skipped

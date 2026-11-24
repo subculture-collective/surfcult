@@ -511,6 +511,30 @@ fn playback_history_round_trips_newest_first_per_channel() {
 }
 
 #[test]
+fn a_collection_pool_resolves_from_the_library_cache() {
+    use crate::config::Source;
+    use crate::library::{Collection, MediaItem, MediaKind, resolve_pool};
+
+    let mut store = Store::open_in_memory().unwrap();
+    let entries: Vec<_> = ["a", "b", "c"]
+        .into_iter()
+        .map(|id| LibraryEntry {
+            item: MediaItem::new(id, id, MediaKind::Episode, 1_320_000),
+            path: None,
+        })
+        .collect();
+    let cartoons = Collection {
+        name: "Cartoons".into(),
+        members: ids(&["c", "a"]),
+    };
+    store.replace_library(&entries, &[cartoons], 1).unwrap();
+
+    let pool = resolve_pool(&Source::JellyfinCollection("Cartoons".into()), &store).unwrap();
+
+    assert_eq!(pool, vec![entries[2].item.clone(), entries[0].item.clone()]);
+}
+
+#[test]
 fn an_unknown_kind_in_the_database_is_reported_as_corrupt() {
     // The CHECK constraint blocks bad kinds, so test the reader directly.
     let error = build_event(0, 1, "a".into(), 0, 0, "weird").unwrap_err();

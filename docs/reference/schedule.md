@@ -6,7 +6,7 @@ The code is in `src/schedule/`. It turns a pool of media items into `timeline::E
 
 `generate(&Params, pool, &Resume, start_ms, end_ms)` is a pure function inside the crate. It reads no clock and does no I/O. `Params` holds the channel number, the `Mode` and the time zone. `Resume` holds the cursor (the media id of the last item scheduled) and `played`, the media ids of earlier programs, oldest first. It returns `Generated { events, cursor, notes }`. Times are Unix epoch milliseconds.
 
-`schedule::extend(&mut Store, &Channel, pool, tz, now_ms, clock_trusted)` keeps a channel's week filled. The caller supplies the pool as a slice of `MediaItem`s; resolving a channel's configured `Source` into that pool is a later issue. `extend` returns `Refill::ClockNotTrusted` and touches nothing when `clock_trusted` is false, because a Pi with an unsynchronized clock must not store a wrong week. Otherwise it starts at the later of `now_ms` and the end of the last stored event and generates up to `now_ms` plus seven days (`HORIZON_MS`). If the schedule already reaches that far it returns `Refill::UpToDate`. It never reads the system clock.
+`schedule::extend(&mut Store, &Channel, pool, tz, now_ms, clock_trusted)` keeps a channel's week filled. The caller supplies the pool as a slice of `MediaItem`s: it takes `source` from the channel's `Plan::Fixed`, resolves it with `library::resolve_pool` and passes the result to `extend`. Until #30 only a `jellyfin_collection` source resolves, to the collection's cached members in collection order; the other sources return `PoolError::Unsupported`, so a channel never falls back to the whole library. `extend` returns `Refill::ClockNotTrusted` and touches nothing when `clock_trusted` is false, because a Pi with an unsynchronized clock must not store a wrong week. Otherwise it starts at the later of `now_ms` and the end of the last stored event and generates up to `now_ms` plus seven days (`HORIZON_MS`). If the schedule already reaches that far it returns `Refill::UpToDate`. It never reads the system clock.
 
 The resume point comes from the stored events, not from a separate cursor. `extend` reads the channel's program events that start before the new window (`Store::programs_before`), at any time, past or future, and counts consecutive events of one media id as one program. The last of them is the cursor. Shuffle also passes all of them as `Resume::played`. Writing the new events is the only write and is one transaction, so a crash cannot leave the schedule and the resume point disagreeing. Because the resume point is read from the events, `Store::replace_events_from` also moves it back to the last program it keeps.
 
@@ -20,7 +20,7 @@ The resume point comes from the stored events, not from a separate cursor. `exte
 
 ## Sequential
 
-Items play in the order `MediaSource::list_items` gives. A run continues after the cursor item and wraps from the last item to the first. With no cursor it starts at the first item. If the cursor item is no longer in the pool, the run starts at the first item and reports `Note::CursorNotInPool`.
+Items play in the pool's order. A run continues after the cursor item and wraps from the last item to the first. With no cursor it starts at the first item. If the cursor item is no longer in the pool, the run starts at the first item and reports `Note::CursorNotInPool`.
 
 ## Shuffle
 

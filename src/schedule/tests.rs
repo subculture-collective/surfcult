@@ -2,7 +2,7 @@ use chrono::{TimeZone, Utc};
 
 use super::*;
 use crate::config::{Channel, Mode, Plan, Source, Tz};
-use crate::library::{MediaId, MediaItem, MediaKind};
+use crate::library::{FakeMediaSource, MediaId, MediaItem, MediaKind, resolve_pool};
 use crate::store::Store;
 use crate::timeline::{Event, EventKind};
 
@@ -721,4 +721,29 @@ fn a_blocks_channel_is_refused() {
     let result = extend(&mut store, &channel, &pool(&["a"]), CHICAGO, 0, true);
 
     assert!(matches!(result, Err(ScheduleError::UnsupportedPlan)));
+}
+
+#[test]
+fn a_resolved_collection_pool_schedules_only_its_items() {
+    let media = pool(&["a", "b", "c", "d"])
+        .into_iter()
+        .fold(FakeMediaSource::new(), FakeMediaSource::with_item)
+        .with_collection("Cartoons", &["d", "b"]);
+    let mut channel = channel(3, Mode::Sequential);
+    channel.plan = Plan::Fixed {
+        source: Source::JellyfinCollection("Cartoons".into()),
+        mode: Mode::Sequential,
+    };
+    let Plan::Fixed { source, .. } = &channel.plan else {
+        unreachable!()
+    };
+    let items = resolve_pool(source, &media).unwrap();
+    let mut store = setup();
+    let now = at(2026, 6, 1, 12, 0);
+
+    extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
+
+    let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
+    assert_eq!(ids(&stored[..4]), ["d", "b", "d", "b"]);
+    assert!(ids(&stored).iter().all(|id| ["d", "b"].contains(id)));
 }

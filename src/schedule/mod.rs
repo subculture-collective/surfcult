@@ -22,8 +22,7 @@
 //!
 //! # Sequential
 //!
-//! Items play in the pool's order (the order of `MediaSource::list_items`). A
-//! run continues after the cursor item, which is the media id of the last item
+//! Items play in the pool's order. A run continues after the cursor item, which is the media id of the last item
 //! the previous run scheduled, and wraps from the last item to the first. With
 //! no cursor it starts at the first item. If the cursor item is no longer in
 //! the pool it starts at the first item and says so with
@@ -68,7 +67,10 @@
 //! [`extend`] does nothing unless the caller says the clock is trusted (see
 //! "Clock" in the design). It generates from the later of `now` and the end of
 //! the channel's last stored event up to `now` plus seven days. The caller
-//! supplies the pool. `extend` reads the schedule end and the program history,
+//! supplies the pool: it takes `source` from the channel's `Plan::Fixed`,
+//! resolves it with [`library::resolve_pool`](crate::library::resolve_pool) and
+//! passes the result to `extend`. Until issue #30 only collections resolve.
+//! `extend` reads the schedule end and the program history,
 //! then writes the new events in one transaction. There is no separate cursor
 //! to write, so a crash cannot make the next run repeat items. Because the
 //! resume point is read from the events, `Store::replace_events_from` also moves
