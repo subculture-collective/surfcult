@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::Stream;
-use super::glitch::{STRIPS, Tear};
 use crate::player::PlayerEvent;
 
 /// Why a command did not work.
@@ -35,19 +34,6 @@ impl IpcError {
         }
     }
 }
-
-/// The `osd-overlay` id of the stand-by card's band and text. These ids are
-/// separate from the `overlay-add` layers that [`Session::overlay_add`] uses.
-const STANDBY_OVERLAY: u32 = 1;
-
-/// The stand-by card's layout, in pixels of a 1920x1080 screen. MPV scales
-/// it to the real one.
-const CARD_WIDTH: u32 = 1920;
-const CARD_HEIGHT: u32 = 1080;
-const BAND_TOP: u32 = 430;
-const BAND_BOTTOM: u32 = 650;
-/// How far the red and cyan copies of the text sit from the white one.
-const CHROMA_SHIFT: u32 = 8;
 
 /// What a playlist entry is, by MPV's `playlist_entry_id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,8 +64,10 @@ pub(super) struct Session {
     entries: HashMap<i64, Entry>,
     /// The entry on screen, from the last `start-file` event.
     current: Option<i64>,
-    /// The text of the stand-by card, while its overlay is up.
-    standby: Option<String>,
+    /// Whether the stand-by card is up.
+    standby: bool,
+    /// The subtitle track id of the card's flicker, while one shows.
+    flicker: Option<i64>,
     /// The `glsl-shaders` list outside the stand-by card.
     global_shaders: Vec<String>,
     /// The `glsl-shaders` list while the stand-by card shows.
@@ -102,7 +90,8 @@ impl Session {
             events: VecDeque::new(),
             entries: HashMap::new(),
             current: None,
-            standby: None,
+            standby: false,
+            flicker: None,
             global_shaders: Vec::new(),
             standby_shaders: Vec::new(),
             shaders: Vec::new(),
@@ -125,9 +114,9 @@ impl Session {
         Ok(())
     }
 
-    /// Whether the stand-by card's band and text are up.
+    /// Whether the stand-by card is up.
     pub(super) fn standby_up(&self) -> bool {
-        self.standby.is_some()
+        self.standby
     }
 
     /// Plays `source`, replacing the playlist. `loop-file=inf` restarts a
@@ -136,48 +125,65 @@ impl Session {
         self.replace(source, json!({ "loop-file": "inf" }), Entry::Static)
     }
 
-    /// Switches MPV to the stand-by shaders, plays `source` as
-    /// [`Session::show_static`] does and draws the card's band and `text`
-    /// over it. On an error the card may be partly drawn; the caller replaces
-    /// it.
-    pub(super) fn show_standby(&mut self, source: &str, text: &str) -> Result<(), IpcError> {
+    /// Switches MPV to the stand-by shaders and plays `source` as
+    /// [`Session::show_static`] does, with the ASS file `subtitles` (the
+    /// card's band and text) as its subtitle track. `blend-subtitles=yes`
+    /// puts the track through the shaders, and
+    /// `secondary-sub-ass-override=no` keeps a flicker's drawings (MPV
+    /// strips the styling of secondary subtitles by default). These options
+    /// belong to the card's playlist entry, so MPV drops them with it:
+    /// whatever replaces the card shows no subtitles. On an error the card
+    /// may be partly set up; the caller replaces it.
+    pub(super) fn show_standby(&mut self, source: &str, subtitles: &str) -> Result<(), IpcError> {
         self.leave_standby()?;
         if self.shaders != self.standby_shaders {
             self.set_shaders(self.standby_shaders.clone())?;
         }
-        let id = self.loadfile(source, "replace", json!({ "loop-file": "inf" }))?;
+        let options = json!({
+            "loop-file": "inf",
+            "sub-files-append": subtitles,
+            "blend-subtitles": "yes",
+            "secondary-sub-ass-override": "no",
+        });
+        let id = self.loadfile(source, "replace", options)?;
         self.entries.clear();
         self.entries.insert(id, Entry::Static);
-        self.draw_standby(&standby_ass(text))?;
-        self.standby = Some(text.to_owned());
+        self.standby = true;
         Ok(())
     }
 
-    /// Redraws the stand-by card's band torn by `tear`, or as normal with
-    /// `None`. Does nothing when the card is not up.
-    pub(super) fn redraw_standby(&mut self, tear: Option<&Tear>) -> Result<(), IpcError> {
-        let Some(text) = self.standby.clone() else {
+    /// Shows the ASS file `subtitles` over the card as MPV's secondary
+    /// subtitle track, for a flicker. The card's own track stays selected
+    /// underneath, so no frame shows the bars without the band. (Rewriting
+    /// that track and `sub-reload` left one or two frames without it.) Does
+    /// nothing when the card is not up or already flickers.
+    pub(super) fn start_flicker(&mut self, subtitles: &str) -> Result<(), IpcError> {
+        if !self.standby || self.flicker.is_some() {
             return Ok(());
-        };
-        let ass = match tear {
-            Some(tear) => torn_standby_ass(&text, tear),
-            None => standby_ass(&text),
-        };
-        self.draw_standby(&ass)
+        }
+        self.command(json!(["sub-add", subtitles, "auto"]))?;
+        // MPV 0.40 and 0.41 return no track id from sub-add.
+        let tracks = self.command(json!(["get_property", "track-list"]))?;
+        let id = tracks
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "sub" && t["external-filename"] == subtitles)
+            .filter_map(|t| t["id"].as_i64())
+            .max()
+            .ok_or_else(|| IpcError::Rejected("MPV did not add the flicker's subtitles".into()))?;
+        self.flicker = Some(id);
+        self.command(json!(["set_property", "secondary-sid", id]))
+            .map(drop)
     }
 
-    /// Draws `ass` as the stand-by card's overlay, replacing what it showed.
-    fn draw_standby(&mut self, ass: &str) -> Result<(), IpcError> {
-        self.command(json!({
-            "name": "osd-overlay",
-            "id": STANDBY_OVERLAY,
-            "format": "ass-events",
-            "data": ass,
-            "res_x": CARD_WIDTH,
-            "res_y": CARD_HEIGHT,
-            "z": 0,
-        }))
-        .map(drop)
+    /// Hides and removes the flicker's track, if there is one.
+    pub(super) fn end_flicker(&mut self) -> Result<(), IpcError> {
+        let Some(id) = self.flicker.take() else {
+            return Ok(());
+        };
+        self.command(json!(["set_property", "secondary-sid", "no"]))?;
+        self.command(json!(["sub-remove", id])).map(drop)
     }
 
     fn set_shaders(&mut self, shaders: Vec<String>) -> Result<(), IpcError> {
@@ -205,19 +211,12 @@ impl Session {
         Ok(())
     }
 
-    /// Removes the stand-by card's overlay if it is up, and gives MPV the
-    /// global shaders if it has others. MPV refuses `osd-overlay` without
-    /// `data`, even for the format `none`.
+    /// Forgets the stand-by card and gives MPV the global shaders if it has
+    /// others. The card's subtitles, a flicker's included, need no command:
+    /// they leave with its playlist entry.
     fn leave_standby(&mut self) -> Result<(), IpcError> {
-        if self.standby.is_some() {
-            self.command(json!({
-                "name": "osd-overlay",
-                "id": STANDBY_OVERLAY,
-                "format": "none",
-                "data": "",
-            }))?;
-            self.standby = None;
-        }
+        self.standby = false;
+        self.flicker = None;
         if self.shaders != self.global_shaders {
             self.set_shaders(self.global_shaders.clone())?;
         }
@@ -475,80 +474,6 @@ impl Session {
         }
         Ok(())
     }
-}
-
-/// The stand-by card as ASS events for a 1920x1080 screen, one per line: a
-/// black band across the middle, then `text` three times in bold condensed
-/// capitals, red shifted left, cyan shifted right and white on top. Later
-/// events are drawn over earlier ones.
-pub(super) fn standby_ass(text: &str) -> String {
-    let text = ass_escape(&text.to_uppercase());
-    let (mid_x, mid_y) = (CARD_WIDTH / 2, (BAND_TOP + BAND_BOTTOM) / 2);
-    let band = format!(
-        r"{{\an7\pos(0,0)\bord0\shad0\1c&H000000&\p1}}m 0 {BAND_TOP} l {CARD_WIDTH} {BAND_TOP} {CARD_WIDTH} {BAND_BOTTOM} 0 {BAND_BOTTOM}{{\p0}}"
-    );
-    // DejaVu Sans is on the Pi; `\fscx80` narrows it to a condensed face.
-    // ASS colours are &HBBGGRR&.
-    let layer = |x: u32, colour: &str| {
-        format!(
-            r"{{\an5\pos({x},{mid_y})\fnDejaVu Sans\b1\fs150\fscx80\bord0\shad0\1c&H{colour}&}}{text}"
-        )
-    };
-    [
-        band,
-        layer(mid_x - CHROMA_SHIFT, "0000FF"),
-        layer(mid_x + CHROMA_SHIFT, "FFFF00"),
-        layer(mid_x, "FFFFFF"),
-    ]
-    .join("\n")
-}
-
-/// [`standby_ass`] torn by `tear`: the band is cut into horizontal strips
-/// that each move sideways by their offset, and the red and cyan copies of
-/// the text sit `tear.chroma` pixels from the white one. Each strip shows
-/// only its own rows of the text, through a `\clip`.
-pub(super) fn torn_standby_ass(text: &str, tear: &Tear) -> String {
-    let text = ass_escape(&text.to_uppercase());
-    let mid_y = (BAND_TOP + BAND_BOTTOM) / 2;
-    let height = BAND_BOTTOM - BAND_TOP;
-    let (width, mid_x) = (CARD_WIDTH as i32, (CARD_WIDTH / 2) as i32);
-    let chroma = tear.chroma as i32;
-    let mut events = Vec::new();
-    for (i, &dx) in tear.strips.iter().enumerate() {
-        let top = BAND_TOP + height * i as u32 / STRIPS as u32;
-        let bottom = BAND_TOP + height * (i as u32 + 1) / STRIPS as u32;
-        events.push(format!(
-            r"{{\an7\pos(0,0)\bord0\shad0\1c&H000000&\p1}}m {dx} {top} l {} {top} {} {bottom} {dx} {bottom}{{\p0}}",
-            width + dx,
-            width + dx
-        ));
-        for (shift, colour) in [(-chroma, "0000FF"), (chroma, "FFFF00"), (0, "FFFFFF")] {
-            events.push(format!(
-                r"{{\an5\pos({},{mid_y})\clip(0,{top},{CARD_WIDTH},{bottom})\fnDejaVu Sans\b1\fs150\fscx80\bord0\shad0\1c&H{colour}&}}{text}",
-                mid_x + dx + shift
-            ));
-        }
-    }
-    events.join("\n")
-}
-
-/// `text` as literal ASS text: a backslash cannot start an escape, a brace
-/// cannot open an override block, and a line break becomes `\N`.
-fn ass_escape(text: &str) -> String {
-    let mut escaped = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            // A word joiner after the backslash keeps it from escaping the
-            // next character, as MPV does for its own OSD text.
-            '\\' => escaped.push_str("\\\u{2060}"),
-            '{' => escaped.push_str(r"\{"),
-            '}' => escaped.push_str(r"\}"),
-            '\n' => escaped.push_str(r"\N"),
-            '\r' => {}
-            c => escaped.push(c),
-        }
-    }
-    escaped
 }
 
 /// Milliseconds as the seconds string MPV's `start` option takes.

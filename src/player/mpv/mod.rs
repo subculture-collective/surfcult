@@ -32,13 +32,14 @@
 //! # The stand-by card
 //!
 //! [`Player::show_standby`] plays [`MpvConfig::standby_source`], colour bars
-//! generated live by FFmpeg's `lavfi`, and draws a black band with
-//! [`MpvConfig::standby_text`] across the middle as an MPV `osd-overlay` in
-//! ASS. MPV draws the text itself through libass, so the card does not need
-//! an FFmpeg built with `drawtext`. The text is drawn three times for a
-//! chromatic offset: red shifted left, cyan shifted right and white on top.
-//! The overlay is removed before anything else is shown, queued or stopped.
-//! If MPV refuses part of the card, the player shows static instead.
+//! generated live by FFmpeg's `lavfi`, with a black band and
+//! [`MpvConfig::standby_text`] across the middle. The band and text are an
+//! ASS subtitle file ([`card`]) that the player writes into the runtime
+//! directory and MPV draws through libass, so the card does not need an
+//! FFmpeg built with `drawtext`. MPV blends the subtitles into the picture
+//! before the shaders run, so the CRT shader covers them too. The file is
+//! the subtitle track of the card's playlist entry only, so it leaves with
+//! the card. If the card cannot be shown, the player shows static instead.
 //!
 //! # Display filters
 //!
@@ -47,8 +48,9 @@
 //! filter once. The CRT shader ([`CRT_SHADER`]) is written into the runtime
 //! directory and set through MPV's `glsl-shaders` property: the global list
 //! as soon as MPV is up (also after a restart), the card's list while it
-//! shows. The text glitch is stepped in [`Player::poll_event`], which redraws
-//! the card's overlay torn for a moment and then as it was.
+//! shows. The glitch is stepped in [`Player::poll_event`]: for a moment MPV
+//! shows a second subtitle file, the card with a flicker, over the card's
+//! own as its secondary subtitle track, then removes it.
 //!
 //! # Events
 //!
@@ -78,6 +80,7 @@
 //! position rather than where it was when MPV died. Commands sent while MPV
 //! is down fail with a [`PlayerError`].
 
+mod card;
 mod glitch;
 mod ipc;
 #[cfg(test)]
@@ -98,7 +101,7 @@ use super::{
 };
 use crate::config::Display;
 use crate::library::MediaId;
-use glitch::{Glitch, Step};
+use glitch::{Flicker, Glitch, Step};
 use ipc::{IpcError, Session};
 
 /// MPV's output flags for the Pi 4B on its TV (ADR 0001, decision 2).
@@ -117,19 +120,24 @@ pub const PI_OUTPUT_ARGS: [&str; 6] = [
 pub const STATIC_SOURCE: &str =
     "av://lavfi:nullsrc=s=320x180:r=25,geq=lum='random(1)*255':cb=128:cr=128";
 
-/// The stand-by card's picture: SMPTE HD colour bars generated live by
-/// FFmpeg's `lavfi` at 640x360 and scaled up by MPV on the GPU. 30 frames a
+/// The stand-by card's picture: colour bars matched to the owner's design,
+/// a `lavfi` colour source with one `drawbox` per colour region
+/// (`assets/standby/bars.lavfi`, made by `tools/standby/gen.py`). FFmpeg
+/// generates it live at 640x360 and MPV scales it up on the GPU. 30 frames a
 /// second give the CRT shader's flicker and rolling band frames to move on.
 /// Silent: the source has no audio.
-pub const STANDBY_SOURCE: &str = "av://lavfi:smptehdbars=s=640x360:r=30";
+pub const STANDBY_SOURCE: &str =
+    include_str!("../../../assets/standby/bars.lavfi").trim_ascii_end();
 
 /// The CRT shader ([`Filter::Crt`]), from `assets/shaders/crt.glsl`.
 /// [`MpvPlayer::start`] writes it into the runtime directory, because MPV
 /// loads shaders from files.
 pub const CRT_SHADER: &str = include_str!("../../../assets/shaders/crt.glsl");
 
-/// The message across the middle of the stand-by card.
-pub const STANDBY_TEXT: &str = "PLEASE STAND BY";
+/// The message across the middle of the stand-by card. This text, in any
+/// case, is drawn from outlines of the Oswald typeface; any other text is
+/// set in DejaVu Sans Bold.
+pub const STANDBY_TEXT: &str = "PLEASE STANDBY";
 
 /// The shortest time between two starts of MPV.
 pub const RESTART_DELAY: Duration = Duration::from_secs(1);
@@ -161,7 +169,8 @@ pub struct MpvConfig {
     /// The MPV executable.
     pub binary: PathBuf,
     /// A directory only this user can open (mode 700). It holds the IPC
-    /// socket and the overlay bitmaps. It is created if missing; an existing
+    /// socket, the overlay bitmaps, the CRT shader and the stand-by card's
+    /// subtitle file. It is created if missing; an existing
     /// directory that others can open is refused.
     pub runtime_dir: PathBuf,
     /// Video and audio output flags, after the fixed ones.
@@ -174,7 +183,8 @@ pub struct MpvConfig {
     /// `static_source`.
     pub standby_source: String,
     /// The message [`Player::show_standby`] draws across the middle of the
-    /// screen.
+    /// screen. [`STANDBY_TEXT`] is drawn from the Oswald outlines; any other
+    /// text in DejaVu Sans Bold, which must be installed.
     pub standby_text: String,
     /// Display filters on everything on screen.
     pub filters: Vec<Filter>,
@@ -220,6 +230,16 @@ impl MpvConfig {
 
     fn socket(&self) -> PathBuf {
         self.runtime_dir.join("mpv.sock")
+    }
+
+    /// The stand-by card's subtitle file, or the one of its flicker.
+    fn standby_file(&self, flicker: bool) -> PathBuf {
+        let name = if flicker {
+            "standby-flicker.ass"
+        } else {
+            "standby.ass"
+        };
+        self.runtime_dir.join(name)
     }
 
     /// The file MPV loads the shader of `filter` from, if it has one.
@@ -324,7 +344,7 @@ pub struct MpvPlayer<R> {
     /// The shader files outside the stand-by card and on it.
     global_shaders: Vec<String>,
     standby_shaders: Vec<String>,
-    /// The text glitch, when the stand-by card has it.
+    /// The stand-by card's glitch, when the card has it.
     glitch: Option<Glitch>,
 }
 
@@ -345,6 +365,20 @@ impl<R> MpvPlayer<R> {
 
     fn overlay_file(&self, id: u8) -> PathBuf {
         self.config.runtime_dir.join(format!("overlay-{id}.bgra"))
+    }
+
+    /// Writes the stand-by card's subtitle file, or with `flicker` the
+    /// flicker's, and returns its path. A new file is renamed over the old
+    /// one, so MPV never reads half of it.
+    fn write_card(&self, flicker: Option<&Flicker>) -> Result<String, PlayerError> {
+        let file = self.config.standby_file(flicker.is_some());
+        let partial = file.with_extension("partial");
+        fs::write(&partial, card::card_ass(&self.config.standby_text, flicker))
+            .and_then(|()| fs::rename(&partial, &file))
+            .map_err(|e| PlayerError(format!("cannot write the stand-by card: {e}")))?;
+        file.into_os_string()
+            .into_string()
+            .map_err(|_| PlayerError("the runtime directory is not UTF-8".into()))
     }
 }
 
@@ -472,7 +506,8 @@ impl<R: StreamResolver> MpvPlayer<R> {
         }
     }
 
-    /// Tears or settles the stand-by card's band when its glitch is due.
+    /// Starts or ends a flicker of the stand-by card when one is due. A
+    /// flicker is a second subtitle file that MPV shows over the card's.
     fn step_glitch(&mut self) {
         let Some(glitch) = self.glitch.as_mut() else {
             return;
@@ -481,12 +516,14 @@ impl<R: StreamResolver> MpvPlayer<R> {
             glitch.disarm();
             return;
         }
-        let tear = match glitch.step(Instant::now()) {
+        let redrawn = match glitch.step(Instant::now()) {
             Step::Nothing => return,
-            Step::Tear(tear) => Some(tear),
-            Step::Settle => None,
+            Step::Flicker(flicker) => self
+                .write_card(Some(&flicker))
+                .and_then(|file| self.with_session(|s| s.start_flicker(&file))),
+            Step::Settle => self.with_session(Session::end_flicker),
         };
-        if let Err(e) = self.with_session(|s| s.redraw_standby(tear.as_ref())) {
+        if let Err(e) = redrawn {
             eprintln!("surfcult: cannot redraw the stand-by card: {e}");
         }
     }
@@ -525,6 +562,11 @@ impl<R> Drop for MpvPlayer<R> {
         if let Some(file) = self.config.shader_file(Filter::Crt) {
             let _ = fs::remove_file(file);
         }
+        for flicker in [false, true] {
+            let card = self.config.standby_file(flicker);
+            let _ = fs::remove_file(card.with_extension("partial"));
+            let _ = fs::remove_file(card);
+        }
         for id in 0..64 {
             let _ = fs::remove_file(self.overlay_file(id));
         }
@@ -539,16 +581,18 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
 
     fn show_standby(&mut self) -> Result<(), PlayerError> {
         let source = self.config.standby_source.clone();
-        let text = self.config.standby_text.clone();
-        let result = self.with_session(|s| s.show_standby(&source, &text));
+        let result = self
+            .write_card(None)
+            .and_then(|file| self.with_session(|s| s.show_standby(&source, &file)));
         match &result {
             Ok(()) => {
                 if let Some(glitch) = self.glitch.as_mut() {
                     glitch.arm(Instant::now());
                 }
             }
-            // MPV answered but refused part of the card, which may have left
-            // bars without their text. Static replaces them.
+            // The card's file could not be written, or MPV answered but
+            // refused part of the card, which may have left bars without
+            // their text. Static replaces them.
             Err(_) if self.session.is_some() => {
                 if let Err(e) = self.show_static() {
                     eprintln!("surfcult: cannot show static after the stand-by card failed: {e}");

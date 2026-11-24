@@ -7,11 +7,12 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Filter {
     /// A GLSL shader that makes the picture look like a CRT television:
-    /// scanlines, slight curvature with a vignette, red and cyan fringing
+    /// light scanlines, slight curvature with a soft vignette, red and cyan fringing
     /// toward the edges, a faint flicker and a slow rolling band.
     Crt,
-    /// Occasional glitches of the stand-by card's text band: it tears
-    /// sideways and its red and cyan copies jump apart for a moment.
+    /// An occasional flicker of the stand-by card's band: one or two thin
+    /// slices move a few pixels sideways and the red and cyan copies of the
+    /// text move a little further apart, for 80 to 150 ms.
     Glitch,
 }
 

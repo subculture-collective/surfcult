@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::ipc::{IpcError, Session, header_fields, seconds, standby_ass, torn_standby_ass};
+use super::ipc::{IpcError, Session, header_fields, seconds};
 use super::*;
 
 struct FakeMpv {
@@ -32,8 +32,9 @@ struct FakeMpv {
 
 impl FakeMpv {
     /// Listens on a new socket. Every `loadfile` gets the next entry id,
-    /// starting at 1; `get_property time-pos` answers `time_pos`; everything
-    /// else succeeds with no data.
+    /// starting at 1; `get_property time-pos` answers `time_pos`;
+    /// `get_property track-list` lists the file of the last `sub-add` as
+    /// subtitle track 2; everything else succeeds with no data.
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("mpv.sock");
@@ -105,6 +106,7 @@ impl FakeMpv {
             let mut serve = |stream: UnixStream| {
                 *w.lock().unwrap() = Some(stream.try_clone().unwrap());
                 let mut next_entry = 0;
+                let mut added = None;
                 for line in BufReader::new(stream).lines() {
                     let Ok(line) = line else { return };
                     let request: Value = serde_json::from_str(&line).unwrap();
@@ -133,6 +135,17 @@ impl FakeMpv {
                                 "data": { "playlist_entry_id": next_entry } })
                     } else if request["command"] == json!(["get_property", "time-pos"]) {
                         json!({ "request_id": id, "error": "success", "data": t.lock().unwrap().clone() })
+                    } else if name == "sub-add" {
+                        added = Some(command[1].clone());
+                        json!({ "request_id": id, "error": "success" })
+                    } else if request["command"] == json!(["get_property", "track-list"]) {
+                        // The video, the card's own track and the last added one.
+                        let tracks = json!([
+                            { "type": "video", "id": 1 },
+                            { "type": "sub", "id": 1, "external-filename": "/run/standby.ass" },
+                            { "type": "sub", "id": 2, "external-filename": added },
+                        ]);
+                        json!({ "request_id": id, "error": "success", "data": tracks })
                     } else {
                         json!({ "request_id": id, "error": "success", "data": null })
                     };
@@ -267,86 +280,111 @@ fn commands_become_mpv_commands() {
     );
 }
 
-fn standby_overlay() -> Value {
-    json!({
-        "name": "osd-overlay",
-        "id": 1,
-        "format": "ass-events",
-        "data": standby_ass("PLEASE STAND BY"),
-        "res_x": 1920,
-        "res_y": 1080,
-        "z": 0
-    })
-}
-
-fn standby_removed() -> Value {
-    json!({ "name": "osd-overlay", "id": 1, "format": "none", "data": "" })
+/// The `loadfile` of the stand-by card `source` with its subtitle file.
+fn card_loadfile(source: &str, subtitles: &str) -> Value {
+    json!(["loadfile", source, "replace", -1, {
+        "loop-file": "inf",
+        "sub-files-append": subtitles,
+        "blend-subtitles": "yes",
+        "secondary-sub-ass-override": "no"
+    }])
 }
 
 #[test]
-fn the_standby_card_loads_the_bars_and_draws_its_band_and_text() {
+fn the_standby_card_loads_the_bars_with_its_subtitles_blended() {
     let fake = FakeMpv::new();
     let mut session = fake.connect();
-    session.show_standby(STANDBY_SOURCE, STANDBY_TEXT).unwrap();
+    session
+        .show_standby(STANDBY_SOURCE, "/run/x/standby.ass")
+        .unwrap();
     assert_eq!(
         fake.commands(),
-        [
-            json!(["loadfile", "av://lavfi:smptehdbars=s=640x360:r=30", "replace", -1, {
-                "loop-file": "inf"
-            }]),
-            standby_overlay(),
-        ]
+        [card_loadfile(STANDBY_SOURCE, "/run/x/standby.ass")]
     );
-    let card = standby_ass("PLEASE STAND BY");
-    let lines: Vec<&str> = card.lines().collect();
-    assert_eq!(
-        lines,
-        [
-            r"{\an7\pos(0,0)\bord0\shad0\1c&H000000&\p1}m 0 430 l 1920 430 1920 650 0 650{\p0}",
-            r"{\an5\pos(952,540)\fnDejaVu Sans\b1\fs150\fscx80\bord0\shad0\1c&H0000FF&}PLEASE STAND BY",
-            r"{\an5\pos(968,540)\fnDejaVu Sans\b1\fs150\fscx80\bord0\shad0\1c&HFFFF00&}PLEASE STAND BY",
-            r"{\an5\pos(960,540)\fnDejaVu Sans\b1\fs150\fscx80\bord0\shad0\1c&HFFFFFF&}PLEASE STAND BY",
-        ]
-    );
+    assert!(session.standby_up());
+    assert!(STANDBY_SOURCE.starts_with("av://lavfi:color=c=0xFFFFFF:s=640x360:r=30,"));
 }
 
 #[test]
-fn the_standby_text_is_capitalized_and_cannot_inject_ass() {
-    let card = standby_ass("off {\\p1} air\\n\nnow");
-    let text = card.lines().nth(3).unwrap().split_once('}').unwrap().1;
-    assert_eq!(text, "OFF \\{\\\u{2060}P1\\} AIR\\\u{2060}N\\NNOW");
-}
-
-#[test]
-fn whatever_replaces_the_standby_card_removes_its_overlay_first() {
+fn leaving_the_standby_card_needs_no_command_of_its_own() {
     let fake = FakeMpv::new();
     let mut session = fake.connect();
     type Replace = fn(&mut Session);
-    let replacements: [(&str, Replace); 4] = [
-        ("show_static", |s| {
-            s.show_static("av://lavfi:noise").unwrap()
-        }),
-        ("play_clip", |s| {
-            s.play_clip(Path::new("/clips/a.mp4")).unwrap()
-        }),
-        ("queue_program", |s| {
-            s.queue_program(&Stream::new("http://jellyfin/x"), 0)
-                .unwrap()
-        }),
-        ("stop", |s| s.stop().unwrap()),
+    let replacements: [(&str, Replace, &str); 4] = [
+        (
+            "show_static",
+            |s| s.show_static("av://lavfi:noise").unwrap(),
+            "loadfile",
+        ),
+        (
+            "play_clip",
+            |s| s.play_clip(Path::new("/clips/a.mp4")).unwrap(),
+            "loadfile",
+        ),
+        (
+            "queue_program",
+            |s| {
+                s.queue_program(&Stream::new("http://jellyfin/x"), 0)
+                    .unwrap()
+            },
+            "set_property",
+        ),
+        ("stop", |s| s.stop().unwrap(), "stop"),
     ];
-    for (name, replace) in replacements {
-        session.show_standby("av://lavfi:bars", "STAND BY").unwrap();
+    for (name, replace, first) in replacements {
+        session
+            .show_standby("av://lavfi:bars", "/run/standby.ass")
+            .unwrap();
+        // Replaced in the middle of a flicker.
+        session.start_flicker("/run/standby-flicker.ass").unwrap();
         fake.commands();
         replace(&mut session);
+        // The subtitles belong to the card's playlist entry, so the command
+        // that replaces it is the first and only one.
         let commands = fake.commands();
-        assert_eq!(commands[0], standby_removed(), "{name}");
-        assert!(!commands[1..].contains(&standby_removed()), "{name}");
-
-        // The overlay is gone, so the next command removes nothing.
-        replace(&mut session);
-        assert!(!fake.commands().contains(&standby_removed()), "{name}");
+        assert_eq!(commands[0][0], json!(first), "{name}");
+        assert!(
+            !commands
+                .iter()
+                .any(|c| c[0] == json!("sub-remove") || c[1] == json!("secondary-sid")),
+            "{name}"
+        );
+        assert!(!session.standby_up(), "{name}");
+        // A flicker's end or start after the card is gone sends nothing.
+        session.end_flicker().unwrap();
+        session.start_flicker("/run/standby-flicker.ass").unwrap();
+        assert!(fake.commands().is_empty(), "{name}");
     }
+}
+
+#[test]
+fn a_flicker_is_a_secondary_track_over_the_card() {
+    let fake = FakeMpv::new();
+    let mut session = fake.connect();
+    session
+        .show_standby("av://lavfi:bars", "/run/standby.ass")
+        .unwrap();
+    fake.commands();
+    session.start_flicker("/run/standby-flicker.ass").unwrap();
+    // A second start while it flickers changes nothing.
+    session.start_flicker("/run/standby-flicker.ass").unwrap();
+    assert_eq!(
+        fake.commands(),
+        [
+            json!(["sub-add", "/run/standby-flicker.ass", "auto"]),
+            json!(["get_property", "track-list"]),
+            json!(["set_property", "secondary-sid", 2]),
+        ]
+    );
+    session.end_flicker().unwrap();
+    session.end_flicker().unwrap();
+    assert_eq!(
+        fake.commands(),
+        [
+            json!(["set_property", "secondary-sid", "no"]),
+            json!(["sub-remove", 2]),
+        ]
+    );
 }
 
 #[test]
@@ -681,7 +719,9 @@ fn the_standby_card_switches_to_its_shaders_and_leaving_it_restores_the_global_o
         .unwrap();
     assert_eq!(fake.commands(), [shaders(&["/run/g.glsl"])]);
 
-    session.show_standby("av://lavfi:bars", "STAND BY").unwrap();
+    session
+        .show_standby("av://lavfi:bars", "/run/standby.ass")
+        .unwrap();
     let commands = fake.commands();
     assert_eq!(commands[0], shaders(&["/run/g.glsl", "/run/crt.glsl"]));
     assert_eq!(commands[1][0], json!("loadfile"));
@@ -690,10 +730,7 @@ fn the_standby_card_switches_to_its_shaders_and_leaving_it_restores_the_global_o
     // the global list once.
     session.play_clip(Path::new("/clips/a.mp4")).unwrap();
     let commands = fake.commands();
-    assert_eq!(
-        commands[..2],
-        [standby_removed(), shaders(&["/run/g.glsl"])]
-    );
+    assert_eq!(commands[0], shaders(&["/run/g.glsl"]));
     session.show_static("av://lavfi:noise").unwrap();
     assert!(
         !fake
@@ -711,7 +748,9 @@ fn without_shaders_on_the_card_no_shader_command_is_sent() {
         .use_shaders(vec!["/run/crt.glsl".into()], vec!["/run/crt.glsl".into()])
         .unwrap();
     fake.commands();
-    session.show_standby("av://lavfi:bars", "STAND BY").unwrap();
+    session
+        .show_standby("av://lavfi:bars", "/run/standby.ass")
+        .unwrap();
     session.stop().unwrap();
     assert!(
         !fake
@@ -760,36 +799,49 @@ fn the_player_gives_the_card_the_global_filters_then_its_own_once() {
 }
 
 #[test]
-fn a_rejected_card_overlay_falls_back_to_static() {
+fn a_rejected_card_falls_back_to_static() {
     let fake = FakeMpv::new();
     let dir = tempfile::tempdir().unwrap();
     let mut player = player_on(&fake, dir.path());
     let crt = dir.path().join("crt.glsl").to_str().unwrap().to_owned();
-    *fake.reject_only.lock().unwrap() = Some("osd-overlay".into());
+    let card = dir.path().join("standby.ass").to_str().unwrap().to_owned();
+    *fake.reject_only.lock().unwrap() = Some("loadfile".into());
     *fake.reject.lock().unwrap() = Some("invalid parameter".into());
     let error = player.show_standby().unwrap_err();
     assert_eq!(
         error,
-        PlayerError("MPV rejected osd-overlay: invalid parameter".into())
+        PlayerError("MPV rejected loadfile: invalid parameter".into())
     );
-    let commands = fake.commands();
     assert_eq!(
-        commands[..3],
+        fake.commands(),
         [
             shaders(&[&crt]),
-            json!(["loadfile", STANDBY_SOURCE, "replace", -1, { "loop-file": "inf" }]),
-            standby_overlay(),
-        ]
-    );
-    // Static replaces the textless bars, with the global (empty) shaders.
-    assert_eq!(
-        commands[3..],
-        [
+            card_loadfile(STANDBY_SOURCE, &card),
+            // Static replaces whatever is left, with the global (empty)
+            // shaders. (The fake refuses it too.)
             shaders(&[]),
             json!(["loadfile", STATIC_SOURCE, "replace", -1, { "loop-file": "inf" }]),
         ]
     );
     assert!(!player.session.as_ref().unwrap().standby_up());
+}
+
+#[test]
+fn a_card_that_cannot_be_written_falls_back_to_static() {
+    let fake = FakeMpv::new();
+    let dir = tempfile::tempdir().unwrap();
+    let mut player = player_on(&fake, dir.path());
+    // A directory in the file's place: the rename fails.
+    fs::create_dir(dir.path().join("standby.ass")).unwrap();
+    let error = player.show_standby().unwrap_err();
+    assert!(
+        error.0.starts_with("cannot write the stand-by card"),
+        "{error:?}"
+    );
+    assert_eq!(
+        fake.commands(),
+        [json!(["loadfile", STATIC_SOURCE, "replace", -1, { "loop-file": "inf" }])]
+    );
 }
 
 #[test]
@@ -809,6 +861,8 @@ fn a_restart_gives_the_new_mpv_the_global_shaders() {
 
     player.show_standby().unwrap();
     fake.commands();
+    let card = run.join("standby.ass");
+    assert!(fs::read_to_string(&card).unwrap().contains("[Events]"));
     let killed = std::process::Command::new("kill")
         .args(["-KILL", &player.pid().unwrap().to_string()])
         .status()
@@ -825,15 +879,19 @@ fn a_restart_gives_the_new_mpv_the_global_shaders() {
     assert_eq!(fake.commands()[0][0], json!("loadfile"));
     drop(player);
     assert!(!crt.exists());
+    assert!(!card.exists());
 }
 
 #[test]
-fn the_glitch_tears_the_band_and_then_restores_it() {
+fn the_glitch_flickers_the_card_and_then_restores_it() {
     let fake = FakeMpv::new();
     let dir = tempfile::tempdir().unwrap();
     let mut player = player_on(&fake, dir.path());
+    let card = dir.path().join("standby.ass");
     player.show_standby().unwrap();
     fake.commands();
+    let normal = fs::read_to_string(&card).unwrap();
+    assert_eq!(normal, card::card_ass(STANDBY_TEXT, None));
     // Nothing is due yet.
     assert_eq!(player.poll_event(), None);
     assert!(fake.commands().is_empty());
@@ -841,24 +899,36 @@ fn the_glitch_tears_the_band_and_then_restores_it() {
     let past = Instant::now() - Duration::from_millis(1);
     player.glitch.as_mut().unwrap().state = glitch::State::Waiting(past);
     assert_eq!(player.poll_event(), None);
+    let flicker = dir.path().join("standby-flicker.ass");
+    let flicker_path = flicker.to_str().unwrap();
     let commands = fake.commands();
-    assert_eq!(commands.len(), 1);
-    let torn = commands[0]["data"].as_str().unwrap();
-    assert_eq!(commands[0]["name"], json!("osd-overlay"));
-    assert_eq!(commands[0]["id"], json!(1));
-    assert!(torn.contains(r"\clip("), "{torn}");
+    assert_eq!(commands[0], json!(["sub-add", flicker_path, "auto"]));
+    assert_eq!(commands[2], json!(["set_property", "secondary-sid", 2]));
+    let flickering = fs::read_to_string(&flicker).unwrap();
+    assert_ne!(flickering, normal);
+    assert!(flickering.starts_with("[Script Info]"));
+    // The card's own file does not change.
+    assert_eq!(fs::read_to_string(&card).unwrap(), normal);
     assert!(matches!(
         player.glitch.as_ref().unwrap().state,
-        glitch::State::Tearing(_)
+        glitch::State::Flickering(_)
     ));
 
-    player.glitch.as_mut().unwrap().state = glitch::State::Tearing(past);
+    player.glitch.as_mut().unwrap().state = glitch::State::Flickering(past);
     assert_eq!(player.poll_event(), None);
-    assert_eq!(fake.commands(), [standby_overlay()]);
+    assert_eq!(
+        fake.commands(),
+        [
+            json!(["set_property", "secondary-sid", "no"]),
+            json!(["sub-remove", 2]),
+        ]
+    );
     assert!(matches!(
         player.glitch.as_ref().unwrap().state,
         glitch::State::Waiting(at) if at > Instant::now()
     ));
+    drop(player);
+    assert!(!card.exists() && !flicker.exists());
 }
 
 #[test]
@@ -867,9 +937,9 @@ fn nothing_glitches_when_the_card_is_not_up() {
     let dir = tempfile::tempdir().unwrap();
     let mut player = player_on(&fake, dir.path());
     player.show_standby().unwrap();
-    // The card is replaced in the middle of a glitch.
+    // The card is replaced in the middle of a flicker.
     player.glitch.as_mut().unwrap().state =
-        glitch::State::Tearing(Instant::now() - Duration::from_millis(1));
+        glitch::State::Flickering(Instant::now() - Duration::from_millis(1));
     player.show_static().unwrap();
     fake.commands();
     assert_eq!(player.poll_event(), None);
@@ -881,28 +951,6 @@ fn nothing_glitches_when_the_card_is_not_up() {
         glitch::State::Waiting(Instant::now() - Duration::from_millis(1));
     assert_eq!(player.poll_event(), None);
     assert!(fake.commands().is_empty());
-}
-
-#[test]
-fn a_torn_band_moves_each_strip_and_pushes_the_colours_apart() {
-    let tear = glitch::Tear {
-        strips: [-40, 0, 12, 90],
-        chroma: 30,
-    };
-    let card = torn_standby_ass("stand by", &tear);
-    let lines: Vec<&str> = card.lines().collect();
-    assert_eq!(lines.len(), 16);
-    assert_eq!(
-        lines[0],
-        r"{\an7\pos(0,0)\bord0\shad0\1c&H000000&\p1}m -40 430 l 1880 430 1880 485 -40 485{\p0}"
-    );
-    assert_eq!(
-        lines[1],
-        r"{\an5\pos(890,540)\clip(0,430,1920,485)\fnDejaVu Sans\b1\fs150\fscx80\bord0\shad0\1c&H0000FF&}STAND BY"
-    );
-    assert!(lines[2].starts_with(r"{\an5\pos(950,540)\clip(0,430,1920,485)"));
-    assert!(lines[3].starts_with(r"{\an5\pos(920,540)\clip(0,430,1920,485)"));
-    assert!(lines[12].contains("m 90 595 l 2010 595 2010 650 90 650"));
 }
 
 /// Tests against the real `mpv` binary, headless (`--vo=null --ao=null`).
@@ -1175,7 +1223,7 @@ mod real {
     }
 
     #[test]
-    fn the_card_switches_mpv_to_its_shaders_and_its_glitch_is_accepted() {
+    fn the_card_brings_its_shaders_and_subtitles_and_takes_them_away() {
         if !tools() {
             return;
         }
@@ -1187,20 +1235,60 @@ mod real {
         let property = |player: &mut MpvPlayer<_>, name: &str| -> Value {
             player.session.as_mut().unwrap().get_property(name).unwrap()
         };
+        // The selected subtitle track, if any, and whether it is the card's.
+        let subtitles = |player: &mut MpvPlayer<_>| -> Vec<(bool, Value)> {
+            let tracks = property(player, "track-list");
+            tracks
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|t| t["type"] == json!("sub"))
+                .map(|t| (t["selected"] == json!(true), t["external-filename"].clone()))
+                .collect()
+        };
+        let card = json!(run.join("standby.ass").to_str().unwrap());
         assert_eq!(property(&mut player, "glsl-shaders"), json!([]));
         player.show_standby().unwrap();
+        wait_for(&mut player, 1, |_| false);
         assert_eq!(property(&mut player, "glsl-shaders"), json!([crt]));
+        assert_eq!(subtitles(&mut player), [(true, card.clone())]);
+        assert_eq!(property(&mut player, "blend-subtitles"), json!(true));
 
-        // A torn band and the settled one are both drawn without an error.
+        // A flicker shows its file as the secondary track over the card's
+        // and is removed when it settles; the card's track stays selected.
         let past = Instant::now() - Duration::from_millis(1);
         player.glitch.as_mut().unwrap().state = glitch::State::Waiting(past);
         player.step_glitch();
-        player.glitch.as_mut().unwrap().state = glitch::State::Tearing(past);
+        let flicker = json!(run.join("standby-flicker.ass").to_str().unwrap());
+        assert_eq!(
+            subtitles(&mut player),
+            [(true, card.clone()), (true, flicker)]
+        );
+        assert_eq!(property(&mut player, "secondary-sid"), json!(2));
+        assert_eq!(
+            property(&mut player, "secondary-sub-ass-override"),
+            json!(false)
+        );
+        player.glitch.as_mut().unwrap().state = glitch::State::Flickering(past);
         player.step_glitch();
         assert!(player.session.as_ref().unwrap().standby_up());
+        assert_eq!(subtitles(&mut player), [(true, card)]);
+        assert_eq!(property(&mut player, "secondary-sid"), json!(false));
 
+        // A flicker in progress goes with the card. Static brings no
+        // subtitles, no blending and MPV's default for secondary subtitles.
+        player.glitch.as_mut().unwrap().state = glitch::State::Waiting(past);
+        player.step_glitch();
         player.show_static().unwrap();
+        wait_for(&mut player, 1, |_| false);
         assert_eq!(property(&mut player, "glsl-shaders"), json!([]));
+        assert_eq!(subtitles(&mut player), []);
+        assert_eq!(property(&mut player, "blend-subtitles"), json!(false));
+        assert_eq!(property(&mut player, "secondary-sid"), json!(false));
+        assert_eq!(
+            property(&mut player, "secondary-sub-ass-override"),
+            json!("strip")
+        );
     }
 
     /// Compiles the CRT shader on a real GPU, as OpenGL ES like the Pi's.

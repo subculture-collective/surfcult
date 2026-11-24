@@ -67,9 +67,10 @@ weights = { "Groundhog Day" = 3 }
 #                    stand-by card
 #   standby_filters  added while the stand-by card shows; a filter already in
 #                    `filters` is applied once
-#   glitch_every     mean time between glitches of the stand-by card's text
+#   glitch_every     mean time between flickers of the stand-by card's band
 # Filters: crt (a CRT look: scanlines, curvature, colour fringing, flicker,
-# a rolling band) and glitch (the card's text tears now and then). An empty
+# a rolling band; on the card it covers the band and text too) and glitch
+# (thin slices of the card's band shift for a moment now and then). An empty
 # list turns its filters off.
 # [display]
 # filters = []

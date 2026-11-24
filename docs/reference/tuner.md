@@ -58,7 +58,7 @@ A second `tune` replaces the running sequence. It shows static, which also clear
 
 ## When there is nothing to show
 
-The tuner sets `State::Failed` with a `Reason`. When the schedule has nothing to play, it replaces static with the stand-by card (`Player::show_standby`, colour bars with PLEASE STAND BY; see [player.md](player.md#the-stand-by-card)):
+The tuner sets `State::Failed` with a `Reason`. When the schedule has nothing to play, it replaces static with the stand-by card (`Player::show_standby`, colour bars with PLEASE STANDBY; see [player.md](player.md#the-stand-by-card)):
 
 - the channel has no events from now to an hour after the clip ends (`NoEvents`);
 - nothing is scheduled when the clip ends, or nothing follows the break (`Gap`);
@@ -71,7 +71,7 @@ It leaves static up when:
 - the schedule cannot be read (`Schedule`);
 - the player rejects a command (`Player`). If the player rejects the stand-by card, the reason is `Player`, not the schedule reason, and `MpvPlayer` shows static in place of a card MPV refused in part.
 
-The card brings its display filters (by default the CRT shader and the text glitch; see [player.md](player.md#display-filters)), so they apply in each of the cases above.
+The card brings its display filters (by default the CRT shader and the glitch; see [player.md](player.md#display-filters)), so they apply in each of the cases above.
 
 The player commands for a channel with no events are `ShowStatic` at the key press and `ShowStandby` 0.5 s later. The tuner does not retry. The screen stays as it is until the next `tune`, or until the player restarts.
 
