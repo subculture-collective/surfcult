@@ -1,22 +1,22 @@
 # Schedule generator
 
-The code is in `src/schedule/`. It turns a pool of media items into `timeline::Event`s for one channel: `sequential` and `shuffle` channels, programs back to back, seven days ahead. Breaks, grids, `weighted`, `blocks` and regeneration are not done yet.
+The code is in `src/schedule/`. It turns a pool of media items into `timeline::Event`s for one channel: `sequential` and `shuffle` channels, programs back to back with commercial breaks, seven days ahead. Grids, `weighted`, `blocks` and regeneration are not done yet.
 
 ## Two layers
 
-`generate(&Params, pool, &Resume, start_ms, end_ms)` is a pure function inside the crate. It reads no clock and does no I/O. `Params` holds the channel number and the `Mode`. `Resume` holds `recent`, the media ids of earlier programs, newest first; the first of them is the cursor, the last item scheduled. It returns `Generated { events, cursor, notes }`. Times are Unix epoch milliseconds.
+`generate(&Params, pool, &Resume, start_ms, end_ms)` is a pure function inside the crate. It reads no clock and does no I/O. `Params` holds the channel number, the `Mode` and an optional `BreakPlan` (the break interval and length, the break pool's clips and the filler pool's clips). `Resume` holds `recent`, the media ids of earlier programs, newest first, of which the first is the cursor, the last item scheduled; and `last_break`, the start time and media id of the last break clip. It returns `Generated { events, cursor, notes }`. Times are Unix epoch milliseconds.
 
-`schedule::extend(&mut Store, &Channel, pool, now_ms, clock_trusted)` keeps a channel's week filled. The caller supplies the pool as a slice of `MediaItem`s: it takes `source` from the channel's `Plan::Fixed`, resolves it with `library::resolve_pool` and passes the result to `extend`. Until #30 only a `jellyfin_collection` source resolves, to the collection's cached members in collection order; the other sources return `PoolError::Unsupported`, so a channel never falls back to the whole library. `extend` returns `Extended::ClockNotTrusted` and touches nothing when `clock_trusted` is false, because a Pi with an unsynchronized clock must not store a wrong week. Otherwise it starts at the later of `now_ms` and the end of the last stored event and generates up to `now_ms` plus seven days (`HORIZON_MS`). If the schedule already reaches that far it returns `Extended::UpToDate`. It never reads the system clock.
+`schedule::extend(&mut Store, &Channel, pool, clips, now_ms, clock_trusted)` keeps a channel's week filled. `clips` is the scanned clip pools, `ClipLibrary::pools()`; a channel with `breaks` finds its break pool and its `filler` pool there by name, and a missing pool counts as empty. The caller supplies the pool as a slice of `MediaItem`s: it takes `source` from the channel's `Plan::Fixed`, resolves it with `library::resolve_pool` and passes the result to `extend`. Until #30 only a `jellyfin_collection` source resolves, to the collection's cached members in collection order; the other sources return `PoolError::Unsupported`, so a channel never falls back to the whole library. `extend` returns `Extended::ClockNotTrusted` and touches nothing when `clock_trusted` is false, because a Pi with an unsynchronized clock must not store a wrong week. Otherwise it starts at the later of `now_ms` and the end of the last stored event and generates up to `now_ms` plus seven days (`HORIZON_MS`). If the schedule already reaches that far it returns `Extended::UpToDate`. It never reads the system clock.
 
-The resume point comes from the stored events, not from a separate cursor. The cursor is the media id of the channel's last program event that starts before the new window, at any time, past or future. A sequential channel reads only that one event (`Store::last_program_before`). A shuffle channel reads its most recent program events, newest first, in pages of twice the pool's length (`Store::recent_programs_before`, which walks back on the primary key). It reads the next page, bounded by the oldest start time so far, until the rows hold the N - k distinct pool items cooling down (see Shuffle) or the history ends, and passes the rows as `Resume::recent`. One page is usually enough; the read reaches further back only when the recent programs are mostly ids no longer in the pool, or when the history is shorter than N - k distinct pool items, in which case it reads the whole history. Writing the new events is the only write and is one transaction, so a crash cannot leave the schedule and the resume point disagreeing. Because the resume point is read from the events, `Store::replace_events_from` also moves it back to the last program it keeps.
+The resume point comes from the stored events, not from a separate cursor. The cursor is the media id of the channel's last program event that starts before the new window, at any time, past or future. A sequential channel reads only that one event (`Store::last_program_before`). A shuffle channel reads its most recent program events, newest first, in pages of twice the pool's length (`Store::recent_programs_before`, which walks back on the primary key). It reads the next page, bounded by the oldest start time so far, until the rows hold the N - k distinct pool items cooling down (see Shuffle) or the history ends, and passes the rows as `Resume::recent`. One page is usually enough; the read reaches further back only when the recent programs are mostly ids no longer in the pool, or when the history is shorter than N - k distinct pool items, in which case it reads the whole history. Writing the new events is the only write and is one transaction, so a crash cannot leave the schedule and the resume point disagreeing. Because the resume point is read from the events, `Store::replace_events_from` also moves it back to the last program it keeps. A channel with breaks also reads its last stored break event from the last 24 hours (`Store::last_break_before`) as `Resume::last_break`, so the break rotation continues where it stopped. The read stops at that bound, so a channel that never stores a break does not walk its whole history on every extend.
 
 ## Rules for every run
 
-- Each program is one `Program` event with `media_offset_ms` 0 and `media_duration_ms` set to the item's runtime. It starts where the last one ended.
-- The events cover the whole window with no gap and no overlap. The last event may end after the window.
+- Without breaks, each program is one `Program` event with `media_offset_ms` 0 and `media_duration_ms` set to the item's runtime. It starts where the last one ended.
+- The events cover the whole window with no gap and no overlap. The last program may end after the window. A program cut by breaks is written whole, so a run always ends on a program's last segment.
 - An item with a runtime of 0 is skipped. An id that appears twice in the pool is used once.
 - A pool with nothing playable gives no events and `Note::NoPlayableItems`. Nothing is written, so the resume point stays as it was.
-- A `grid`, `breaks` or `filler` setting on the channel is ignored for now.
+- A `grid` setting on the channel is ignored for now.
 
 ## Sequential
 
@@ -41,7 +41,35 @@ Limits:
 - There are no passes, so there is no guarantee that every item plays once before any item plays twice.
 - If the whole stored history holds fewer than N - k distinct pool items, for example on a new channel or after the pool changed, fewer items are cooling down and more are eligible.
 
+## Breaks
+
+A channel with `breaks = { every, length, pool }` has its programs cut, and each cut filled with a break. Breaks add to the slot: a 22-minute program with two 2-minute breaks occupies 26 minutes, as three program events and the break events between them.
+
+### Where a program is cut
+
+- The nominal cuts are the multiples of `every` in the program's own time, strictly inside its runtime. There is no cut at the end; the break between programs is grid work.
+- Each cut moves to the nearest Jellyfin chapter mark within 60 seconds (`schedule::SNAP_MS`), the earlier mark on a tie, as long as the mark is after the previous cut and before the end. With no such mark the cut stays at the interval.
+- Every program event of a cut item has the item's `media_id` and runtime as `media_duration_ms`. The first starts at offset 0 and each later one at the previous cut, so a tune-in seek is always "this media at this offset".
+
+### What fills a break
+
+- The break pool's clips are walked once, in pool order, starting after the last clip placed. Each clip that fits in the time left is placed as one `Break` event as long as the clip, rounded up to a whole millisecond. A clip is never cut and never plays twice in one break. A clip longer than the time left is skipped and waits for a later break.
+- The time left over is one `Filler` event from the channel's `filler` pool, exactly as long as the shortfall. It plays the shortest filler clip at least that long, or the longest filler clip if none is long enough. This pad is the only piece that may stop before its clip ends, or run past it, so the filler pool should hold idents and slates.
+- Without a usable filler clip a break comes out shorter than `length`. A break with nothing to show at all is left out and the program runs on uncut. Both count toward `Note::ShortBreaks { count }`.
+
+### Rotation and frequency
+
+`channels.toml` has no rotation or frequency settings, so the generator applies fixed rules. Clips rotate in pool order from break to break, and a clip plays at most once per break. The rotation continues after the channel's last stored break clip; if that clip is no longer in the pool it starts again at the first clip. The rotation remembers its place for 24 hours (`ROTATION_MEMORY_MS`): a break that starts more than 24 hours after the last break clip started begins at the first clip. An unbroken run applies the same rule, so `extend` only needs to read the last day of events, and a resumed run still matches an unbroken one. Clips that share a media id, such as one file reached through two symlinks, count once, at the first one's place in the pool.
+
+### Clip ids
+
+A clip's `media_id` is its canonical path as text (`schedule::clip_media_id`). Clips whose path is not valid UTF-8 are left out. The event kind tells a clip (`Break`, `Filler`) from a Jellyfin item (`Program`). The tuner already joins at the program after a break (`timeline::program_from`), so it plays no break clips yet.
+
+### Determinism
+
+Cuts, fill and padding use no randomness. They depend only on the item, its chapters, the two pools and the last stored break clip and its start time, and the shuffle still seeds each program from the channel and the program's first start time. A run resumed at a program boundary, as `extend` always resumes, gives the same events as an unbroken run. The shuffle cooldown counts a cut program once.
+
 ## Notes for later work
 
-- Breaks will cut a program into several events with the same `media_id`. The cooldown walk already counts them as one item, but each event uses a row of the history read, so the read may need more pages.
+- A cut program has several events with the same `media_id`. The cooldown walk counts them as one item, but each event uses a row of the history read, so the read needs more pages.
 - A run stops with `ScheduleError::TooManyEvents` after 200,000 events, which only happens when runtimes are seconds long.

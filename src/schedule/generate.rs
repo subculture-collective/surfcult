@@ -2,17 +2,20 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::breaks::{BreakPlan, Rotation, cut_points};
 use super::rng::{self, SplitMix64};
 use super::{Generated, MAX_EVENTS, Note, ScheduleError};
 use crate::config::Mode;
 use crate::library::{MediaId, MediaItem};
 use crate::timeline::{Event, EventKind};
 
-/// Who the schedule is for and how it is ordered.
+/// Who the schedule is for, how it is ordered and where its breaks go.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Params {
+pub(crate) struct Params<'a> {
     pub channel: u32,
     pub mode: Mode,
+    /// `None` schedules each program whole, with no breaks.
+    pub breaks: Option<BreakPlan<'a>>,
 }
 
 /// Where the previous run stopped.
@@ -22,6 +25,10 @@ pub(crate) struct Resume {
     /// first is the cursor, the last item scheduled. Sequential reads only the
     /// cursor; shuffle reads as many as it needs to find the items cooling down.
     pub recent: Vec<MediaId>,
+    /// The start time and media id of the last break clip scheduled before
+    /// this run. The break pool's rotation continues after it unless the next
+    /// break starts more than [`ROTATION_MEMORY_MS`](super::ROTATION_MEMORY_MS) later.
+    pub last_break: Option<(i64, MediaId)>,
 }
 
 impl Resume {
@@ -33,7 +40,7 @@ impl Resume {
 /// Generates events covering `[start_ms, end_ms)`. The last event may end after
 /// `end_ms`. `start_ms >= end_ms` gives no events.
 pub(crate) fn generate(
-    params: &Params,
+    params: &Params<'_>,
     pool: &[MediaItem],
     resume: &Resume,
     start_ms: i64,
@@ -63,34 +70,109 @@ pub(crate) fn generate(
         _ => Picker::shuffle(unique, params, resume),
     };
 
-    let mut events = Vec::new();
+    let mut rotation = params.breaks.as_ref().map(|plan| {
+        (
+            plan.every_ms,
+            Rotation::new(plan, resume.last_break.as_ref()),
+        )
+    });
+    let mut short_breaks = 0;
+
+    let mut out = Out {
+        events: Vec::new(),
+        at_ms: start_ms,
+    };
     let mut cursor = resume.cursor().cloned();
-    let mut at_ms = start_ms;
-    while at_ms < end_ms {
-        if events.len() >= MAX_EVENTS {
-            return Err(ScheduleError::TooManyEvents);
+    while out.at_ms < end_ms {
+        let item = picker.next(out.at_ms);
+        let runtime = item.runtime_ms;
+        let mut segment_from = 0;
+        if let Some((every_ms, rotation)) = rotation.as_mut() {
+            for cut in cut_points(item, *every_ms) {
+                let length = i64::try_from(cut - segment_from).unwrap_or(i64::MAX);
+                let (pieces, short) = rotation.fill(out.at_ms.saturating_add(length));
+                short_breaks += usize::from(short);
+                // A break with nothing to show is left out and the program
+                // runs on.
+                if pieces.is_empty() {
+                    continue;
+                }
+                out.push(
+                    &item.id,
+                    segment_from,
+                    cut - segment_from,
+                    runtime,
+                    EventKind::Program,
+                )?;
+                for piece in pieces {
+                    out.push(
+                        &piece.media_id,
+                        0,
+                        piece.length_ms,
+                        piece.media_duration_ms,
+                        piece.kind,
+                    )?;
+                }
+                segment_from = cut;
+            }
         }
-        let item = picker.next(at_ms);
-        let runtime = i64::try_from(item.runtime_ms).map_err(|_| ScheduleError::TimeOutOfRange)?;
-        let next_ms = at_ms
-            .checked_add(runtime)
-            .ok_or(ScheduleError::TimeOutOfRange)?;
-        events.push(Event {
-            start_ms: at_ms,
-            end_ms: next_ms,
-            media_id: item.id.clone(),
-            media_offset_ms: 0,
-            media_duration_ms: item.runtime_ms,
-            kind: EventKind::Program,
-        });
+        out.push(
+            &item.id,
+            segment_from,
+            runtime - segment_from,
+            runtime,
+            EventKind::Program,
+        )?;
         cursor = Some(item.id.clone());
-        at_ms = next_ms;
     }
+    if short_breaks > 0 {
+        notes.push(Note::ShortBreaks {
+            count: short_breaks,
+        });
+    }
+    let events = out.events;
     Ok(Generated {
         events,
         cursor,
         notes,
     })
+}
+
+/// The events of a run, appended back to back from `at_ms`.
+struct Out {
+    events: Vec<Event>,
+    /// Where the next event starts.
+    at_ms: i64,
+}
+
+impl Out {
+    fn push(
+        &mut self,
+        media_id: &MediaId,
+        media_offset_ms: u64,
+        length_ms: u64,
+        media_duration_ms: u64,
+        kind: EventKind,
+    ) -> Result<(), ScheduleError> {
+        if self.events.len() >= MAX_EVENTS {
+            return Err(ScheduleError::TooManyEvents);
+        }
+        let length = i64::try_from(length_ms).map_err(|_| ScheduleError::TimeOutOfRange)?;
+        let end_ms = self
+            .at_ms
+            .checked_add(length)
+            .ok_or(ScheduleError::TimeOutOfRange)?;
+        self.events.push(Event {
+            start_ms: self.at_ms,
+            end_ms,
+            media_id: media_id.clone(),
+            media_offset_ms,
+            media_duration_ms,
+            kind,
+        });
+        self.at_ms = end_ms;
+        Ok(())
+    }
 }
 
 /// How many distinct items a shuffle over `n` playable items keeps cooling
@@ -157,7 +239,7 @@ impl<'a> Picker<'a> {
         }
     }
 
-    fn shuffle(items: Vec<&'a MediaItem>, params: &Params, resume: &Resume) -> Self {
+    fn shuffle(items: Vec<&'a MediaItem>, params: &Params<'_>, resume: &Resume) -> Self {
         let playable: Vec<&MediaItem> = items.into_iter().filter(|i| i.runtime_ms > 0).collect();
         let index: HashMap<&str, usize> = playable
             .iter()

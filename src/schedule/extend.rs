@@ -3,7 +3,10 @@
 
 use std::collections::HashSet;
 
-use super::{Note, Params, Resume, ScheduleError, cooling_target, generate};
+use super::{
+    BreakPlan, Note, Params, ROTATION_MEMORY_MS, Resume, ScheduleError, cooling_target, generate,
+};
+use crate::clips::Pool;
 use crate::config::{Channel, Mode, Plan};
 use crate::library::{MediaId, MediaItem};
 use crate::store::Store;
@@ -29,6 +32,12 @@ pub enum Extended {
 
 /// Fills `channel`'s schedule from `pool` up to `now_ms` plus seven days.
 ///
+/// `clips` are the scanned clip pools, usually
+/// [`ClipLibrary::pools`](crate::clips::ClipLibrary::pools). When the channel
+/// has `breaks`, its break pool and its `filler` pool are looked up there by
+/// name; a pool that is not there counts as empty. A channel without breaks
+/// ignores `clips`.
+///
 /// Does nothing unless `clock_trusted` is true: a Pi whose clock has not
 /// synchronized must not store a wrong week. Starts at the later of `now_ms`
 /// and the end of the last stored event, so repeated calls extend the schedule
@@ -39,6 +48,7 @@ pub fn extend(
     store: &mut Store,
     channel: &Channel,
     pool: &[MediaItem],
+    clips: &[Pool],
     now_ms: i64,
     clock_trusted: bool,
 ) -> Result<Extended, ScheduleError> {
@@ -71,9 +81,39 @@ pub fn extend(
     } else {
         store.last_program_before(n, from_ms)?.into_iter().collect()
     };
-    let resume = Resume { recent };
+    let breaks = channel.breaks.as_ref().map(|breaks| {
+        let clips_of = |name: &str| {
+            clips
+                .iter()
+                .find(|pool| pool.name() == name)
+                .map_or(&[][..], Pool::clips)
+        };
+        BreakPlan {
+            every_ms: millis(breaks.every),
+            length_ms: millis(breaks.length),
+            clips: clips_of(&breaks.pool),
+            pad: channel.filler.as_deref().map_or(&[][..], clips_of),
+        }
+    });
+    // The rotation continues after the last break clip already stored. A clip
+    // that started more than ROTATION_MEMORY_MS before `from_ms` cannot affect
+    // the result: every new break starts at or after `from_ms`, so the
+    // rotation starts again at the first clip either way. Reading only that
+    // window keeps a channel that never stored a break from walking its whole
+    // history.
+    let last_break = match breaks {
+        Some(_) => {
+            store.last_break_before(n, from_ms.saturating_sub(ROTATION_MEMORY_MS), from_ms)?
+        }
+        None => None,
+    };
+    let resume = Resume { recent, last_break };
 
-    let params = Params { channel: n, mode };
+    let params = Params {
+        channel: n,
+        mode,
+        breaks,
+    };
     let generated = generate(&params, pool, &resume, from_ms, horizon_ms)?;
     if !generated.events.is_empty() {
         store.write_events(n, &generated.events)?;
@@ -84,6 +124,12 @@ pub fn extend(
         written: generated.events.len(),
         notes: generated.notes,
     })
+}
+
+/// A configured duration in whole milliseconds. Config durations are whole
+/// seconds or more, so nothing is lost.
+fn millis(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Reads `channel`'s programs before `before_ms`, newest first, until they hold

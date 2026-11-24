@@ -481,6 +481,50 @@ fn reading_the_last_program_uses_the_index() {
 }
 
 #[test]
+fn last_break_before_is_the_newest_break_that_starts_before_the_bound() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.write_events(3, &schedule()).unwrap();
+    store
+        .write_events(3, &[event(40_000, 41_000, "ad2", EventKind::Break)])
+        .unwrap();
+
+    assert_eq!(
+        store.last_break_before(3, 0, i64::MAX).unwrap(),
+        Some((40_000, MediaId::new("ad2")))
+    );
+    // The upper bound is exclusive; programs and filler are skipped.
+    assert_eq!(
+        store.last_break_before(3, 0, 40_000).unwrap(),
+        Some((10_000, MediaId::new("ad")))
+    );
+    assert_eq!(store.last_break_before(3, 0, 10_000).unwrap(), None);
+    assert_eq!(store.last_break_before(4, 0, i64::MAX).unwrap(), None);
+    // The lower bound is inclusive, and the walk stops there.
+    assert_eq!(
+        store.last_break_before(3, 10_000, 40_000).unwrap(),
+        Some((10_000, MediaId::new("ad")))
+    );
+    assert_eq!(store.last_break_before(3, 10_001, 40_000).unwrap(), None);
+}
+
+#[test]
+fn reading_the_last_break_uses_the_index() {
+    let store = Store::open_in_memory().unwrap();
+    let plan: Vec<String> = store
+        .conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {LAST_BREAK_BEFORE}"))
+        .unwrap()
+        .query_map(params![3, 0, 10], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let plan = plan.join("; ");
+    assert!(plan.contains("SEARCH events USING PRIMARY KEY"), "{plan}");
+    assert!(!plan.contains("SCAN"), "{plan}");
+    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+}
+
+#[test]
 fn migration_3_drops_the_cursors_table() {
     let cursors = |conn: &Connection| -> u32 {
         conn.query_row(

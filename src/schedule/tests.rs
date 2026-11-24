@@ -1,8 +1,13 @@
+use std::path::PathBuf;
+use std::time::Duration;
+
 use chrono::{TimeZone, Utc};
 
+use super::breaks::cut_points;
 use super::*;
-use crate::config::{Channel, Mode, Plan, Source};
-use crate::library::{FakeMediaSource, MediaId, MediaItem, MediaKind, resolve_pool};
+use crate::clips::{Clip, Pool as ClipPool};
+use crate::config::{Breaks, Channel, Mode, Plan, Source};
+use crate::library::{Chapter, FakeMediaSource, MediaId, MediaItem, MediaKind, resolve_pool};
 use crate::store::Store;
 use crate::timeline::{Event, EventKind};
 
@@ -35,8 +40,12 @@ fn channel(number: u32, mode: Mode) -> Channel {
     }
 }
 
-fn params(mode: Mode) -> Params {
-    Params { channel: 3, mode }
+fn params(mode: Mode) -> Params<'static> {
+    Params {
+        channel: 3,
+        mode,
+        breaks: None,
+    }
 }
 
 fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
@@ -52,6 +61,7 @@ fn ids(events: &[Event]) -> Vec<&str> {
 fn resume(cursor: &str) -> Resume {
     Resume {
         recent: vec![MediaId::new(cursor)],
+        last_break: None,
     }
 }
 
@@ -234,6 +244,7 @@ fn uniform(n: usize) -> Vec<MediaItem> {
 fn shuffle(items: &[MediaItem], recent: &[&str], start: i64, end: i64) -> Generated {
     let resume = Resume {
         recent: recent.iter().map(|id| MediaId::new(*id)).collect(),
+        last_break: None,
     };
     generate(&params(Mode::Shuffle), items, &resume, start, end).unwrap()
 }
@@ -284,6 +295,7 @@ fn a_shuffle_differs_by_channel() {
         let params = Params {
             channel,
             mode: Mode::Shuffle,
+            breaks: None,
         };
         let out = generate(&params, &items, &Resume::default(), start, start + DAY).unwrap();
         out.events
@@ -421,7 +433,15 @@ fn nothing_is_generated_while_the_clock_is_not_trusted() {
     let mut store = setup();
     let channel = channel(3, Mode::Sequential);
 
-    let result = extend(&mut store, &channel, &items, at(1970, 1, 1, 0, 0), false).unwrap();
+    let result = extend(
+        &mut store,
+        &channel,
+        &items,
+        &[],
+        at(1970, 1, 1, 0, 0),
+        false,
+    )
+    .unwrap();
 
     assert_eq!(result, Extended::ClockNotTrusted);
     assert!(
@@ -440,7 +460,7 @@ fn an_extend_stores_seven_days_with_no_gaps_and_ends_on_the_last_program() {
     let channel = channel(3, Mode::Sequential);
     let now = at(2026, 6, 1, 12, 0);
 
-    let result = extend(&mut store, &channel, &items, now, true).unwrap();
+    let result = extend(&mut store, &channel, &items, &[], now, true).unwrap();
 
     let Extended::Generated {
         from_ms,
@@ -491,7 +511,15 @@ fn a_sequential_extend_continues_after_the_last_stored_program() {
         )
         .unwrap();
 
-    extend(&mut store, &channel(3, Mode::Sequential), &items, now, true).unwrap();
+    extend(
+        &mut store,
+        &channel(3, Mode::Sequential),
+        &items,
+        &[],
+        now,
+        true,
+    )
+    .unwrap();
 
     let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
     assert_eq!(&ids(&stored)[..5], ["c", "d", "a", "b", "c"]);
@@ -517,7 +545,15 @@ fn the_resume_point_ignores_a_break_after_the_last_program() {
         )
         .unwrap();
 
-    extend(&mut store, &channel(3, Mode::Sequential), &items, now, true).unwrap();
+    extend(
+        &mut store,
+        &channel(3, Mode::Sequential),
+        &items,
+        &[],
+        now,
+        true,
+    )
+    .unwrap();
 
     let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
     assert_eq!(ids(&stored)[0], "c");
@@ -529,11 +565,11 @@ fn a_sequential_channel_resumes_where_it_stopped_after_a_long_gap() {
     let mut store = setup();
     let channel = channel(3, Mode::Sequential);
     let then = at(2026, 6, 1, 12, 0);
-    extend(&mut store, &channel, &items, then, true).unwrap();
+    extend(&mut store, &channel, &items, &[], then, true).unwrap();
     let last_old = store.last_program_before(3, i64::MAX).unwrap().unwrap();
     let now = then + 30 * DAY;
 
-    extend(&mut store, &channel, &items, now, true).unwrap();
+    extend(&mut store, &channel, &items, &[], now, true).unwrap();
 
     let first_new = &store.events_between(3, now, now + HORIZON_MS).unwrap()[0];
     let after = items.iter().position(|i| i.id == last_old).unwrap();
@@ -550,10 +586,10 @@ fn a_reopened_store_continues_where_it_stopped() {
     let later = now + 3 * DAY + 37 * MINUTE;
 
     let mut store = Store::open(&path).unwrap();
-    extend(&mut store, &channel, &items, now, true).unwrap();
+    extend(&mut store, &channel, &items, &[], now, true).unwrap();
     drop(store);
     let mut store = Store::open(&path).unwrap();
-    extend(&mut store, &channel, &items, later, true).unwrap();
+    extend(&mut store, &channel, &items, &[], later, true).unwrap();
 
     let stored = store.events_between(3, now, later + HORIZON_MS).unwrap();
     assert_covers(&stored, now, later + HORIZON_MS);
@@ -572,13 +608,13 @@ fn later_extends_continue_the_schedule_without_a_gap_or_a_repeat() {
         let channel = channel(3, mode);
         let now = at(2026, 6, 1, 12, 0);
 
-        extend(&mut store, &channel, &items, now, true).unwrap();
+        extend(&mut store, &channel, &items, &[], now, true).unwrap();
         // Up to date: the same moment again has nothing to add.
-        let again = extend(&mut store, &channel, &items, now, true).unwrap();
+        let again = extend(&mut store, &channel, &items, &[], now, true).unwrap();
         assert!(matches!(again, Extended::UpToDate { .. }), "{mode:?}");
         // Three days on, the next run fills the gap at the far end.
         let later = now + 3 * DAY + 37 * MINUTE;
-        extend(&mut store, &channel, &items, later, true).unwrap();
+        extend(&mut store, &channel, &items, &[], later, true).unwrap();
 
         let stored = store.events_between(3, now, later + HORIZON_MS).unwrap();
         assert_covers(&stored, now, later + HORIZON_MS);
@@ -603,8 +639,8 @@ fn a_shuffle_extended_twice_matches_one_unbroken_run() {
     let now = at(2026, 6, 1, 12, 0);
     let later = now + 2 * DAY + 11 * MINUTE;
 
-    extend(&mut store, &channel, &items, now, true).unwrap();
-    extend(&mut store, &channel, &items, later, true).unwrap();
+    extend(&mut store, &channel, &items, &[], now, true).unwrap();
+    extend(&mut store, &channel, &items, &[], later, true).unwrap();
 
     let whole = shuffle(&items, &[], now, later + HORIZON_MS);
     let stored = store.events_between(3, now, later + HORIZON_MS).unwrap();
@@ -634,7 +670,7 @@ fn a_shuffle_extend_reads_back_past_ids_no_longer_in_the_pool() {
         .collect();
     store.write_events(3, &old).unwrap();
 
-    extend(&mut store, &channel, &items, now, true).unwrap();
+    extend(&mut store, &channel, &items, &[], now, true).unwrap();
     let first_end = store
         .events_between(3, now, i64::MAX)
         .unwrap()
@@ -645,6 +681,7 @@ fn a_shuffle_extend_reads_back_past_ids_no_longer_in_the_pool() {
         &mut store,
         &channel,
         &items,
+        &[],
         first_end - HORIZON_MS + 1,
         true,
     )
@@ -666,10 +703,10 @@ fn an_extend_after_a_long_gap_starts_at_now() {
     let mut store = setup();
     let channel = channel(3, Mode::Sequential);
     let then = at(2026, 6, 1, 12, 0);
-    extend(&mut store, &channel, &items, then, true).unwrap();
+    extend(&mut store, &channel, &items, &[], then, true).unwrap();
     let now = then + 30 * DAY;
 
-    extend(&mut store, &channel, &items, now, true).unwrap();
+    extend(&mut store, &channel, &items, &[], now, true).unwrap();
 
     let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
     assert_covers(&stored, now, now + HORIZON_MS);
@@ -681,7 +718,15 @@ fn an_unplayable_library_writes_nothing_and_reports_it() {
     let mut store = setup();
     let now = at(2026, 6, 1, 12, 0);
 
-    let result = extend(&mut store, &channel(3, Mode::Shuffle), &items, now, true).unwrap();
+    let result = extend(
+        &mut store,
+        &channel(3, Mode::Shuffle),
+        &items,
+        &[],
+        now,
+        true,
+    )
+    .unwrap();
 
     assert_eq!(
         result,
@@ -707,7 +752,7 @@ fn a_blocks_channel_is_refused() {
     let mut channel = channel(3, Mode::Sequential);
     channel.plan = Plan::Blocks(Vec::new());
 
-    let result = extend(&mut store, &channel, &pool(&["a"]), 0, true);
+    let result = extend(&mut store, &channel, &pool(&["a"]), &[], 0, true);
 
     assert!(matches!(result, Err(ScheduleError::UnsupportedPlan)));
 }
@@ -730,9 +775,478 @@ fn a_resolved_collection_pool_schedules_only_its_items() {
     let mut store = setup();
     let now = at(2026, 6, 1, 12, 0);
 
-    extend(&mut store, &channel, &items, now, true).unwrap();
+    extend(&mut store, &channel, &items, &[], now, true).unwrap();
 
     let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
     assert_eq!(ids(&stored[..4]), ["d", "b", "d", "b"]);
     assert!(ids(&stored).iter().all(|id| ["d", "b"].contains(id)));
+}
+
+// Breaks.
+
+const SECOND: u64 = 1_000;
+
+fn clip(name: &str, seconds: u64) -> Clip {
+    Clip {
+        path: PathBuf::from(format!("/clips/{name}.mp4")),
+        duration: Duration::from_secs(seconds),
+    }
+}
+
+fn clip_id(name: &str) -> String {
+    format!("/clips/{name}.mp4")
+}
+
+fn plan<'a>(every_min: u64, length_s: u64, clips: &'a [Clip], pad: &'a [Clip]) -> BreakPlan<'a> {
+    BreakPlan {
+        every_ms: every_min * 60 * SECOND,
+        length_ms: length_s * SECOND,
+        clips,
+        pad,
+    }
+}
+
+fn with_breaks(mode: Mode, breaks: BreakPlan<'_>) -> Params<'_> {
+    Params {
+        channel: 3,
+        mode,
+        breaks: Some(breaks),
+    }
+}
+
+/// The program events that start a program: a cut program counts once.
+fn programs(events: &[Event]) -> Vec<&str> {
+    events
+        .iter()
+        .filter(|e| e.kind == EventKind::Program && e.media_offset_ms == 0)
+        .map(|e| e.media_id.as_str())
+        .collect()
+}
+
+/// `(kind, media, offset, length)` of each event, for compact assertions.
+fn shape(events: &[Event]) -> Vec<(EventKind, String, u64, i64)> {
+    events
+        .iter()
+        .map(|e| {
+            (
+                e.kind,
+                e.media_id.to_string(),
+                e.media_offset_ms,
+                e.end_ms - e.start_ms,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_22_minute_program_with_two_2_minute_breaks_occupies_26_minutes() {
+    let items = [item("show", 22)];
+    let ads = [clip("ad1", 60), clip("ad2", 60)];
+    let params = with_breaks(Mode::Sequential, plan(8, 120, &ads, &[]));
+
+    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+
+    use EventKind::{Break, Program};
+    let m = MINUTE;
+    let (a1, a2) = (clip_id("ad1"), clip_id("ad2"));
+    let show = "show".to_string();
+    assert_eq!(
+        shape(&out.events),
+        [
+            (Program, show.clone(), 0, 8 * m),
+            (Break, a1.clone(), 0, m),
+            (Break, a2.clone(), 0, m),
+            (Program, show.clone(), 8 * 60_000, 8 * m),
+            (Break, a1, 0, m),
+            (Break, a2, 0, m),
+            (Program, show, 16 * 60_000, 6 * m),
+        ]
+    );
+    assert_eq!(out.events.last().unwrap().end_ms, 26 * MINUTE);
+    for event in out.events.iter().filter(|e| e.kind == Program) {
+        assert_eq!(event.media_duration_ms, 22 * 60_000);
+    }
+    assert!(out.notes.is_empty());
+}
+
+#[test]
+fn a_cut_snaps_to_the_nearest_chapter_within_60_seconds() {
+    let chapter = |s: u64| Chapter {
+        start_ms: s * SECOND,
+        name: None,
+    };
+    let mut show = item("show", 30);
+    // 8:40 and 9:30 are near 9:00; 8:40 is nearer. 19:01 is 61 s from 18:00,
+    // too far. 27:05 is the only mark near the third cut.
+    show.chapters = vec![
+        chapter(0),
+        chapter(520),
+        chapter(570),
+        chapter(1141),
+        chapter(1625),
+    ];
+    assert_eq!(
+        cut_points(&show, 9 * 60 * SECOND),
+        [520 * SECOND, 18 * 60 * SECOND, 1625 * SECOND]
+    );
+
+    // A tie goes to the earlier mark.
+    show.chapters = vec![chapter(510), chapter(570)];
+    assert_eq!(cut_points(&show, 9 * 60 * SECOND)[0], 510 * SECOND);
+
+    // Exactly 60 s away still snaps; a mark at the end does not.
+    show.chapters = vec![chapter(600), chapter(1800)];
+    assert_eq!(
+        cut_points(&show, 9 * 60 * SECOND),
+        [600 * SECOND, 18 * 60 * SECOND, 27 * 60 * SECOND]
+    );
+
+    // No chapters: the cuts stay at the interval, and none at the end.
+    show.chapters.clear();
+    assert_eq!(
+        cut_points(&show, 10 * 60 * SECOND),
+        [10 * 60 * SECOND, 20 * 60 * SECOND]
+    );
+    assert!(cut_points(&item("short", 9), 10 * 60 * SECOND).is_empty());
+}
+
+#[test]
+fn snapped_cuts_move_the_program_offsets() {
+    let mut show = item("show", 22);
+    show.chapters = vec![Chapter {
+        start_ms: 7 * 60_000 + 30_000,
+        name: Some("Act 2".into()),
+    }];
+    let ads = [clip("ad", 120)];
+    let params = with_breaks(Mode::Sequential, plan(8, 120, &ads, &[]));
+
+    let out = generate(&params, &[show], &Resume::default(), 0, 1).unwrap();
+
+    let segments: Vec<(u64, i64)> = out
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::Program)
+        .map(|e| (e.media_offset_ms, e.end_ms - e.start_ms))
+        .collect();
+    assert_eq!(
+        segments,
+        [
+            (0, 7 * MINUTE + 30_000),
+            (450_000, 8 * MINUTE + 30_000),
+            (960_000, 6 * MINUTE)
+        ]
+    );
+}
+
+#[test]
+fn a_break_uses_whole_clips_and_pads_the_rest() {
+    let items = [item("show", 20)];
+    // 50 + 50 = 100 s; a third 50 s clip would overrun the 120 s break.
+    let ads = [clip("a", 50), clip("b", 50), clip("c", 50)];
+    let pad = [clip("ident", 5), clip("slate", 30), clip("long", 300)];
+    let params = with_breaks(Mode::Sequential, plan(10, 120, &ads, &pad));
+
+    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+
+    let brk: Vec<&Event> = out
+        .events
+        .iter()
+        .filter(|e| e.kind != EventKind::Program)
+        .collect();
+    let lengths: Vec<i64> = brk.iter().map(|e| e.end_ms - e.start_ms).collect();
+    assert_eq!(lengths, [50_000, 50_000, 20_000]);
+    for ad in &brk[..2] {
+        assert_eq!(ad.kind, EventKind::Break);
+        assert_eq!(ad.media_duration_ms, 50_000, "an ad is never cut");
+    }
+    // The pad is the shortest filler clip that covers the 20 s left.
+    assert_eq!(brk[2].kind, EventKind::Filler);
+    assert_eq!(brk[2].media_id.as_str(), clip_id("slate"));
+    assert_eq!(brk[2].media_duration_ms, 30_000);
+    assert_eq!(out.events.last().unwrap().end_ms, 22 * MINUTE);
+}
+
+#[test]
+fn a_short_filler_pool_pads_with_its_longest_clip() {
+    let items = [item("show", 20)];
+    let pad = [clip("ident", 5), clip("slate", 10), clip("other", 10)];
+    let params = with_breaks(Mode::Sequential, plan(10, 120, &[], &pad));
+
+    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+
+    let brk = &out.events[1];
+    assert_eq!(brk.kind, EventKind::Filler);
+    assert_eq!(brk.media_id.as_str(), clip_id("slate"));
+    assert_eq!(brk.end_ms - brk.start_ms, 120_000);
+}
+
+#[test]
+fn a_clip_length_is_rounded_up_to_a_whole_millisecond() {
+    let items = [item("show", 20)];
+    let ads = [Clip {
+        path: PathBuf::from("/clips/odd.mp4"),
+        duration: Duration::from_micros(29_970_100),
+    }];
+    let params = with_breaks(Mode::Sequential, plan(10, 30, &ads, &[]));
+
+    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+
+    assert_eq!(out.events[1].end_ms - out.events[1].start_ms, 29_971);
+}
+
+#[test]
+fn without_filler_a_break_is_short_and_reported() {
+    let items = [item("show", 20)];
+    let ads = [clip("a", 50)];
+    let params = with_breaks(Mode::Sequential, plan(10, 120, &ads, &[]));
+
+    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    assert_eq!(out.events.len(), 3);
+    assert_eq!(out.events[1].end_ms - out.events[1].start_ms, 50_000);
+    assert_eq!(out.notes, [Note::ShortBreaks { count: 1 }]);
+
+    // With nothing to show, the cut is left out and the program runs whole.
+    let params = with_breaks(Mode::Sequential, plan(10, 120, &[], &[]));
+    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    assert_eq!(
+        shape(&out.events),
+        [(EventKind::Program, "show".into(), 0, 20 * MINUTE)]
+    );
+    assert_eq!(out.notes, [Note::ShortBreaks { count: 1 }]);
+}
+
+#[test]
+fn break_clips_rotate_and_play_once_per_break() {
+    let items = [item("show", 40)];
+    let ads = [clip("a", 60), clip("b", 60), clip("c", 60)];
+    let params = with_breaks(Mode::Sequential, plan(10, 120, &ads, &[]));
+
+    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let played: Vec<&str> = out
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::Break)
+        .map(|e| e.media_id.as_str())
+        .collect();
+    let (a, b, c) = (clip_id("a"), clip_id("b"), clip_id("c"));
+    assert_eq!(played, [&a, &b, &c, &a, &b, &c]);
+
+    // The rotation continues after the last stored break clip, and an id no
+    // longer in the pool starts it again at the first clip.
+    let resume = |last: &str| Resume {
+        last_break: Some((-MINUTE, MediaId::new(last))),
+        ..Resume::default()
+    };
+    let out = generate(&params, &items, &resume(&b), 0, 1).unwrap();
+    assert_eq!(out.events[1].media_id.as_str(), c);
+    let out = generate(&params, &items, &resume("/clips/gone.mp4"), 0, 1).unwrap();
+    assert_eq!(out.events[1].media_id.as_str(), a);
+
+    // One 60 s clip does not play twice in a 120 s break; filler pads it.
+    let one = [clip("a", 60)];
+    let pad = [clip("slate", 60)];
+    let params = with_breaks(Mode::Sequential, plan(10, 120, &one, &pad));
+    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    assert_eq!(
+        shape(&out.events[1..3]),
+        [
+            (EventKind::Break, a, 0, MINUTE),
+            (EventKind::Filler, clip_id("slate"), 0, MINUTE)
+        ]
+    );
+}
+
+#[test]
+fn a_shuffle_with_breaks_resumed_at_a_program_matches_an_unbroken_run() {
+    let items = pool(&["a", "b", "c", "d", "e", "f", "g"]);
+    let ads = [clip("x", 30), clip("y", 45), clip("z", 60)];
+    let pad = [clip("slate", 90)];
+    let params = with_breaks(Mode::Shuffle, plan(11, 120, &ads, &pad));
+    let start = at(2026, 6, 1, 12, 0);
+    let end = start + 2 * DAY;
+    let whole = generate(&params, &items, &Resume::default(), start, end).unwrap();
+    assert_cooldown_holds(&programs(&whole.events), 7);
+
+    let starts: Vec<usize> = (0..whole.events.len())
+        .filter(|&i| {
+            let e = &whole.events[i];
+            e.kind == EventKind::Program && e.media_offset_ms == 0
+        })
+        .collect();
+    for cut in [starts[1], starts[4], starts[13]] {
+        let boundary = whole.events[cut].start_ms;
+        let first = generate(&params, &items, &Resume::default(), start, boundary).unwrap();
+        assert_eq!(first.events, whole.events[..cut]);
+        // What `extend` reads from the store: the program rows newest first,
+        // and the last break clip.
+        let resume = Resume {
+            recent: first
+                .events
+                .iter()
+                .rev()
+                .filter(|e| e.kind == EventKind::Program)
+                .map(|e| e.media_id.clone())
+                .collect(),
+            last_break: first
+                .events
+                .iter()
+                .rev()
+                .find(|e| e.kind == EventKind::Break)
+                .map(|e| (e.start_ms, e.media_id.clone())),
+        };
+        let rest = generate(&params, &items, &resume, boundary, end).unwrap();
+        assert_eq!(rest.events, whole.events[cut..], "cut at {cut}");
+    }
+}
+
+/// The break clip ids of `events`, one list per break.
+fn breaks_of(events: &[Event]) -> Vec<Vec<&str>> {
+    let mut out: Vec<Vec<&str>> = Vec::new();
+    let mut open = false;
+    for e in events {
+        if e.kind == EventKind::Break {
+            if !open {
+                out.push(Vec::new());
+            }
+            out.last_mut().unwrap().push(e.media_id.as_str());
+        }
+        open = e.kind != EventKind::Program;
+    }
+    out
+}
+
+#[test]
+fn clips_sharing_a_media_id_count_once() {
+    let items = [item("show", 40)];
+    // `a` twice, as one file reached through two links.
+    let ads = [clip("a", 60), clip("b", 60), clip("a", 60), clip("c", 60)];
+    let (a, b, c) = (clip_id("a"), clip_id("b"), clip_id("c"));
+
+    // A break long enough for every entry still plays `a` once.
+    let params = with_breaks(Mode::Sequential, plan(10, 240, &ads, &[]));
+    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    assert_eq!(breaks_of(&out.events)[0], [&a, &b, &c]);
+
+    // One clip per break: the rotation is a, b, c, with the duplicate left
+    // out, and a run resumed after any break matches an unbroken one.
+    let params = with_breaks(Mode::Sequential, plan(10, 60, &ads, &[]));
+    let items = pool(&["p", "q", "r", "s"]);
+    let end = 6 * 60 * MINUTE;
+    let whole = generate(&params, &items, &Resume::default(), 0, end).unwrap();
+    let played: Vec<&str> = breaks_of(&whole.events).concat();
+    assert_eq!(played[..6], [&a, &b, &c, &a, &b, &c]);
+    let starts: Vec<usize> = (0..whole.events.len())
+        .filter(|&i| {
+            let e = &whole.events[i];
+            e.kind == EventKind::Program && e.media_offset_ms == 0
+        })
+        .collect();
+    for &cut in &starts[1..5] {
+        let boundary = whole.events[cut].start_ms;
+        let first = &whole.events[..cut];
+        let resume = Resume {
+            recent: first
+                .iter()
+                .rev()
+                .filter(|e| e.kind == EventKind::Program)
+                .map(|e| e.media_id.clone())
+                .collect(),
+            last_break: first
+                .iter()
+                .rev()
+                .find(|e| e.kind == EventKind::Break)
+                .map(|e| (e.start_ms, e.media_id.clone())),
+        };
+        let rest = generate(&params, &items, &resume, boundary, end).unwrap();
+        assert_eq!(rest.events, whole.events[cut..], "cut at {cut}");
+    }
+}
+
+#[test]
+fn the_rotation_starts_over_after_a_day_without_breaks() {
+    let items = [item("show", 20)];
+    let ads = [clip("a", 60), clip("b", 60), clip("c", 60)];
+    let params = with_breaks(Mode::Sequential, plan(10, 60, &ads, &[]));
+    let first_break = 10 * MINUTE;
+    let resume = |started: i64| Resume {
+        last_break: Some((started, MediaId::new(clip_id("a")))),
+        ..Resume::default()
+    };
+
+    // Exactly a day before the next break still continues after `a`.
+    let out = generate(&params, &items, &resume(first_break - DAY), 0, 1).unwrap();
+    assert_eq!(out.events[1].media_id.as_str(), clip_id("b"));
+    // Any longer and the rotation starts again at the first clip, which is
+    // what `extend` gets when it finds no break in the last day.
+    let out = generate(&params, &items, &resume(first_break - DAY - 1), 0, 1).unwrap();
+    assert_eq!(out.events[1].media_id.as_str(), clip_id("a"));
+    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    assert_eq!(out.events[1].media_id.as_str(), clip_id("a"));
+    assert_eq!(ROTATION_MEMORY_MS, DAY);
+}
+
+fn channel_with_breaks(mode: Mode) -> Channel {
+    let mut channel = channel(3, mode);
+    channel.breaks = Some(Breaks {
+        every: Duration::from_secs(11 * 60),
+        length: Duration::from_secs(120),
+        pool: "ads".into(),
+    });
+    channel.filler = Some("filler".into());
+    channel
+}
+
+fn clip_pools() -> Vec<ClipPool> {
+    vec![
+        ClipPool::new(
+            "ads",
+            "/clips",
+            vec![clip("x", 30), clip("y", 45), clip("z", 60)],
+            Vec::new(),
+        ),
+        ClipPool::new("filler", "/clips", vec![clip("slate", 90)], Vec::new()),
+    ]
+}
+
+#[test]
+fn an_extend_with_breaks_twice_matches_one_unbroken_run() {
+    let items = pool(&["a", "b", "c", "d", "e", "f", "g", "h"]);
+    let pools = clip_pools();
+    let now = at(2026, 6, 1, 12, 0);
+    let later = now + 2 * DAY + 11 * MINUTE;
+    for mode in [Mode::Sequential, Mode::Shuffle] {
+        let mut store = setup();
+        let channel = channel_with_breaks(mode);
+
+        extend(&mut store, &channel, &items, &pools, now, true).unwrap();
+        extend(&mut store, &channel, &items, &pools, later, true).unwrap();
+
+        let params = with_breaks(mode, plan(11, 120, pools[0].clips(), pools[1].clips()));
+        let end = later + HORIZON_MS;
+        let whole = generate(&params, &items, &Resume::default(), now, end).unwrap();
+        // A whole program is stored, so read past `end` to its last segment.
+        let stored = store.events_between(3, now, i64::MAX).unwrap();
+        assert_eq!(stored, whole.events, "{mode:?}");
+        assert!(stored.iter().any(|e| e.kind == EventKind::Break));
+        if mode == Mode::Shuffle {
+            assert_cooldown_holds(&programs(&stored), 8);
+        }
+    }
+}
+
+#[test]
+fn an_extend_without_its_clip_pools_reports_short_breaks() {
+    let items = pool(&["a", "b"]);
+    let mut store = setup();
+    let channel = channel_with_breaks(Mode::Sequential);
+    let now = at(2026, 6, 1, 12, 0);
+
+    let result = extend(&mut store, &channel, &items, &[], now, true).unwrap();
+
+    let Extended::Generated { notes, .. } = result else {
+        panic!("expected events, got {result:?}");
+    };
+    assert!(matches!(notes[..], [Note::ShortBreaks { .. }]), "{notes:?}");
+    let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
+    assert!(stored.iter().all(|e| e.kind == EventKind::Program));
 }

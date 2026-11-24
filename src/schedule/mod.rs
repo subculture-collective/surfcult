@@ -2,8 +2,9 @@
 //!
 //! [`extend`] keeps a channel's week filled in the
 //! [`Store`](crate::store::Store). Inside it, `generate` is a pure function. It
-//! takes a channel's number and mode, the items to play, the programs before
-//! the window and a time window, and it returns
+//! takes a channel's number, mode and break plan (with the clips it may use),
+//! the items to play, the programs and last break clip before the window and a
+//! time window, and it returns
 //! [`Event`](crate::timeline::Event)s and the new cursor. It reads no clock and
 //! does no I/O, so the same inputs always give the same events.
 //!
@@ -11,14 +12,62 @@
 //!
 //! # What a run produces
 //!
-//! Programs run back to back. Each program is one `EventKind::Program` event
-//! that starts where the previous one ended, with `media_offset_ms` 0 and
-//! `media_duration_ms` equal to the item's runtime. Events cover the whole
-//! window with no gap and no overlap; the last one may run past the end. Items
-//! with a runtime of 0 are skipped, and an item id that appears twice in the
-//! pool is used once (the first). Breaks, grids, weighted picks, time blocks and
-//! regeneration are later work; a channel's `grid`, `breaks` and `filler`
-//! settings are ignored for now.
+//! Programs run back to back. Without breaks each program is one
+//! `EventKind::Program` event that starts where the previous one ended, with
+//! `media_offset_ms` 0 and `media_duration_ms` equal to the item's runtime.
+//! Events cover the whole window with no gap and no overlap; the last program
+//! may run past the end, and a program cut by breaks is always written whole,
+//! so a run ends on a program's last segment. Items with a runtime of 0 are
+//! skipped, and an item id that appears twice in the pool is used once (the
+//! first). Grids, weighted picks, time blocks and regeneration are later work;
+//! a channel's `grid` setting is ignored for now.
+//!
+//! # Breaks
+//!
+//! A channel with `breaks` has its programs cut, and each cut filled with a
+//! break. Breaks add to the slot: a 22-minute program with two 2-minute breaks
+//! occupies 26 minutes, as three program events and the break events between
+//! them.
+//!
+//! - **Cuts.** The nominal cuts are the multiples of `breaks.every` in the
+//!   program's own time, strictly inside the runtime (none at the end). Each
+//!   moves to the nearest Jellyfin chapter mark within [`SNAP_MS`] (60 s),
+//!   the earlier one on a tie, if that mark is after the previous cut and
+//!   before the end; otherwise it stays at the interval. The program events
+//!   share the item's `media_id` and `media_duration_ms`; each starts at the
+//!   previous cut's `media_offset_ms`.
+//! - **Fill.** A break is filled from the break pool with whole clips: it
+//!   walks the pool once, in pool order, starting after the last clip placed,
+//!   and places each clip that fits in the time left. A clip is never cut and
+//!   never plays twice in one break. A clip too long for the time left waits
+//!   for a later break. Each placed clip is one `EventKind::Break` event as
+//!   long as the clip (rounded up to a whole millisecond).
+//! - **Padding.** Time the clips leave is one `EventKind::Filler` event from
+//!   the channel's `filler` pool, exactly as long as the shortfall: the
+//!   shortest filler clip at least that long, or the longest one if none is.
+//!   The pad is the one piece that may stop before its clip ends, so the
+//!   filler pool should hold idents and slates. Without a filler clip the break
+//!   is shorter than `breaks.length`; a break with nothing at all to show is
+//!   left out and the program runs on. Both are counted in
+//!   [`Note::ShortBreaks`].
+//! - **Rotation and limits.** `channels.toml` has no rotation or frequency
+//!   settings, so these are the rules: clips rotate in pool order across
+//!   breaks, and a clip plays at most once per break. The rotation continues
+//!   after the channel's last stored break clip (`Store::last_break_before`);
+//!   an id no longer in the pool restarts it at the first clip. The rotation
+//!   remembers its place for [`ROTATION_MEMORY_MS`] (24 hours): a break that
+//!   starts later than that after the last break clip started begins at the
+//!   first clip, in an unbroken run as in a resumed one, so `extend` reads only
+//!   the last day of events. Clips that share a media id (one file reached
+//!   through two links) count once, at the first one's place in the pool.
+//! - **Clip ids.** A clip's `media_id` is its canonical path as text
+//!   ([`clip_media_id`]); a path that is not UTF-8 is left out. The event kind
+//!   says whether the id is a clip or a Jellyfin item. The tuner already joins
+//!   at the program after a break (`timeline::program_from`), and the
+//!   shuffle's cooldown counts a cut program once.
+//! - **Determinism.** Cuts, fill and padding use no randomness; they depend
+//!   only on the item, the pools and the last stored break clip, so a run
+//!   resumed at a program boundary matches an unbroken one.
 //!
 //! # Sequential
 //!
@@ -70,6 +119,11 @@
 //! supplies the pool: it takes `source` from the channel's `Plan::Fixed`,
 //! resolves it with [`library::resolve_pool`](crate::library::resolve_pool) and
 //! passes the result to `extend`. Until issue #30 only collections resolve.
+//! The caller also passes the scanned clip pools
+//! ([`ClipLibrary::pools`](crate::clips::ClipLibrary::pools)); `extend` looks
+//! up the channel's break and filler pools there by name, and a pool that is
+//! missing counts as empty. A channel with breaks also reads its last stored
+//! break clip, where the rotation continues.
 //! `extend` reads the schedule end and where to resume, then writes the new
 //! events in one transaction. A sequential channel reads only its last stored
 //! program. A shuffle channel reads its recent programs back to the N - k
@@ -82,6 +136,7 @@
 //! the last program it keeps. `extend` never reads the system clock; the
 //! caller passes `now_ms`.
 
+mod breaks;
 mod extend;
 mod generate;
 mod rng;
@@ -96,6 +151,8 @@ use crate::library::MediaId;
 use crate::store::StoreError;
 use crate::timeline::Event;
 
+pub(crate) use breaks::BreakPlan;
+pub use breaks::{ROTATION_MEMORY_MS, SNAP_MS, clip_media_id};
 pub use extend::{Extended, HORIZON_MS, extend};
 pub(crate) use generate::{Params, Resume, cooling_target, generate};
 
@@ -124,6 +181,10 @@ pub enum Note {
     CursorNotInPool { media_id: MediaId },
     /// This many items were left out because their runtime is 0.
     SkippedZeroRuntime { count: usize },
+    /// This many breaks came out shorter than `breaks.length`, or were left
+    /// out, because the break pool's clips did not fill them and the channel
+    /// has no filler clip to pad the rest.
+    ShortBreaks { count: usize },
 }
 
 #[derive(Debug)]

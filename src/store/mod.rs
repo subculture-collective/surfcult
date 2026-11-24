@@ -56,6 +56,12 @@ const RECENT_PROGRAMS_BEFORE: &str = "SELECT start_ms, media_id FROM events
      ORDER BY start_ms DESC
      LIMIT ?3";
 
+/// The query behind [`Store::last_break_before`]; a test checks its plan.
+const LAST_BREAK_BEFORE: &str = "SELECT start_ms, media_id FROM events
+     WHERE channel = ?1 AND kind = 'break' AND start_ms >= ?2 AND start_ms < ?3
+     ORDER BY start_ms DESC
+     LIMIT 1";
+
 /// How long a call waits for another connection's lock before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -230,6 +236,30 @@ impl Store {
                     .optional()
             })
             .map_err(StoreError::database("reading the last program"))
+    }
+
+    /// The start time and media id of the channel's last break event that
+    /// starts in `[since_ms, before_ms)`, or `None` if it has none: the clip a
+    /// break pool's rotation continues after. Walks back from `before_ms` on
+    /// the primary key and stops at the first break it meets or at `since_ms`,
+    /// so a channel that stores no breaks costs one window of events, not its
+    /// whole history.
+    pub fn last_break_before(
+        &self,
+        channel: u32,
+        since_ms: i64,
+        before_ms: i64,
+    ) -> Result<Option<(i64, MediaId)>, StoreError> {
+        self.conn
+            .prepare_cached(LAST_BREAK_BEFORE)
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![channel, since_ms, before_ms], |row| {
+                        Ok((row.get(0)?, MediaId::new(row.get::<_, String>(1)?)))
+                    })
+                    .optional()
+            })
+            .map_err(StoreError::database("reading the last break"))
     }
 
     /// Adds one row to the playback history.
