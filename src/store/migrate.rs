@@ -78,7 +78,7 @@ pub(super) fn run(conn: &mut Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-#[cfg(test)]
+/// The schema version the newest migration brings a database to.
 pub(super) fn latest_version() -> u32 {
     MIGRATIONS.last().map_or(0, |m| m.version)
 }

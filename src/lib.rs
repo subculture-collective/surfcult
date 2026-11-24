@@ -5,6 +5,7 @@ pub mod jellyfin;
 pub mod library;
 pub mod player;
 pub mod schedule;
+pub mod server;
 pub mod store;
 pub mod timeline;
 pub mod tuner;

@@ -8,6 +8,7 @@
 - `reference/clips.md`: local clip pools, ffprobe durations, what is skipped and why
 - `reference/schedule.md`: how the schedule generator orders items, resumes and persists
 - `reference/guide.md`: guide cells from the schedule: merging a program's segments, the window, progress
+- `reference/api.md`: the read API: endpoints, JSON shapes, the listen address and the bearer token
 - `reference/tuner.md`: the tune-in sequence, clip choice, break stand-in, late-start seek and how the tuner is driven
 - `runbooks/raspberry-pi.md`: reaching and operating the Pi 4B TV box
 - `research/2026-11-22-pi-playback-spike.md`: Phase 0 results: decode, Jellyfin tune time, overlay cost

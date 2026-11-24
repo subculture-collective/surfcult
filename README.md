@@ -1,12 +1,12 @@
 # surfcult
 
-A self-hosted, offline-first television channel simulator for Raspberry Pi and Linux. It plays your own media as continuously broadcasting channels with schedules, commercials and a program guide. The planned design is in [`docs/idea.md`](docs/idea.md), which uses the codename BROADCAST. The library parts exist: config parsing, a Jellyfin sync into a SQLite cache, schedule generation, and the tuner's tune-in sequence, and MPV control over its IPC socket. Nothing wires the parts together on the Pi, so the binary only checks a config file.
+A self-hosted, offline-first television channel simulator for Raspberry Pi and Linux. It plays your own media as continuously broadcasting channels with schedules, commercials and a program guide. The planned design is in [`docs/idea.md`](docs/idea.md), which uses the codename BROADCAST. The library parts exist: config parsing, a Jellyfin sync into a SQLite cache, schedule generation, and the tuner's tune-in sequence, and MPV control over its IPC socket. Nothing wires the parts together on the Pi, so the binary only checks a config file and serves a read API over the stored schedule.
 
 ## What it contains
 
 - `src/lib.rs`: declares the library modules
-- `src/main.rs`: the binary, `surfcult check-config <channels.toml>`
-- `Cargo.toml`, `Cargo.lock`: package metadata (edition 2024; chrono, chrono-tz, rusqlite, serde, serde_json, toml and ureq; tempfile for tests) and the lockfile
+- `src/main.rs`: the binary, `surfcult check-config <channels.toml>` and `surfcult serve <channels.toml> <db>` (the read API, see `docs/reference/api.md`)
+- `Cargo.toml`, `Cargo.lock`: package metadata (edition 2024; axum, chrono, chrono-tz, rusqlite, serde, serde_json, tokio, toml and ureq; tempfile and tower for tests) and the lockfile
 - `Makefile`: `make verify` runs every check; `make help` lists the targets
 - `.github/workflows/pr-ci.yml`: the `PR CI` workflow; runs on every pull request and ends with the `CI gate` job
 - `.github/rulesets/main.json`: the ruleset applied to `main`; it requires pull requests and `CI gate`
