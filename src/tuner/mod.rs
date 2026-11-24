@@ -31,11 +31,13 @@
 //! - [`Tuner::clip_ended`] and [`Tuner::program_started`] when the player says
 //!   so. [`Tuner::pump`] reads those from [`Player::poll_event`] and ticks.
 //!
-//! Everything it touches goes through three ports: a [`Player`] for the
-//! screen, a [`ScheduleSource`] for the channel's events (a
-//! [`Store`](crate::store::Store) implements it) and a
-//! [`MediaSource`] to look up each program's codecs. Tests use
-//! [`FakePlayer`](crate::player::FakePlayer), an in-memory store and a
+//! The tuner owns its [`Player`], the screen. It does not own the schedule or
+//! the library: [`Tuner::tick`] and [`Tuner::pump`] take a [`Store`] to read
+//! the channel's events and a [`MediaSource`] to look up each program's
+//! codecs. In production the caller passes the same `&store` for both and
+//! keeps ownership of it, so it can extend schedules and sync the library
+//! between calls. Tests use [`FakePlayer`](crate::player::FakePlayer), an
+//! in-memory store and a
 //! [`FakeMediaSource`](crate::library::FakeMediaSource), and move a virtual
 //! clock by hand.
 //!
@@ -115,7 +117,7 @@ use crate::clips::Clip;
 use crate::library::profile::needs_transcode;
 use crate::library::{MediaId, MediaSource};
 use crate::player::{Player, PlayerError, PlayerEvent};
-use crate::store::Store;
+use crate::store::{Store, StoreError};
 use crate::timeline::{Event, EventKind, Lookup, lookup};
 
 use plan::{Target, choose_clip, millis, program_at};
@@ -150,19 +152,6 @@ impl Default for Timing {
     }
 }
 
-/// Where the channel's events come from.
-pub trait ScheduleSource {
-    /// Events of `channel` that overlap `[from_ms, to_ms)`, sorted by start.
-    /// See [`Store::events_between`].
-    fn events_between(&self, channel: u32, from_ms: i64, to_ms: i64) -> Result<Vec<Event>, String>;
-}
-
-impl ScheduleSource for Store {
-    fn events_between(&self, channel: u32, from_ms: i64, to_ms: i64) -> Result<Vec<Event>, String> {
-        Store::events_between(self, channel, from_ms, to_ms).map_err(|e| e.to_string())
-    }
-}
-
 /// Why a sequence ended on static instead of a program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
@@ -175,7 +164,7 @@ pub enum Reason {
     /// if the schedule has one.
     Gap { next_start_ms: Option<i64> },
     /// The schedule could not be read.
-    Schedule(String),
+    Schedule(StoreError),
     /// The media source could not describe the program.
     Media(String),
     /// The player rejected a command.
@@ -193,7 +182,7 @@ impl fmt::Display for Reason {
             Self::Gap {
                 next_start_ms: None,
             } => f.write_str("nothing is scheduled"),
-            Self::Schedule(why) => write!(f, "cannot read the schedule: {why}"),
+            Self::Schedule(error) => write!(f, "cannot read the schedule: {error}"),
             Self::Media(why) => write!(f, "cannot look up the program: {why}"),
             Self::Player(why) => write!(f, "the player failed: {why}"),
         }
@@ -232,25 +221,21 @@ struct Planned {
     needs_transcode: bool,
 }
 
-pub struct Tuner<P, S, M> {
+pub struct Tuner<P> {
     player: P,
-    schedule: S,
-    media: M,
     tune_in: Vec<Clip>,
     timing: Timing,
     state: State,
     plan: Option<Plan>,
 }
 
-impl<P: Player, S: ScheduleSource, M: MediaSource> Tuner<P, S, M> {
+impl<P: Player> Tuner<P> {
     /// A tuner that picks tune-in clips from `tune_in`, which is usually
     /// [`Pool::clips`](crate::clips::Pool::clips) of the configured tune-in
     /// pool.
-    pub fn new(player: P, schedule: S, media: M, tune_in: Vec<Clip>, timing: Timing) -> Self {
+    pub fn new(player: P, tune_in: Vec<Clip>, timing: Timing) -> Self {
         Self {
             player,
-            schedule,
-            media,
             tune_in,
             timing,
             state: State::Idle,
@@ -292,12 +277,14 @@ impl<P: Player, S: ScheduleSource, M: MediaSource> Tuner<P, S, M> {
     }
 
     /// Does what is due at `now_ms`: starts the clip once static has shown for
-    /// long enough. Calling it early or with nothing due does nothing.
-    pub fn tick(&mut self, now_ms: i64) {
+    /// long enough, reading the channel's events from `store` and the
+    /// program's codecs from `media`. Calling it early or with nothing due
+    /// does nothing.
+    pub fn tick(&mut self, now_ms: i64, store: &Store, media: &impl MediaSource) {
         if let State::Static { channel, until_ms } = self.state
             && now_ms >= until_ms
         {
-            self.state = match self.start_clip(channel, now_ms) {
+            self.state = match self.start_clip(channel, now_ms, store, media) {
                 Ok(()) => State::ClipPlaying { channel },
                 Err(reason) => State::Failed { channel, reason },
             };
@@ -349,11 +336,11 @@ impl<P: Player, S: ScheduleSource, M: MediaSource> Tuner<P, S, M> {
     }
 
     /// Hands every pending player event to [`Tuner::handle`], then ticks.
-    pub fn pump(&mut self, now_ms: i64) {
+    pub fn pump(&mut self, now_ms: i64, store: &Store, media: &impl MediaSource) {
         while let Some(event) = self.player.poll_event() {
             self.handle(event, now_ms);
         }
-        self.tick(now_ms);
+        self.tick(now_ms, store, media);
     }
 
     /// Cancels any sequence and stops the player.
@@ -363,10 +350,23 @@ impl<P: Player, S: ScheduleSource, M: MediaSource> Tuner<P, S, M> {
         self.player.stop()
     }
 
-    fn start_clip(&mut self, channel: u32, now_ms: i64) -> Result<(), Reason> {
-        let mut planned = self.plan_clip(channel, now_ms, self.timing.direct_start_ms)?;
+    fn start_clip(
+        &mut self,
+        channel: u32,
+        now_ms: i64,
+        store: &Store,
+        media: &impl MediaSource,
+    ) -> Result<(), Reason> {
+        let mut planned =
+            self.plan_clip(channel, now_ms, self.timing.direct_start_ms, store, media)?;
         if planned.needs_transcode {
-            planned = self.plan_clip(channel, now_ms, self.timing.transcode_start_ms)?;
+            planned = self.plan_clip(
+                channel,
+                now_ms,
+                self.timing.transcode_start_ms,
+                store,
+                media,
+            )?;
         }
         let Planned {
             clip,
@@ -389,11 +389,17 @@ impl<P: Player, S: ScheduleSource, M: MediaSource> Tuner<P, S, M> {
 
     /// Picks the clip for `start_cost_ms` and the program that goes behind it,
     /// for a clip that starts at `now_ms`. Sends nothing to the player.
-    fn plan_clip(&self, channel: u32, now_ms: i64, start_cost_ms: u64) -> Result<Planned, Reason> {
+    fn plan_clip(
+        &self,
+        channel: u32,
+        now_ms: i64,
+        start_cost_ms: u64,
+        store: &Store,
+        media: &impl MediaSource,
+    ) -> Result<Planned, Reason> {
         let clip = choose_clip(&self.tune_in, start_cost_ms).ok_or(Reason::NoTuneInClip)?;
         let ends_at_ms = now_ms.saturating_add_unsigned(millis(clip));
-        let events = self
-            .schedule
+        let events = store
             .events_between(
                 channel,
                 now_ms,
@@ -401,8 +407,7 @@ impl<P: Player, S: ScheduleSource, M: MediaSource> Tuner<P, S, M> {
             )
             .map_err(Reason::Schedule)?;
         let target = program_at(&events, ends_at_ms)?;
-        let item = self
-            .media
+        let item = media
             .resolve(&target.media_id)
             .map_err(|e| Reason::Media(e.to_string()))?;
         Ok(Planned {

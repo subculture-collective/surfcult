@@ -24,13 +24,13 @@ The tuner has no clock and never sleeps. Each method takes the time in epoch mil
 | Call | When |
 | --- | --- |
 | `tune(channel, now)` | the viewer picks a channel |
-| `tick(now)` | the time from `next_wakeup()` arrives |
+| `tick(now, store, media)` | the time from `next_wakeup()` arrives |
 | `clip_ended()` | the player says the clip reached its end |
 | `program_started(now, position_ms)` | the player says the program is on screen |
 
-`pump(now)` reads the player's pending events with `Player::poll_event`, passes them on, and ticks. `state()` tells where the sequence is: `Static`, `ClipPlaying`, `AwaitingProgram`, `Live`, `Failed` or `Idle`.
+`pump(now, store, media)` reads the player's pending events with `Player::poll_event`, passes them on, and ticks. `state()` tells where the sequence is: `Static`, `ClipPlaying`, `AwaitingProgram`, `Live`, `Failed` or `Idle`.
 
-The tuner reaches the outside world through three ports: `Player` (the screen), `ScheduleSource` (a channel's events; `Store` implements it) and `MediaSource` (to look up each program's codecs).
+The tuner owns a `Player` (the screen). `tick` and `pump` also take a `&Store` (the channel's events) and a `&impl MediaSource` (each program's codecs). In production the caller passes the same `&store` for both and keeps ownership of it, so it can extend schedules and sync the library between calls.
 
 ## Choosing the clip
 
