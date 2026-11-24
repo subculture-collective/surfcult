@@ -2,8 +2,8 @@
 //!
 //! [`extend`] keeps a channel's week filled in the
 //! [`Store`](crate::store::Store). Inside it, `generate` is a pure function. It
-//! takes a channel's number, mode and time zone, the items to play, where the
-//! last run stopped and a time window, and it returns
+//! takes a channel's number and mode, the items to play, the programs before
+//! the window and a time window, and it returns
 //! [`Event`](crate::timeline::Event)s and the new cursor. It reads no clock and
 //! does no I/O, so the same inputs always give the same events.
 //!
@@ -31,36 +31,36 @@
 //!
 //! # Shuffle
 //!
-//! Items play in a seeded random order, and no item repeats until every other
-//! item has played. One trip through the pool is a *pass*.
+//! Each program slot picks at random from the items that are not cooling down.
 //!
-//! - **Seed.** A pass is ordered by a Fisher-Yates shuffle driven by SplitMix64
-//!   (`rng.rs`), seeded from the channel number, the *local* date in the
-//!   channel's time zone at the moment the pass is drawn, and a counter of the
-//!   passes already drawn in this run. The counter makes two passes on the same
-//!   date differ. The local date is a calendar date, not "24 hours since the
-//!   start", so a day with 23 or 25 hours changes nothing. The generator uses no
-//!   `rand` crate and no hasher with random state, so the same channel, date and
-//!   library give the same order on every machine.
-//! - **Continuing.** The cursor is only one media id, so it cannot say which
-//!   items a pass has used. The caller therefore also passes the ids of the
-//!   programs scheduled earlier, oldest first (`Resume::played`). [`extend`]
-//!   reads both from the channel's stored program events, at any time, past or
-//!   future: the cursor is the last of them. The generator replays
-//!   them to find the items already used in the current pass, then plays the
-//!   rest of the pass in the seeded order, then starts a new pass. A restart
-//!   therefore never replays an item inside the same pass. If `played` is empty
-//!   but there is a cursor, only the cursor item counts as used.
-//! - **First item of a pass.** It is never the item that just played, unless the
-//!   pool has one item.
-//! - **Limits.** A run that stops and resumes on the same local date plays what
-//!   an unbroken run would have played, for the pass it resumes in. After that,
-//!   or on a later date, the order can differ from an unbroken run, but it is
-//!   still a valid shuffle. If the pool changes, an added item joins the current
-//!   pass and a removed one is forgotten. If the stored history was cut short
-//!   (old events deleted) the replay can start in the middle of a pass and
-//!   misjudge it once. Passes are numbered per run, so two runs that each begin
-//!   a pass on the same date can start from the same order.
+//! - **Rule.** Let N be the number of distinct playable items in the pool and
+//!   k = max(1, ceil(N / 4)). Walk the earlier programs newest first (the
+//!   resumed history, then this run's picks) and collect distinct pool ids
+//!   until there are N - k of them: those items are cooling down. Every other
+//!   playable item is eligible, including one that never played. An id that is
+//!   no longer in the pool is ignored and does not count toward N - k. When the
+//!   history holds fewer than N - k distinct pool items, fewer are cooling down.
+//!   At least k items are always eligible, so a pick never fails.
+//! - **What it guarantees.** No item repeats within N - k + 1 consecutive
+//!   programs. With N = 1 the one item always plays; with N >= 2 the item that
+//!   just played never plays next; with N up to 4, k is 1 and the items rotate
+//!   in a fixed order once the history is full. An eligible item stays eligible
+//!   until it plays, so every item plays eventually. There is no pass: an item
+//!   can play again before some other item has played once.
+//! - **Seed.** Each pick draws an index into the eligible items, in pool order,
+//!   from SplitMix64 (`rng.rs`) seeded with the channel number and the slot's
+//!   `start_ms`. Nothing else goes into the seed: no date, counter or run state.
+//!   A run that stops at an event boundary and resumes from the stored history
+//!   therefore produces exactly the events an unbroken run would, provided the
+//!   history it is given reaches back to N - k distinct pool items or to the
+//!   first stored program; [`extend`] reads that far. The generator uses no
+//!   `rand` crate and no hasher with random state, so the same inputs give the
+//!   same order on every machine.
+//! - **History.** `Resume::recent` holds the earlier programs newest first.
+//!   [`extend`] reads it from the channel's stored program events in pages of
+//!   twice the pool's length, going further back until the rows hold N - k
+//!   distinct pool items or the history ends. A program cut into several
+//!   events counts once in the walk.
 //!
 //! # Persisting
 //!
@@ -72,12 +72,15 @@
 //! passes the result to `extend`. Until issue #30 only collections resolve.
 //! `extend` reads the schedule end and where to resume, then writes the new
 //! events in one transaction. A sequential channel reads only its last stored
-//! program. A shuffle channel reads its whole program history, which grows
-//! because old events are never deleted yet. There is no separate cursor
-//! to write, so a crash cannot make the next run repeat items. Because the
-//! resume point is read from the events, `Store::replace_events_from` also moves
-//! it back to the last program it keeps. `extend` never reads the system clock;
-//! the caller passes `now_ms`.
+//! program. A shuffle channel reads its recent programs back to the N - k
+//! distinct pool items cooling down. Usually that is one page of twice the
+//! pool's length; it reads further back when the recent programs are mostly
+//! ids no longer in the pool, and reads the whole history when that holds
+//! fewer than N - k distinct pool items. There is no separate cursor to write,
+//! so a crash cannot make the next run repeat items. Because the resume point
+//! is read from the events, `Store::replace_events_from` also moves it back to
+//! the last program it keeps. `extend` never reads the system clock; the
+//! caller passes `now_ms`.
 
 mod extend;
 mod generate;
@@ -94,9 +97,7 @@ use crate::store::StoreError;
 use crate::timeline::Event;
 
 pub use extend::{Extended, HORIZON_MS, extend};
-#[cfg(test)]
-use generate::local_date_days;
-pub(crate) use generate::{Params, Resume, generate};
+pub(crate) use generate::{Params, Resume, cooling_target, generate};
 
 /// The most events one run will produce. A run over seven days that reaches
 /// this has items only seconds long, which means the library data is wrong.

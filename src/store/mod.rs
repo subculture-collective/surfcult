@@ -50,6 +50,12 @@ const LAST_PROGRAM_BEFORE: &str = "SELECT media_id FROM events
      ORDER BY start_ms DESC
      LIMIT 1";
 
+/// The query behind [`Store::recent_programs_before`]; a test checks its plan.
+const RECENT_PROGRAMS_BEFORE: &str = "SELECT start_ms, media_id FROM events
+     WHERE channel = ?1 AND kind = 'program' AND start_ms < ?2
+     ORDER BY start_ms DESC
+     LIMIT ?3";
+
 /// How long a call waits for another connection's lock before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -180,26 +186,26 @@ impl Store {
         tx.commit().map_err(StoreError::database(action))
     }
 
-    /// Media ids of the channel's program events that start before
-    /// `before_ms`, oldest first. Break, filler and ident events are left out;
-    /// a program cut into several events appears once per event.
-    pub fn programs_before(
+    /// Start times and media ids of the channel's last `limit` program events
+    /// that start before `before_ms`, newest first. Break, filler and ident
+    /// events are left out; a program cut into several events appears once per
+    /// event. Walks back from `before_ms` on the primary key, so its cost grows
+    /// with `limit`, not with the stored history. To read further back, call it
+    /// again with the oldest start time it returned.
+    pub fn recent_programs_before(
         &self,
         channel: u32,
         before_ms: i64,
-    ) -> Result<Vec<MediaId>, StoreError> {
-        let action = "reading program history";
+        limit: u32,
+    ) -> Result<Vec<(i64, MediaId)>, StoreError> {
+        let action = "reading recent programs";
         let mut statement = self
             .conn
-            .prepare_cached(
-                "SELECT media_id FROM events
-                 WHERE channel = ?1 AND kind = 'program' AND start_ms < ?2
-                 ORDER BY start_ms",
-            )
+            .prepare_cached(RECENT_PROGRAMS_BEFORE)
             .map_err(StoreError::database(action))?;
         let rows = statement
-            .query_map(params![channel, before_ms], |row| {
-                row.get::<_, String>(0).map(MediaId::new)
+            .query_map(params![channel, before_ms, limit], |row| {
+                Ok((row.get(0)?, MediaId::new(row.get::<_, String>(1)?)))
             })
             .map_err(StoreError::database(action))?;
         rows.collect::<Result<_, _>>()

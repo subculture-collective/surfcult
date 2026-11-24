@@ -386,7 +386,15 @@ fn reading_a_channels_time_range_uses_the_index() {
 }
 
 #[test]
-fn programs_before_lists_program_ids_oldest_first() {
+fn recent_programs_before_lists_program_ids_newest_first() {
+    let recent = |store: &Store, channel, before_ms, limit| -> Vec<MediaId> {
+        store
+            .recent_programs_before(channel, before_ms, limit)
+            .unwrap()
+            .into_iter()
+            .map(|(_, id)| id)
+            .collect()
+    };
     let db = TempDb::new();
     let mut store = Store::open(db.path()).unwrap();
     store.write_events(3, &schedule()).unwrap();
@@ -398,22 +406,40 @@ fn programs_before_lists_program_ids_oldest_first() {
         .unwrap();
 
     // The break and the filler are left out; `a` appears once per event.
-    assert_eq!(
-        store.programs_before(3, i64::MAX).unwrap(),
-        ids(&["a", "a", "c"])
-    );
+    assert_eq!(recent(&store, 3, i64::MAX, 10), ids(&["c", "a", "a"]));
+    // The limit keeps the newest rows.
+    assert_eq!(recent(&store, 3, i64::MAX, 2), ids(&["c", "a"]));
     // The bound is exclusive: `c` starts at 40s.
-    assert_eq!(store.programs_before(3, 40_000).unwrap(), ids(&["a", "a"]));
-    assert_eq!(store.programs_before(3, 0).unwrap(), ids(&[]));
-    assert_eq!(store.programs_before(4, i64::MAX).unwrap(), ids(&["other"]));
-    assert!(store.programs_before(5, i64::MAX).unwrap().is_empty());
+    assert_eq!(recent(&store, 3, 40_000, 10), ids(&["a", "a"]));
+    assert_eq!(recent(&store, 3, 0, 10), ids(&[]));
+    assert_eq!(recent(&store, 4, i64::MAX, 10), ids(&["other"]));
+    assert!(recent(&store, 5, i64::MAX, 10).is_empty());
+    // Each row carries its start time, the bound for reading further back.
+    assert_eq!(
+        store.recent_programs_before(3, i64::MAX, 1).unwrap(),
+        vec![(40_000, MediaId::new("c"))]
+    );
 
     drop(store);
     let store = Store::open(db.path()).unwrap();
-    assert_eq!(
-        store.programs_before(3, i64::MAX).unwrap(),
-        ids(&["a", "a", "c"])
-    );
+    assert_eq!(recent(&store, 3, i64::MAX, 10), ids(&["c", "a", "a"]));
+}
+
+#[test]
+fn reading_recent_programs_uses_the_index() {
+    let store = Store::open_in_memory().unwrap();
+    let plan: Vec<String> = store
+        .conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {RECENT_PROGRAMS_BEFORE}"))
+        .unwrap()
+        .query_map(params![3, 10, 20], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let plan = plan.join("; ");
+    assert!(plan.contains("SEARCH events USING PRIMARY KEY"), "{plan}");
+    assert!(!plan.contains("SCAN"), "{plan}");
+    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
 }
 
 #[test]

@@ -19,34 +19,21 @@ impl SplitMix64 {
     }
 
     /// A number in `0..bound`. `bound` must not be zero.
-    fn below(&mut self, bound: usize) -> usize {
+    pub(super) fn below(&mut self, bound: usize) -> usize {
         // Multiply-and-shift keeps the result in range without a division and
         // with a bias too small to matter for a TV schedule.
         ((u128::from(self.next_u64()) * bound as u128) >> 64) as usize
     }
 }
 
-/// Folds the parts of a shuffle's identity into one seed.
-pub(super) fn seed(channel: u32, local_date_days: i32, salt: u32) -> u64 {
+/// The seed for one shuffle pick: the channel and the start of the slot.
+pub(super) fn seed(channel: u32, start_ms: i64) -> u64 {
     let mut rng = SplitMix64::new(0);
-    for part in [
-        u64::from(channel),
-        i64::from(local_date_days) as u64,
-        u64::from(salt),
-    ] {
+    for part in [u64::from(channel), start_ms as u64] {
         rng.0 ^= part;
         rng.next_u64();
     }
     rng.next_u64()
-}
-
-/// A Fisher-Yates shuffle of `0..len`.
-pub(super) fn shuffled_indices(len: usize, rng: &mut SplitMix64) -> Vec<usize> {
-    let mut order: Vec<usize> = (0..len).collect();
-    for i in (1..len).rev() {
-        order.swap(i, rng.below(i + 1));
-    }
-    order
 }
 
 #[cfg(test)]
@@ -62,20 +49,20 @@ mod tests {
     }
 
     #[test]
-    fn a_shuffle_is_a_permutation_and_repeats_for_the_same_seed() {
-        let first = shuffled_indices(9, &mut SplitMix64::new(seed(3, 20_400, 0)));
-        let again = shuffled_indices(9, &mut SplitMix64::new(seed(3, 20_400, 0)));
-        let mut sorted = first.clone();
-        sorted.sort_unstable();
-        assert_eq!(first, again);
-        assert_eq!(sorted, (0..9).collect::<Vec<_>>());
+    fn below_stays_in_range_and_repeats_for_the_same_seed() {
+        let draws = |seed| {
+            let mut rng = SplitMix64::new(seed);
+            (0..100).map(|_| rng.below(7)).collect::<Vec<_>>()
+        };
+        let first = draws(seed(3, 1_780_000_000_000));
+        assert_eq!(first, draws(seed(3, 1_780_000_000_000)));
+        assert!(first.iter().all(|&i| i < 7));
     }
 
     #[test]
     fn the_seed_depends_on_every_part() {
-        let base = seed(3, 20_400, 0);
-        assert_ne!(base, seed(4, 20_400, 0));
-        assert_ne!(base, seed(3, 20_401, 0));
-        assert_ne!(base, seed(3, 20_400, 1));
+        let base = seed(3, 1_780_000_000_000);
+        assert_ne!(base, seed(4, 1_780_000_000_000));
+        assert_ne!(base, seed(3, 1_780_000_000_001));
     }
 }

@@ -1,12 +1,10 @@
 //! The pure generator. See the module docs of `schedule` for the rules.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-
-use chrono::{DateTime, Datelike};
+use std::collections::{HashMap, HashSet};
 
 use super::rng::{self, SplitMix64};
 use super::{Generated, MAX_EVENTS, Note, ScheduleError};
-use crate::config::{Mode, Tz};
+use crate::config::Mode;
 use crate::library::{MediaId, MediaItem};
 use crate::timeline::{Event, EventKind};
 
@@ -15,18 +13,21 @@ use crate::timeline::{Event, EventKind};
 pub(crate) struct Params {
     pub channel: u32,
     pub mode: Mode,
-    /// Decides which calendar date a moment falls on, for the shuffle seed.
-    pub tz: Tz,
 }
 
 /// Where the previous run stopped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Resume {
-    /// The media id of the last item scheduled.
-    pub cursor: Option<MediaId>,
-    /// Media ids of the programs scheduled before this run, oldest first. Only
-    /// shuffle reads it, to know which items the current pass has used.
-    pub played: Vec<MediaId>,
+    /// Media ids of the programs scheduled before this run, newest first. The
+    /// first is the cursor, the last item scheduled. Sequential reads only the
+    /// cursor; shuffle reads as many as it needs to find the items cooling down.
+    pub recent: Vec<MediaId>,
+}
+
+impl Resume {
+    fn cursor(&self) -> Option<&MediaId> {
+        self.recent.first()
+    }
 }
 
 /// Generates events covering `[start_ms, end_ms)`. The last event may end after
@@ -63,13 +64,13 @@ pub(crate) fn generate(
     };
 
     let mut events = Vec::new();
-    let mut cursor = resume.cursor.clone();
+    let mut cursor = resume.cursor().cloned();
     let mut at_ms = start_ms;
     while at_ms < end_ms {
         if events.len() >= MAX_EVENTS {
             return Err(ScheduleError::TooManyEvents);
         }
-        let item = picker.next(at_ms)?;
+        let item = picker.next(at_ms);
         let runtime = i64::try_from(item.runtime_ms).map_err(|_| ScheduleError::TimeOutOfRange)?;
         let next_ms = at_ms
             .checked_add(runtime)
@@ -92,19 +93,32 @@ pub(crate) fn generate(
     })
 }
 
+/// How many distinct items a shuffle over `n` playable items keeps cooling
+/// down: N - k with k = max(1, ceil(N / 4)).
+fn cooldown(n: usize) -> usize {
+    n.saturating_sub(n.div_ceil(4).max(1))
+}
+
+/// The ids a shuffle over `pool` counts toward its cooldown, its distinct
+/// playable items, and how many of them it keeps cooling down.
+pub(crate) fn cooling_target(pool: &[MediaItem]) -> (HashSet<&str>, usize) {
+    let mut seen = HashSet::new();
+    let playable: HashSet<&str> = pool
+        .iter()
+        .filter(|item| seen.insert(item.id.as_str()))
+        .filter(|item| item.runtime_ms > 0)
+        .map(|item| item.id.as_str())
+        .collect();
+    let count = cooldown(playable.len());
+    (playable, count)
+}
+
 fn nothing(resume: &Resume, notes: Vec<Note>) -> Generated {
     Generated {
         events: Vec::new(),
-        cursor: resume.cursor.clone(),
+        cursor: resume.cursor().cloned(),
         notes,
     }
-}
-
-/// The calendar date of a moment in `tz`, as a day number. Two moments on the
-/// same local date give the same number, even on a day with 23 or 25 hours.
-pub(crate) fn local_date_days(tz: Tz, at_ms: i64) -> Result<i32, ScheduleError> {
-    let moment = DateTime::from_timestamp_millis(at_ms).ok_or(ScheduleError::TimeOutOfRange)?;
-    Ok(moment.with_timezone(&tz).date_naive().num_days_from_ce())
 }
 
 /// Chooses the next item to play. At least one item has a runtime above 0.
@@ -118,24 +132,21 @@ enum Picker<'a> {
     Shuffle {
         playable: Vec<&'a MediaItem>,
         channel: u32,
-        tz: Tz,
-        /// Indexes into `playable` already used in the current pass.
-        done: HashSet<usize>,
-        /// The rest of the current pass, in play order.
-        queue: VecDeque<usize>,
-        last: Option<usize>,
-        /// Passes drawn so far in this run.
-        salt: u32,
+        /// Indexes into `playable` of the programs before this slot, oldest
+        /// first: the resumed history that is still in the pool, then this
+        /// run's picks.
+        played: Vec<usize>,
+        /// How many distinct items are cooling down: N - k.
+        cooldown: usize,
     },
 }
 
 impl<'a> Picker<'a> {
     fn sequential(items: Vec<&'a MediaItem>, resume: &Resume, notes: &mut Vec<Note>) -> Self {
         let position = resume
-            .cursor
-            .as_ref()
+            .cursor()
             .and_then(|cursor| items.iter().position(|item| &item.id == cursor));
-        if let (Some(cursor), None) = (&resume.cursor, position) {
+        if let (Some(cursor), None) = (resume.cursor(), position) {
             notes.push(Note::CursorNotInPool {
                 media_id: cursor.clone(),
             });
@@ -153,80 +164,52 @@ impl<'a> Picker<'a> {
             .enumerate()
             .map(|(i, item)| (item.id.as_str(), i))
             .collect();
-        let lone_cursor = resume.cursor.iter().cloned().collect::<Vec<_>>();
-        let history = if resume.played.is_empty() {
-            &lone_cursor
-        } else {
-            &resume.played
-        };
-
-        // Replay the history through the same pass rule the generator follows.
-        // An id that is not in the pool is forgotten.
-        let mut done = HashSet::new();
-        let mut last = None;
-        for id in history {
-            let Some(&i) = index.get(id.as_str()) else {
-                continue;
-            };
-            if done.contains(&i) {
-                // History that repeats inside a pass: a new pass began here.
-                done.clear();
-            }
-            done.insert(i);
-            if done.len() == playable.len() {
-                done.clear();
-            }
-            last = Some(i);
-        }
+        // An id that is no longer in the pool is ignored.
+        let played = resume
+            .recent
+            .iter()
+            .rev()
+            .filter_map(|id| index.get(id.as_str()).copied())
+            .collect();
         Self::Shuffle {
+            cooldown: cooldown(playable.len()),
             channel: params.channel,
-            tz: params.tz,
             playable,
-            done,
-            queue: VecDeque::new(),
-            last,
-            salt: 0,
+            played,
         }
     }
 
-    fn next(&mut self, at_ms: i64) -> Result<&'a MediaItem, ScheduleError> {
+    fn next(&mut self, at_ms: i64) -> &'a MediaItem {
         match self {
             Self::Sequential { items, next } => loop {
                 let item = items[*next % items.len()];
                 *next = (*next + 1) % items.len();
                 if item.runtime_ms > 0 {
-                    return Ok(item);
+                    return item;
                 }
             },
             Self::Shuffle {
                 playable,
                 channel,
-                tz,
-                done,
-                queue,
-                last,
-                salt,
+                played,
+                cooldown,
             } => {
-                if queue.is_empty() {
-                    if done.len() >= playable.len() {
-                        done.clear();
+                // Walk back to the `cooldown` most recent distinct items. A
+                // program cut into several events appears once in the walk.
+                let mut cooling = HashSet::new();
+                for &i in played.iter().rev() {
+                    if cooling.len() == *cooldown {
+                        break;
                     }
-                    let days = local_date_days(*tz, at_ms)?;
-                    let mut rng = SplitMix64::new(rng::seed(*channel, days, *salt));
-                    *salt += 1;
-                    let mut order = rng::shuffled_indices(playable.len(), &mut rng);
-                    // A new pass must not open with what just played.
-                    if done.is_empty() && order.len() > 1 && Some(order[0]) == *last {
-                        order.swap(0, 1);
-                    }
-                    queue.extend(order.into_iter().filter(|i| !done.contains(i)));
+                    cooling.insert(i);
                 }
-                let chosen = queue
-                    .pop_front()
-                    .expect("a pass has at least one item left");
-                done.insert(chosen);
-                *last = Some(chosen);
-                Ok(playable[chosen])
+                let eligible: Vec<usize> = (0..playable.len())
+                    .filter(|i| !cooling.contains(i))
+                    .collect();
+                let mut rng = SplitMix64::new(rng::seed(*channel, at_ms));
+                let chosen = eligible[rng.below(eligible.len())];
+                played.push(chosen);
+                playable[chosen]
             }
         }
     }

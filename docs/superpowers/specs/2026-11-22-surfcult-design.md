@@ -98,7 +98,7 @@ Content sources and modes (v1):
 
 - Sources: a Jellyfin library, collection, tag or genre, or a single series. Collections and series expand to their episodes and movies.
 - `sequential`: plays items in order and remembers its place. There is no separate cursor: the channel continues after the media of its last stored program event, so regenerating the future continues from the last program before the frozen boundary.
-- `shuffle`: seeded random order without repeats until the pool is used up.
+- `shuffle`: each slot picks at random from the items not played recently. With N items, the N - k most recently played (k = max(1, ceil(N / 4))) are cooling down.
 - `weighted`: seeded random pick where each source or item carries a weight.
 - `blocks`: a list of time-of-day (and day-of-week) blocks, each with its own source and mode, for things like Saturday-morning cartoons. Later blocks in the file do not override earlier ones; overlapping blocks are a config error.
 
@@ -108,7 +108,7 @@ Programs and breaks:
 - Breaks add to the slot. A 22-minute episode with two 2-minute breaks occupies 26 minutes.
 - Intros and credits are not detected in v1. "What is on now" is a lookup of the event containing `now`, so a channel costs nothing while nobody watches it.
 
-- Randomness is seeded from the channel and date, so regenerating a day gives the same order unless its inputs changed.
+- Randomness is seeded from the channel and each slot's start time, so regenerating a day gives the same order unless its inputs changed.
 - With `grid` set, programs start on the grid and any gap is filled from the break pool, then idents, then the channel's `filler` pool. Looping a single ident is a last resort. Channels with long, irregular programs such as movies should leave `grid` off.
 - The schedule never slips. At an event boundary the scheduled end wins: if a file ends early, the rest of the event is filled from the filler pool; if it runs long, it is cut at the scheduled end. Every such mismatch is recorded, and the next library sync corrects the stored duration so later events are generated from the right length.
 - Events starting within the next 30 minutes are frozen. Anything later may be regenerated, for example when Tdarr changes a file's duration or when the owner edits a channel. The show on screen and the next few guide rows never change under the viewer.

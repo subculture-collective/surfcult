@@ -1,9 +1,11 @@
 //! Keeps a channel's week filled: reads the stored schedule, calls `generate`
 //! and writes the new events in one transaction.
 
-use super::{Note, Params, Resume, ScheduleError, generate};
-use crate::config::{Channel, Mode, Plan, Tz};
-use crate::library::MediaItem;
+use std::collections::HashSet;
+
+use super::{Note, Params, Resume, ScheduleError, cooling_target, generate};
+use crate::config::{Channel, Mode, Plan};
+use crate::library::{MediaId, MediaItem};
 use crate::store::Store;
 
 /// How far ahead of `now` a channel's schedule is kept filled: seven days.
@@ -37,7 +39,6 @@ pub fn extend(
     store: &mut Store,
     channel: &Channel,
     pool: &[MediaItem],
-    tz: Tz,
     now_ms: i64,
     clock_trusted: bool,
 ) -> Result<Extended, ScheduleError> {
@@ -63,33 +64,16 @@ pub fn extend(
         return Ok(Extended::UpToDate { until_ms: from_ms });
     }
 
-    // Sequential needs only the last earlier program. Shuffle replays every
-    // earlier program, oldest first, to find where the current pass stands; a
-    // program cut into several events counts once. That read grows with the
-    // stored history, which is never pruned.
-    let resume = if mode == Mode::Shuffle {
-        let mut played = Vec::new();
-        for id in store.programs_before(n, from_ms)? {
-            if played.last() != Some(&id) {
-                played.push(id);
-            }
-        }
-        Resume {
-            cursor: played.last().cloned(),
-            played,
-        }
+    // Sequential needs only the last earlier program. Shuffle needs the
+    // programs back to the N - k distinct pool items cooling down.
+    let recent = if mode == Mode::Shuffle {
+        recent_until_cooling(store, n, pool, from_ms)?
     } else {
-        Resume {
-            cursor: store.last_program_before(n, from_ms)?,
-            played: Vec::new(),
-        }
+        store.last_program_before(n, from_ms)?.into_iter().collect()
     };
+    let resume = Resume { recent };
 
-    let params = Params {
-        channel: n,
-        mode,
-        tz,
-    };
+    let params = Params { channel: n, mode };
     let generated = generate(&params, pool, &resume, from_ms, horizon_ms)?;
     if !generated.events.is_empty() {
         store.write_events(n, &generated.events)?;
@@ -100,4 +84,40 @@ pub fn extend(
         written: generated.events.len(),
         notes: generated.notes,
     })
+}
+
+/// Reads `channel`'s programs before `before_ms`, newest first, until they hold
+/// the N - k distinct pool items a shuffle keeps cooling down or the history
+/// ends. Every run therefore sees the same cooling items as an unbroken run
+/// would. Pages of twice the pool's length leave room for programs cut into
+/// several events and ids no longer in the pool, so one page is usually
+/// enough. The read goes further back when the recent rows are mostly such
+/// ids, and reads the whole history when it holds fewer than N - k distinct
+/// pool items.
+fn recent_until_cooling(
+    store: &Store,
+    channel: u32,
+    pool: &[MediaItem],
+    before_ms: i64,
+) -> Result<Vec<MediaId>, ScheduleError> {
+    let (playable, target) = cooling_target(pool);
+    let page = u32::try_from(pool.len().saturating_mul(2).max(1)).unwrap_or(u32::MAX);
+    let mut recent = Vec::new();
+    let mut found = HashSet::new();
+    let mut bound = before_ms;
+    while found.len() < target {
+        let rows = store.recent_programs_before(channel, bound, page)?;
+        let full = rows.len() == page as usize;
+        for (start_ms, id) in rows {
+            bound = start_ms;
+            if let Some(&pooled) = playable.get(id.as_str()) {
+                found.insert(pooled);
+            }
+            recent.push(id);
+        }
+        if !full {
+            break;
+        }
+    }
+    Ok(recent)
 }
