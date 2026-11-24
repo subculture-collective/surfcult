@@ -12,10 +12,10 @@ use super::*;
 use crate::library::{MediaId, MediaKind, MediaSource, SourceError};
 use crate::store::Store;
 
-const ITEMS: &str = include_str!("../../../tests/fixtures/jellyfin/items-page.json");
-const BOXSETS: &str = include_str!("../../../tests/fixtures/jellyfin/boxsets-page.json");
+const ITEMS: &str = include_str!("../../tests/fixtures/jellyfin/items-page.json");
+const BOXSETS: &str = include_str!("../../tests/fixtures/jellyfin/boxsets-page.json");
 const CHILDREN: &str =
-    include_str!("../../../tests/fixtures/jellyfin/boxset-children-by-parent-id.json");
+    include_str!("../../tests/fixtures/jellyfin/boxset-children-by-parent-id.json");
 
 /// A value that stands for the API key. Tests look for it everywhere it must not be.
 const SENTINEL: &str = "SENTINEL-KEY-0123456789abcdef";
@@ -104,11 +104,16 @@ fn serve_fixtures(path: &str, cap: usize, items: &str) -> Result<String, HttpErr
     Ok(page(&list(items), path, cap))
 }
 
-fn source_with(http: &Arc<FakeHttp>) -> JellyfinSource {
-    JellyfinSource::new(
-        JellyfinClient::with_transport(key(), http.clone()),
-        Store::open_in_memory().unwrap(),
-    )
+/// When the tests say a sync happened, in Unix epoch milliseconds.
+const SYNCED_AT: i64 = 1_767_225_600_000;
+
+fn client(http: &Arc<FakeHttp>) -> JellyfinClient {
+    JellyfinClient::with_transport(key(), http.clone())
+}
+
+/// A client on `http` and an empty in-memory store.
+fn client_and_store(http: &Arc<FakeHttp>) -> (JellyfinClient, Store) {
+    (client(http), Store::open_in_memory().unwrap())
 }
 
 fn ids(items: &[crate::library::MediaItem]) -> Vec<&str> {
@@ -124,9 +129,9 @@ const MOVIE_4: &str = "a57a957c-1ae6-5318-4137-e200281aa5af";
 
 #[test]
 fn a_sync_fills_the_cache_with_runtime_chapters_streams_and_path() {
-    let source = source_with(&FakeHttp::fixtures(500));
+    let (client, mut store) = client_and_store(&FakeHttp::fixtures(500));
 
-    let report = source.sync().unwrap();
+    let report = sync(&client, &mut store, SYNCED_AT).unwrap();
 
     assert_eq!(
         report,
@@ -136,7 +141,7 @@ fn a_sync_fills_the_cache_with_runtime_chapters_streams_and_path() {
             skipped: 1
         }
     );
-    let movie = source.resolve(&MediaId::new(MOVIE_1)).unwrap();
+    let movie = store.resolve(&MediaId::new(MOVIE_1)).unwrap();
     assert_eq!(movie.title, "Fixture Movie 1");
     assert_eq!(movie.kind, MediaKind::Movie);
     assert_eq!(movie.runtime_ms, 5_823_840, "58238400000 ticks / 10000");
@@ -153,38 +158,38 @@ fn a_sync_fills_the_cache_with_runtime_chapters_streams_and_path() {
     assert_eq!(movie.audio[0].channels, 6);
     assert_eq!(movie.audio[0].language.as_deref(), Some("eng"));
 
-    let entries = source.cached_entries().unwrap();
+    let entries = store.library_items().unwrap();
     assert_eq!(
         entries[0].path.as_deref(),
         Some("/media/fixtures/movie-1.mkv")
     );
-    assert!(source.last_synced_at_ms().unwrap().unwrap() > 0);
+    assert_eq!(store.library_synced_at_ms().unwrap(), Some(SYNCED_AT));
 }
 
 #[test]
 fn episodes_and_extra_streams_are_read() {
-    let source = source_with(&FakeHttp::fixtures(500));
-    source.sync().unwrap();
+    let (client, mut store) = client_and_store(&FakeHttp::fixtures(500));
+    sync(&client, &mut store, SYNCED_AT).unwrap();
 
-    let episode = source.resolve(&MediaId::new(EPISODE_2)).unwrap();
+    let episode = store.resolve(&MediaId::new(EPISODE_2)).unwrap();
     assert_eq!(episode.kind, MediaKind::Episode);
     assert_eq!(episode.runtime_ms, 1_436_105);
     assert_eq!(episode.audio[0].language.as_deref(), Some("jpn"));
 
-    let movie_4 = source.resolve(&MediaId::new(MOVIE_4)).unwrap();
+    let movie_4 = store.resolve(&MediaId::new(MOVIE_4)).unwrap();
     let audio: Vec<_> = movie_4.audio.iter().map(|a| a.codec.as_str()).collect();
     assert_eq!(audio, ["truehd", "ac3"], "audio streams keep their order");
 
-    let no_chapters = source.resolve(&MediaId::new(MOVIE_3)).unwrap();
+    let no_chapters = store.resolve(&MediaId::new(MOVIE_3)).unwrap();
     assert!(no_chapters.chapters.is_empty());
 }
 
 #[test]
 fn a_placeholder_episode_with_no_streams_is_skipped() {
-    let source = source_with(&FakeHttp::fixtures(500));
-    source.sync().unwrap();
+    let (client, mut store) = client_and_store(&FakeHttp::fixtures(500));
+    sync(&client, &mut store, SYNCED_AT).unwrap();
 
-    let items = source.list_items().unwrap();
+    let items = store.list_items().unwrap();
 
     assert_eq!(ids(&items), [MOVIE_1, EPISODE_2, MOVIE_3, MOVIE_4]);
     assert!(items.iter().all(|item| !item.title.contains("missing")));
@@ -192,10 +197,10 @@ fn a_placeholder_episode_with_no_streams_is_skipped() {
 
 #[test]
 fn collections_list_their_members_in_jellyfins_order() {
-    let source = source_with(&FakeHttp::fixtures(500));
-    source.sync().unwrap();
+    let (client, mut store) = client_and_store(&FakeHttp::fixtures(500));
+    sync(&client, &mut store, SYNCED_AT).unwrap();
 
-    let collections = source.list_collections().unwrap();
+    let collections = store.list_collections().unwrap();
 
     assert_eq!(collections.len(), 2);
     assert_eq!(collections[0].name, "Fixture Collection A");
@@ -225,54 +230,54 @@ fn collection_children_that_are_not_cached_items_are_left_out() {
         }
         serve_fixtures(path, 500, ITEMS)
     });
-    let source = source_with(&http);
-    source.sync().unwrap();
+    let (client, mut store) = client_and_store(&http);
+    sync(&client, &mut store, SYNCED_AT).unwrap();
 
-    let members = &source.list_collections().unwrap()[0].members;
+    let members = &store.list_collections().unwrap()[0].members;
 
     assert_eq!(members, &[MediaId::new(MOVIE_1), MediaId::new(MOVIE_3)]);
 }
 
 #[test]
 fn resolving_an_unknown_id_is_not_found() {
-    let source = source_with(&FakeHttp::fixtures(500));
-    source.sync().unwrap();
+    let (client, mut store) = client_and_store(&FakeHttp::fixtures(500));
+    sync(&client, &mut store, SYNCED_AT).unwrap();
 
-    let err = source.resolve(&MediaId::new("nope")).unwrap_err();
+    let err = store.resolve(&MediaId::new("nope")).unwrap_err();
 
     assert_eq!(err, SourceError::NotFound(MediaId::new("nope")));
 }
 
 #[test]
 fn before_any_sync_the_cache_is_empty() {
-    let source = source_with(&FakeHttp::fixtures(500));
+    let store = Store::open_in_memory().unwrap();
 
-    assert!(source.list_items().unwrap().is_empty());
-    assert!(source.list_collections().unwrap().is_empty());
-    assert_eq!(source.last_synced_at_ms().unwrap(), None);
+    assert!(store.list_items().unwrap().is_empty());
+    assert!(store.list_collections().unwrap().is_empty());
+    assert_eq!(store.library_synced_at_ms().unwrap(), None);
 }
 
 #[test]
 fn syncing_again_replaces_items_that_went_away() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("cache.db");
-    source_with_store(FakeHttp::fixtures(500), Store::open(&db).unwrap())
-        .sync()
-        .unwrap();
+    let mut store = Store::open(&db).unwrap();
+    sync(&client(&FakeHttp::fixtures(500)), &mut store, SYNCED_AT).unwrap();
+    drop(store);
     let only_movie_3 = {
         let all: Value = serde_json::from_str(ITEMS).unwrap();
         let movie_3 = all["Items"][2].clone();
         json!({ "Items": [movie_3], "TotalRecordCount": 1 }).to_string()
     };
     let http = FakeHttp::new(move |path| serve_fixtures(path, 500, &only_movie_3));
-    let source = source_with_store(http, Store::open(&db).unwrap());
+    let mut store = Store::open(&db).unwrap();
 
-    source.sync().unwrap();
+    sync(&client(&http), &mut store, SYNCED_AT + 1).unwrap();
 
-    assert_eq!(ids(&source.list_items().unwrap()), [MOVIE_3]);
+    assert_eq!(ids(&store.list_items().unwrap()), [MOVIE_3]);
     // Collection A listed movies 1 and 3; only 3 remains in the cache.
     assert_eq!(
-        source.list_collections().unwrap()[0].members,
+        store.list_collections().unwrap()[0].members,
         [MediaId::new(MOVIE_3)]
     );
 }
@@ -282,9 +287,9 @@ fn syncing_again_replaces_items_that_went_away() {
 #[test]
 fn items_are_fetched_page_by_page() {
     let http = FakeHttp::fixtures(2);
-    let source = source_with(&http);
+    let (client, mut store) = client_and_store(&http);
 
-    let report = source.sync().unwrap();
+    let report = sync(&client, &mut store, SYNCED_AT).unwrap();
 
     assert_eq!(report.items, 4);
     let item_requests: Vec<String> = http
@@ -307,9 +312,9 @@ fn items_are_fetched_page_by_page() {
 #[test]
 fn a_list_that_ends_before_its_count_is_an_error() {
     let http = FakeHttp::new(|_| Ok(json!({ "Items": [], "TotalRecordCount": 10 }).to_string()));
-    let source = source_with(&http);
+    let (client, mut store) = client_and_store(&http);
 
-    let err = source.sync().unwrap_err();
+    let err = sync(&client, &mut store, SYNCED_AT).unwrap_err();
 
     assert!(matches!(err, JellyfinError::BadResponse(_)), "{err}");
 }
@@ -317,9 +322,9 @@ fn a_list_that_ends_before_its_count_is_an_error() {
 #[test]
 fn a_response_without_a_count_stops_at_a_short_page() {
     let http = FakeHttp::new(|_| Ok(json!({ "Items": [] }).to_string()));
-    let source = source_with(&http);
+    let (client, mut store) = client_and_store(&http);
 
-    let report = source.sync().unwrap();
+    let report = sync(&client, &mut store, SYNCED_AT).unwrap();
 
     assert_eq!((report.items, report.collections), (0, 0));
     assert_eq!(
@@ -356,23 +361,23 @@ fn unknown_fields_and_missing_optional_fields_do_not_break_parsing() {
     })
     .to_string();
     let http = FakeHttp::new(move |path| serve_fixtures(path, 500, &items));
-    let source = source_with(&http);
+    let (client, mut store) = client_and_store(&http);
 
-    source.sync().unwrap();
+    sync(&client, &mut store, SYNCED_AT).unwrap();
 
-    let a = source.resolve(&MediaId::new("a")).unwrap();
+    let a = store.resolve(&MediaId::new("a")).unwrap();
     assert_eq!(a.title, "a", "no Name falls back to the id");
     assert_eq!(a.runtime_ms, 600_000);
     assert_eq!(a.video[0].bit_depth, None);
     assert_eq!(a.audio[0].language, None);
     assert!(a.chapters.is_empty());
-    let entries = source.cached_entries().unwrap();
+    let entries = store.library_items().unwrap();
     assert_eq!(
         entries[0].path.as_deref(),
         Some("/media/a.mkv"),
         "falls back to MediaSources"
     );
-    let b = source.resolve(&MediaId::new("b")).unwrap();
+    let b = store.resolve(&MediaId::new("b")).unwrap();
     assert_eq!(b.video[0].codec, "unknown");
     assert_eq!(entries[1].path, None, "an empty Path is no path");
 }
@@ -400,13 +405,13 @@ fn items_that_are_not_playable_or_not_item_shaped_are_skipped_not_fatal() {
     })
     .to_string();
     let http = FakeHttp::new(move |path| serve_fixtures(path, 500, &items));
-    let source = source_with(&http);
+    let (client, mut store) = client_and_store(&http);
 
-    let report = source.sync().unwrap();
+    let report = sync(&client, &mut store, SYNCED_AT).unwrap();
 
     assert_eq!(report.items, 1);
     assert_eq!(report.skipped, 5);
-    assert_eq!(ids(&source.list_items().unwrap()), ["good"]);
+    assert_eq!(ids(&store.list_items().unwrap()), ["good"]);
 }
 
 #[test]
@@ -418,9 +423,9 @@ fn an_item_listed_twice_is_cached_once() {
     })
     .to_string();
     let http = FakeHttp::new(move |path| serve_fixtures(path, 500, &doubled));
-    let source = source_with(&http);
+    let (client, mut store) = client_and_store(&http);
 
-    let report = source.sync().unwrap();
+    let report = sync(&client, &mut store, SYNCED_AT).unwrap();
 
     assert_eq!(report.items, 1);
 }
@@ -428,14 +433,14 @@ fn an_item_listed_twice_is_cached_once() {
 // ---- failure leaves the cache alone ------------------------------------
 
 fn snapshot(
-    source: &JellyfinSource,
+    store: &Store,
 ) -> (
     Vec<crate::library::MediaItem>,
     Vec<crate::library::Collection>,
 ) {
     (
-        source.list_items().unwrap(),
-        source.list_collections().unwrap(),
+        store.list_items().unwrap(),
+        store.list_collections().unwrap(),
     )
 }
 
@@ -447,22 +452,17 @@ fn assert_failed_sync_keeps_cache(
 ) {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("cache.db");
-    let good = source_with_store(FakeHttp::fixtures(500), Store::open(&db).unwrap());
-    good.sync().unwrap();
-    let before = snapshot(&good);
-    let synced_at = good.last_synced_at_ms().unwrap();
-    drop(good);
+    let mut store = Store::open(&db).unwrap();
+    sync(&client(&FakeHttp::fixtures(500)), &mut store, SYNCED_AT).unwrap();
+    let before = snapshot(&store);
+    drop(store);
 
-    let broken = source_with_store(FakeHttp::new(failing), Store::open(&db).unwrap());
-    let err = broken.sync().unwrap_err();
+    let mut store = Store::open(&db).unwrap();
+    let err = sync(&client(&FakeHttp::new(failing)), &mut store, SYNCED_AT + 1).unwrap_err();
 
     assert!(expected(&err), "unexpected error: {err}");
-    assert_eq!(snapshot(&broken), before);
-    assert_eq!(broken.last_synced_at_ms().unwrap(), synced_at);
-}
-
-fn source_with_store(http: Arc<FakeHttp>, store: Store) -> JellyfinSource {
-    JellyfinSource::new(JellyfinClient::with_transport(key(), http), store)
+    assert_eq!(snapshot(&store), before);
+    assert_eq!(store.library_synced_at_ms().unwrap(), Some(SYNCED_AT));
 }
 
 #[test]
@@ -538,22 +538,22 @@ fn a_failure_while_listing_one_collection_still_leaves_the_cache_untouched() {
 fn cached_items_are_available_to_a_new_process_while_jellyfin_is_unreachable() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("cache.db");
-    source_with_store(FakeHttp::fixtures(500), Store::open(&db).unwrap())
-        .sync()
-        .unwrap();
+    let mut store = Store::open(&db).unwrap();
+    sync(&client(&FakeHttp::fixtures(500)), &mut store, SYNCED_AT).unwrap();
+    drop(store);
 
     // A later start: the server is down, and nothing is asked of it for reads.
     let http = FakeHttp::new(|_| Err(HttpError::Unreachable("no route to host".into())));
-    let source = source_with_store(http.clone(), Store::open(&db).unwrap());
+    let mut store = Store::open(&db).unwrap();
 
-    assert_eq!(source.list_items().unwrap().len(), 4);
+    assert_eq!(store.list_items().unwrap().len(), 4);
     assert_eq!(
-        source.resolve(&MediaId::new(MOVIE_1)).unwrap().runtime_ms,
+        store.resolve(&MediaId::new(MOVIE_1)).unwrap().runtime_ms,
         5_823_840
     );
-    assert_eq!(source.list_collections().unwrap().len(), 2);
+    assert_eq!(store.list_collections().unwrap().len(), 2);
     assert!(http.requests().is_empty(), "reads never go to Jellyfin");
-    assert!(source.sync().is_err());
+    assert!(sync(&client(&http), &mut store, SYNCED_AT + 1).is_err());
 }
 
 // ---- the API key --------------------------------------------------------
@@ -561,9 +561,9 @@ fn cached_items_are_available_to_a_new_process_while_jellyfin_is_unreachable() {
 #[test]
 fn the_key_is_sent_only_in_the_authorization_header() {
     let http = FakeHttp::fixtures(2);
-    let source = source_with(&http);
+    let (client, mut store) = client_and_store(&http);
 
-    source.sync().unwrap();
+    sync(&client, &mut store, SYNCED_AT).unwrap();
 
     let requests = http.requests();
     assert!(requests.len() > 5);
@@ -586,14 +586,15 @@ fn the_key_is_not_in_debug_output_or_error_text() {
         base_url: "http://jellyfin.example:8096".into(),
         key: key(),
     };
-    let source = source_with(&http);
-    source.sync().unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    sync(&client, &mut store, SYNCED_AT).unwrap();
 
+    // `client` names the client above, so the helper is reached by another name.
+    let with_transport = self::client;
     let mut texts = vec![
         format!("{:?}", key()),
         format!("{client:?}"),
         format!("{config:?}"),
-        format!("{source:?}"),
         format!("{:#?}", config),
         format!("{:?}", UreqHttp::new(&config.base_url)),
     ];
@@ -604,7 +605,7 @@ fn the_key_is_not_in_debug_output_or_error_text() {
             "failed with Authorization: MediaBrowser Token=\"{SENTINEL}\""
         )))
     });
-    let err = source_with(&leaky).sync().unwrap_err();
+    let err = sync(&with_transport(&leaky), &mut store, SYNCED_AT).unwrap_err();
     assert!(matches!(err, JellyfinError::Unreachable(_)));
     assert!(err.to_string().contains("[redacted]"), "{err}");
     texts.push(err.to_string());
@@ -617,9 +618,13 @@ fn the_key_is_not_in_debug_output_or_error_text() {
         texts.push(failure.to_string());
     }
     let unauthorized = FakeHttp::new(|_| Err(HttpError::Status(401)));
-    texts.push(source_with(&unauthorized).sync().unwrap_err().to_string());
+    texts.push(
+        sync(&with_transport(&unauthorized), &mut store, SYNCED_AT)
+            .unwrap_err()
+            .to_string(),
+    );
     let malformed = FakeHttp::new(|_| Ok(format!("not json {SENTINEL}")));
-    let err = source_with(&malformed).sync().unwrap_err();
+    let err = sync(&with_transport(&malformed), &mut store, SYNCED_AT).unwrap_err();
     texts.push(err.to_string());
     let source_err = SourceError::Unavailable(err.to_string());
     texts.push(source_err.to_string());
