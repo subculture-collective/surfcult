@@ -7,6 +7,11 @@
 //! stays available while Jellyfin is down, and a failed sync leaves the cache
 //! as it was.
 //!
+//! [`sync`] fetches on the calling thread. [`SyncWorker`] fetches on a
+//! background thread at a fixed interval instead and sends each result back;
+//! the thread that owns the `Store` writes it with [`SyncWorker::apply`]. The
+//! `Store` is not `Sync`, so only its owner writes to it.
+//!
 //! The API key comes from [`ApiKey::from_env`] and is sent only in the
 //! `Authorization: MediaBrowser Token="..."` header, the one form Jellyfin 12
 //! accepts. It is never put in a URL, an error message or `Debug` output.
@@ -24,8 +29,10 @@ mod sync;
 #[cfg(test)]
 mod tests;
 mod wire;
+mod worker;
 
 pub use client::{JellyfinClient, JellyfinError};
 pub use config::{ApiKey, JellyfinConfig, KEY_ENV, KEY_FILE_ENV, KeyError};
 pub use http::{HttpError, JellyfinHttp, UreqHttp};
 pub use sync::{SyncReport, sync};
+pub use worker::SyncWorker;

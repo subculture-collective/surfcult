@@ -1,4 +1,4 @@
-use super::client::{JellyfinClient, JellyfinError};
+use super::client::{FetchedLibrary, JellyfinClient, JellyfinError};
 use crate::store::Store;
 
 /// What one [`sync`] cached.
@@ -20,14 +20,26 @@ pub struct SyncReport {
 /// If the fetch or the write fails, the cache stays exactly as it was and the
 /// error says why. The caller supplies the time; nothing here reads the clock.
 ///
-/// [`Store`] is not `Sync`. A sync run on a blocking thread should fetch there
-/// and send the result back for the thread that owns the store to write.
+/// This fetches on the calling thread. To keep the fetch off the thread that
+/// owns the store, use [`SyncWorker`](super::SyncWorker), which fetches on its
+/// own thread and leaves the write to [`SyncWorker::apply`](super::SyncWorker::apply).
 pub fn sync(
     client: &JellyfinClient,
     store: &mut Store,
     synced_at_ms: i64,
 ) -> Result<SyncReport, JellyfinError> {
     let fetched = client.fetch_library()?;
+    write_fetched(store, &fetched, synced_at_ms)
+}
+
+/// Replaces the library cache with one fetched snapshot and reports what it
+/// holds. [`sync`] and [`SyncWorker::apply`](super::SyncWorker::apply) both
+/// write through this.
+pub(super) fn write_fetched(
+    store: &mut Store,
+    fetched: &FetchedLibrary,
+    synced_at_ms: i64,
+) -> Result<SyncReport, JellyfinError> {
     store.replace_library(&fetched.entries, &fetched.collections, synced_at_ms)?;
     Ok(SyncReport {
         items: fetched.entries.len(),
