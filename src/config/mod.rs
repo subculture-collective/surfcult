@@ -29,7 +29,8 @@ pub struct Channel {
     /// Programs start on this grid and gaps are filled.
     pub grid: Option<Duration>,
     pub breaks: Option<Breaks>,
-    /// Pool used to fill grid gaps.
+    /// Pool used to fill grid gaps and to pad commercial breaks the break
+    /// pool leaves short.
     pub filler: Option<String>,
 }
 

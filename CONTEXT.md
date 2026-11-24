@@ -21,7 +21,11 @@ The words surfcult's code and documentation use, and the code item each one name
 ## Schedule
 
 - **Event**: one scheduled stretch of one media item, a half-open interval `[start_ms, end_ms)`, `timeline::Event`. At a boundary the later event is the one on.
-- **Program**, **break**, **filler** and **ident**: the four `timeline::EventKind`s. A program is an item from the program pool. A break is a stretch of clips, such as ads, from a channel's break pool; filler fills a gap up to the next grid slot; an ident is a short station identification. Only program events are generated so far.
+- **Program**, **break**, **filler** and **ident**: the four `timeline::EventKind`s. A program is an item from the program pool. A break event is one whole clip, such as an ad, from a channel's break pool; filler pads a break the break clips do not fill, and later fills a gap up to the next grid slot; an ident is a short station identification. Ident events are not generated yet.
+- **Commercial break**: the break events and the filler pad at one cut in a program, `breaks.length` long, filled by `schedule` from the channel's break pool. Breaks add to the slot.
+- **Cut point**: where a program is cut for a break: a multiple of `breaks.every` in the program's time, moved to a chapter mark within 60 seconds when there is one. The program's events then have increasing `media_offset_ms`.
+- **Break rotation**: break clips play in pool order from break to break and at most once per break, continuing after the channel's last stored break clip (`Store::last_break_before`) if it started within the last 24 hours, else from the first clip. Clips that share a media id count once.
+- **Clip id**: the `media_id` of a break or filler event, the clip's canonical path as text (`schedule::clip_media_id`).
 - **Channel schedule**: a channel's stored events. `schedule::extend` keeps it filled to the horizon and `Store::events_between` reads it.
 - **Horizon**: how far ahead of now a schedule is kept filled, seven days (`schedule::HORIZON_MS`).
 - **Extend**: one `schedule::extend` call. It starts at the later of now and the end of the last stored event, generates up to the horizon, and writes the new events in one transaction.
