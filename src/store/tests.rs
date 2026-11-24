@@ -382,22 +382,84 @@ fn reading_a_channels_time_range_uses_the_index() {
 }
 
 #[test]
-fn a_cursor_round_trips_and_is_per_channel() {
+fn programs_before_lists_program_ids_oldest_first() {
     let db = TempDb::new();
     let mut store = Store::open(db.path()).unwrap();
-    assert_eq!(store.cursor(3).unwrap(), None);
+    store.write_events(3, &schedule()).unwrap();
+    store
+        .write_events(3, &[event(40_000, 50_000, "c", EventKind::Program)])
+        .unwrap();
+    store
+        .write_events(4, &[event(0, 10_000, "other", EventKind::Program)])
+        .unwrap();
 
-    store.set_cursor(3, "episode-4").unwrap();
-    store.set_cursor(4, "other-1").unwrap();
-    assert_eq!(store.cursor(3).unwrap().as_deref(), Some("episode-4"));
-
-    store.set_cursor(3, "episode-5").unwrap();
-    assert_eq!(store.cursor(3).unwrap().as_deref(), Some("episode-5"));
-    assert_eq!(store.cursor(4).unwrap().as_deref(), Some("other-1"));
+    // The break and the filler are left out; `a` appears once per event.
+    assert_eq!(store.programs_before(3, i64::MAX).unwrap(), ["a", "a", "c"]);
+    // The bound is exclusive: `c` starts at 40s.
+    assert_eq!(store.programs_before(3, 40_000).unwrap(), ["a", "a"]);
+    assert_eq!(store.programs_before(3, 0).unwrap(), Vec::<String>::new());
+    assert_eq!(store.programs_before(4, i64::MAX).unwrap(), ["other"]);
+    assert!(store.programs_before(5, i64::MAX).unwrap().is_empty());
 
     drop(store);
     let store = Store::open(db.path()).unwrap();
-    assert_eq!(store.cursor(3).unwrap().as_deref(), Some("episode-5"));
+    assert_eq!(store.programs_before(3, i64::MAX).unwrap(), ["a", "a", "c"]);
+}
+
+#[test]
+fn migration_3_drops_the_cursors_table() {
+    let cursors = |conn: &Connection| -> u32 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'cursors'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let store = Store::open_in_memory().unwrap();
+    assert_eq!(cursors(&store.conn), 0);
+
+    // A database a version-2 build left behind, with an event and a cursor.
+    let db = TempDb::new();
+    {
+        let conn = Connection::open(db.path()).unwrap();
+        conn.execute_batch(concat!(
+            "CREATE TABLE schema_migrations (
+                version       INTEGER PRIMARY KEY,
+                name          TEXT    NOT NULL,
+                applied_at_ms INTEGER NOT NULL
+            );",
+            include_str!("../../migrations/0001_schedule.sql"),
+            include_str!("../../migrations/0002_library_cache.sql"),
+            "INSERT INTO schema_migrations VALUES (1, 'schedule', 1), (2, 'library_cache', 2);
+             INSERT INTO events VALUES (3, 0, 10000, 'a', 0, 10000, 'program');
+             INSERT INTO cursors VALUES (3, 'a');",
+        ))
+        .unwrap();
+        assert_eq!(cursors(&conn), 1);
+    }
+
+    let store = Store::open(db.path()).unwrap();
+    assert_eq!(cursors(&store.conn), 0);
+    let applied: Vec<(u32, i64)> = store
+        .conn
+        .prepare("SELECT version, applied_at_ms FROM schema_migrations ORDER BY version")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    // Only migration 3 ran; 1 and 2 kept their recorded times.
+    assert_eq!(applied.len(), 3);
+    assert_eq!(&applied[..2], [(1, 1), (2, 2)]);
+    assert_eq!(applied[2].0, 3);
+    assert_eq!(
+        store.events_between(3, i64::MIN, i64::MAX).unwrap(),
+        [event(0, 10_000, "a", EventKind::Program)].map(|mut e| {
+            e.media_duration_ms = 10_000;
+            e
+        })
+    );
 }
 
 #[test]

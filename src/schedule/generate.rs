@@ -12,7 +12,7 @@ use crate::timeline::{Event, EventKind};
 
 /// Who the schedule is for and how it is ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Params {
+pub(crate) struct Params {
     pub channel: u32,
     pub mode: Mode,
     /// Decides which calendar date a moment falls on, for the shuffle seed.
@@ -21,7 +21,7 @@ pub struct Params {
 
 /// Where the previous run stopped.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Resume {
+pub(crate) struct Resume {
     /// The media id of the last item scheduled.
     pub cursor: Option<String>,
     /// Media ids of the programs scheduled before this run, oldest first. Only
@@ -31,7 +31,7 @@ pub struct Resume {
 
 /// Generates events covering `[start_ms, end_ms)`. The last event may end after
 /// `end_ms`. `start_ms >= end_ms` gives no events.
-pub fn generate(
+pub(crate) fn generate(
     params: &Params,
     pool: &[MediaItem],
     resume: &Resume,
@@ -102,7 +102,7 @@ fn nothing(resume: &Resume, notes: Vec<Note>) -> Generated {
 
 /// The calendar date of a moment in `tz`, as a day number. Two moments on the
 /// same local date give the same number, even on a day with 23 or 25 hours.
-pub fn local_date_days(tz: Tz, at_ms: i64) -> Result<i32, ScheduleError> {
+pub(crate) fn local_date_days(tz: Tz, at_ms: i64) -> Result<i32, ScheduleError> {
     let moment = DateTime::from_timestamp_millis(at_ms).ok_or(ScheduleError::TimeOutOfRange)?;
     Ok(moment.with_timezone(&tz).date_naive().num_days_from_ce())
 }

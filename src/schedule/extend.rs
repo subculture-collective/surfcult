@@ -1,15 +1,15 @@
-//! The thin layer that reads the store, calls [`generate`] and writes back.
+//! Keeps a channel's week filled: reads the stored schedule, calls `generate`
+//! and writes the new events in one transaction.
 
 use super::{Note, Params, Resume, ScheduleError, generate};
 use crate::config::{Channel, Mode, Plan, Tz};
-use crate::library::MediaSource;
+use crate::library::MediaItem;
 use crate::store::Store;
-use crate::timeline::EventKind;
 
 /// How far ahead of `now` a channel's schedule is kept filled: seven days.
 pub const HORIZON_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
-/// What [`refill_channel`] did.
+/// What [`extend`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refill {
     /// The caller said the clock is not trusted, so nothing was read or written.
@@ -25,17 +25,18 @@ pub enum Refill {
     },
 }
 
-/// Fills `channel`'s schedule up to `now_ms` plus seven days.
+/// Fills `channel`'s schedule from `pool` up to `now_ms` plus seven days.
 ///
 /// Does nothing unless `clock_trusted` is true: a Pi whose clock has not
 /// synchronized must not store a wrong week. Starts at the later of `now_ms`
 /// and the end of the last stored event, so repeated calls extend the schedule
-/// without gaps. The pool is every item `source` lists; turning a channel's
-/// configured source into a smaller pool comes later.
-pub fn refill_channel(
+/// without gaps. Where to continue comes from the channel's stored program
+/// events, and the new events are its only write, so a crash cannot leave the
+/// schedule and the resume point disagreeing.
+pub fn extend(
     store: &mut Store,
-    source: &impl MediaSource,
     channel: &Channel,
+    pool: &[MediaItem],
     tz: Tz,
     now_ms: i64,
     clock_trusted: bool,
@@ -50,10 +51,11 @@ pub fn refill_channel(
     let horizon_ms = now_ms
         .checked_add(HORIZON_MS)
         .ok_or(ScheduleError::TimeOutOfRange)?;
+    let n = channel.number;
 
     // Events that end after `now_ms`; the last of them is where to continue.
     let last_end = store
-        .events_between(channel.number, now_ms, i64::MAX)?
+        .events_between(n, now_ms, i64::MAX)?
         .last()
         .map(|event| event.end_ms);
     let from_ms = last_end.map_or(now_ms, |end| end.max(now_ms));
@@ -61,36 +63,37 @@ pub fn refill_channel(
         return Ok(Refill::UpToDate { until_ms: from_ms });
     }
 
-    let pool = source.list_items()?;
-    let mut resume = Resume {
-        cursor: store.cursor(channel.number)?,
-        played: Vec::new(),
-    };
-    if mode == Mode::Shuffle {
-        // All earlier programs, so the generator can find where the current
-        // pass stands. A program cut into several events counts once.
-        for event in store.events_between(channel.number, i64::MIN, from_ms)? {
-            if event.kind == EventKind::Program && resume.played.last() != Some(&event.media_id) {
-                resume.played.push(event.media_id);
-            }
+    // Every earlier program, oldest first. A program cut into several events
+    // counts once. The last one is the cursor; shuffle replays all of them to
+    // find where the current pass stands.
+    let mut history = Vec::new();
+    for id in store.programs_before(n, from_ms)? {
+        if history.last() != Some(&id) {
+            history.push(id);
         }
     }
+    let resume = Resume {
+        cursor: history.last().cloned(),
+        played: if mode == Mode::Shuffle {
+            history
+        } else {
+            Vec::new()
+        },
+    };
 
     let params = Params {
-        channel: channel.number,
+        channel: n,
         mode,
         tz,
     };
-    let generated = generate(&params, &pool, &resume, from_ms, horizon_ms)?;
-    let written = generated.events.len();
-    if let Some(cursor) = generated.cursor.as_deref().filter(|_| written > 0) {
-        store.write_events(channel.number, &generated.events)?;
-        store.set_cursor(channel.number, cursor)?;
+    let generated = generate(&params, pool, &resume, from_ms, horizon_ms)?;
+    if !generated.events.is_empty() {
+        store.write_events(n, &generated.events)?;
     }
     Ok(Refill::Generated {
         from_ms,
         to_ms: horizon_ms,
-        written,
+        written: generated.events.len(),
         notes: generated.notes,
     })
 }

@@ -22,6 +22,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "library_cache",
         sql: include_str!("../../migrations/0002_library_cache.sql"),
     },
+    Migration {
+        version: 3,
+        name: "drop_cursors",
+        sql: include_str!("../../migrations/0003_drop_cursors.sql"),
+    },
 ];
 
 /// Applies the migrations the database has not seen yet. Each one runs in its

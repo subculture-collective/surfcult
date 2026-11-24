@@ -8,9 +8,8 @@
 //!   index for reading a time range. Events of one channel must not overlap;
 //!   the store checks that each event ends after it starts, not that they
 //!   never overlap, because that is the generator's job.
-//! - `cursors`: where a sequential channel stopped. The cursor is the media id
-//!   of the last item scheduled, which stays correct when the library gains or
-//!   loses items. The generator finds that item and continues after it.
+//!   A sequential channel's position is read from its last program event, so
+//!   there is no separate cursor; migration 3 dropped the old `cursors` table.
 //! - `playback_history`: one row each time the tuner starts something, with a
 //!   short outcome word. Read newest first.
 //!
@@ -56,7 +55,7 @@ pub struct PlaybackRecord {
     pub outcome: String,
 }
 
-/// A SQLite database of schedule events, cursors and playback history.
+/// A SQLite database of schedule events, playback history and the library cache.
 ///
 /// Reads take `&self`; anything that writes takes `&mut self`.
 pub struct Store {
@@ -174,30 +173,24 @@ impl Store {
         tx.commit().map_err(StoreError::database(action))
     }
 
-    /// The media id of the last item a sequential channel scheduled, if any.
-    pub fn cursor(&self, channel: u32) -> Result<Option<String>, StoreError> {
+    /// Media ids of the channel's program events that start before
+    /// `before_ms`, oldest first. Break, filler and ident events are left out;
+    /// a program cut into several events appears once per event.
+    pub fn programs_before(&self, channel: u32, before_ms: i64) -> Result<Vec<String>, StoreError> {
+        let action = "reading program history";
         let mut statement = self
             .conn
-            .prepare_cached("SELECT last_media_id FROM cursors WHERE channel = ?1")
-            .map_err(StoreError::database("reading a cursor"))?;
-        let mut rows = statement
-            .query_map([channel], |row| row.get(0))
-            .map_err(StoreError::database("reading a cursor"))?;
-        rows.next()
-            .transpose()
-            .map_err(StoreError::database("reading a cursor"))
-    }
-
-    /// Sets the cursor of `channel` to `last_media_id`, replacing any earlier one.
-    pub fn set_cursor(&mut self, channel: u32, last_media_id: &str) -> Result<(), StoreError> {
-        self.conn
-            .execute(
-                "INSERT INTO cursors (channel, last_media_id) VALUES (?1, ?2)
-                 ON CONFLICT (channel) DO UPDATE SET last_media_id = excluded.last_media_id",
-                params![channel, last_media_id],
+            .prepare_cached(
+                "SELECT media_id FROM events
+                 WHERE channel = ?1 AND kind = 'program' AND start_ms < ?2
+                 ORDER BY start_ms",
             )
-            .map_err(StoreError::database("writing a cursor"))?;
-        Ok(())
+            .map_err(StoreError::database(action))?;
+        let rows = statement
+            .query_map(params![channel, before_ms], |row| row.get(0))
+            .map_err(StoreError::database(action))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(StoreError::database(action))
     }
 
     /// Adds one row to the playback history.

@@ -1,11 +1,11 @@
 //! Generates a channel's schedule: which media plays when.
 //!
-//! [`generate`] is a pure function. It takes a channel's number, mode and time
-//! zone, the items to play, where the last run stopped and a time window, and it
-//! returns [`Event`](crate::timeline::Event)s and the new cursor. It reads no
-//! clock and does no I/O, so the same inputs always give the same events.
-//! [`refill_channel`] is the thin layer around it that reads and writes the
-//! [`Store`](crate::store::Store).
+//! [`extend`] keeps a channel's week filled in the
+//! [`Store`](crate::store::Store). Inside it, `generate` is a pure function. It
+//! takes a channel's number, mode and time zone, the items to play, where the
+//! last run stopped and a time window, and it returns
+//! [`Event`](crate::timeline::Event)s and the new cursor. It reads no clock and
+//! does no I/O, so the same inputs always give the same events.
 //!
 //! Times are Unix epoch milliseconds (`i64`), as in [`crate::timeline`].
 //!
@@ -43,10 +43,11 @@
 //!   start", so a day with 23 or 25 hours changes nothing. The generator uses no
 //!   `rand` crate and no hasher with random state, so the same channel, date and
 //!   library give the same order on every machine.
-//! - **Continuing.** The store's cursor is only one media id, so it cannot say
-//!   which items a pass has used. The caller therefore also passes the ids of
-//!   the programs scheduled earlier, oldest first ([`Resume::played`]).
-//!   [`refill_channel`] reads them from the stored events. The generator replays
+//! - **Continuing.** The cursor is only one media id, so it cannot say which
+//!   items a pass has used. The caller therefore also passes the ids of the
+//!   programs scheduled earlier, oldest first (`Resume::played`). [`extend`]
+//!   reads both from the channel's stored program events, at any time, past or
+//!   future: the cursor is the last of them. The generator replays
 //!   them to find the items already used in the current pass, then plays the
 //!   rest of the pass in the seeded order, then starts a new pass. A restart
 //!   therefore never replays an item inside the same pass. If `played` is empty
@@ -64,16 +65,18 @@
 //!
 //! # Persisting
 //!
-//! [`refill_channel`] does nothing unless the caller says the clock is trusted
-//! (see "Clock" in the design). It generates from the later of `now` and the end
-//! of the channel's last stored event up to `now` plus seven days, writes the
-//! events, then sets the cursor. The two writes are separate store calls, so a
-//! crash between them leaves the cursor one run behind; the next sequential run
-//! then repeats some items. It never reads the system clock; the caller passes
-//! `now_ms`.
+//! [`extend`] does nothing unless the caller says the clock is trusted (see
+//! "Clock" in the design). It generates from the later of `now` and the end of
+//! the channel's last stored event up to `now` plus seven days. The caller
+//! supplies the pool. `extend` reads the schedule end and the program history,
+//! then writes the new events in one transaction. There is no separate cursor
+//! to write, so a crash cannot make the next run repeat items. Because the
+//! resume point is read from the events, `Store::replace_events_from` also moves
+//! it back to the last program it keeps. `extend` never reads the system clock;
+//! the caller passes `now_ms`.
 
+mod extend;
 mod generate;
-mod refill;
 mod rng;
 #[cfg(test)]
 mod tests;
@@ -82,20 +85,21 @@ use std::error::Error;
 use std::fmt;
 
 use crate::config::Mode;
-use crate::library::SourceError;
 use crate::store::StoreError;
 use crate::timeline::Event;
 
-pub use generate::{Params, Resume, generate, local_date_days};
-pub use refill::{HORIZON_MS, Refill, refill_channel};
+pub use extend::{HORIZON_MS, Refill, extend};
+#[cfg(test)]
+use generate::local_date_days;
+pub(crate) use generate::{Params, Resume, generate};
 
 /// The most events one run will produce. A run over seven days that reaches
 /// this has items only seconds long, which means the library data is wrong.
 pub const MAX_EVENTS: usize = 200_000;
 
-/// What [`generate`] produced.
+/// What `generate` produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Generated {
+pub(crate) struct Generated {
     pub events: Vec<Event>,
     /// The media id of the last item scheduled. When no event was produced it
     /// is the cursor that came in.
@@ -104,7 +108,7 @@ pub struct Generated {
     pub notes: Vec<Note>,
 }
 
-/// Something unusual that [`generate`] handled without failing.
+/// Something unusual that `generate` handled without failing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Note {
     /// The pool has no item with a runtime above 0, so nothing was scheduled.
@@ -128,7 +132,6 @@ pub enum ScheduleError {
     /// The run would produce more than [`MAX_EVENTS`] events.
     TooManyEvents,
     Store(StoreError),
-    Source(SourceError),
 }
 
 impl fmt::Display for ScheduleError {
@@ -139,7 +142,6 @@ impl fmt::Display for ScheduleError {
             Self::TimeOutOfRange => f.write_str("a time or runtime is out of range"),
             Self::TooManyEvents => write!(f, "more than {MAX_EVENTS} events in one run"),
             Self::Store(error) => write!(f, "schedule store: {error}"),
-            Self::Source(error) => write!(f, "schedule source: {error}"),
         }
     }
 }
@@ -148,7 +150,6 @@ impl Error for ScheduleError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
-            Self::Source(error) => Some(error),
             _ => None,
         }
     }
@@ -157,11 +158,5 @@ impl Error for ScheduleError {
 impl From<StoreError> for ScheduleError {
     fn from(error: StoreError) -> Self {
         Self::Store(error)
-    }
-}
-
-impl From<SourceError> for ScheduleError {
-    fn from(error: SourceError) -> Self {
-        Self::Source(error)
     }
 }
