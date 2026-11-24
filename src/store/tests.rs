@@ -417,6 +417,44 @@ fn programs_before_lists_program_ids_oldest_first() {
 }
 
 #[test]
+fn last_program_before_is_the_newest_program_that_starts_before_the_bound() {
+    let mut store = Store::open_in_memory().unwrap();
+    store.write_events(3, &schedule()).unwrap();
+    store
+        .write_events(3, &[event(40_000, 50_000, "c", EventKind::Program)])
+        .unwrap();
+
+    assert_eq!(
+        store.last_program_before(3, i64::MAX).unwrap(),
+        Some(MediaId::new("c"))
+    );
+    // The bound is exclusive, and the break and filler after `a` are skipped.
+    assert_eq!(
+        store.last_program_before(3, 40_000).unwrap(),
+        Some(MediaId::new("a"))
+    );
+    assert_eq!(store.last_program_before(3, 0).unwrap(), None);
+    assert_eq!(store.last_program_before(4, i64::MAX).unwrap(), None);
+}
+
+#[test]
+fn reading_the_last_program_uses_the_index() {
+    let store = Store::open_in_memory().unwrap();
+    let plan: Vec<String> = store
+        .conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {LAST_PROGRAM_BEFORE}"))
+        .unwrap()
+        .query_map(params![3, 10], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let plan = plan.join("; ");
+    assert!(plan.contains("SEARCH events USING PRIMARY KEY"), "{plan}");
+    assert!(!plan.contains("SCAN"), "{plan}");
+    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+}
+
+#[test]
 fn migration_3_drops_the_cursors_table() {
     let cursors = |conn: &Connection| -> u32 {
         conn.query_row(

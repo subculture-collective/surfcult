@@ -36,13 +36,19 @@ mod tests;
 use std::path::Path;
 use std::time::Duration;
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::library::MediaId;
 use crate::timeline::{Event, EventKind};
 
 pub use error::StoreError;
 pub use library::LibraryEntry;
+
+/// The query behind [`Store::last_program_before`]; a test checks its plan.
+const LAST_PROGRAM_BEFORE: &str = "SELECT media_id FROM events
+     WHERE channel = ?1 AND kind = 'program' AND start_ms < ?2
+     ORDER BY start_ms DESC
+     LIMIT 1";
 
 /// How long a call waits for another connection's lock before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -198,6 +204,26 @@ impl Store {
             .map_err(StoreError::database(action))?;
         rows.collect::<Result<_, _>>()
             .map_err(StoreError::database(action))
+    }
+
+    /// The media id of the channel's last program event that starts before
+    /// `before_ms`, or `None` if it has none. Reads one row, walking back from
+    /// `before_ms` on the primary key, so its cost does not grow with history.
+    pub fn last_program_before(
+        &self,
+        channel: u32,
+        before_ms: i64,
+    ) -> Result<Option<MediaId>, StoreError> {
+        self.conn
+            .prepare_cached(LAST_PROGRAM_BEFORE)
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![channel, before_ms], |row| {
+                        row.get::<_, String>(0).map(MediaId::new)
+                    })
+                    .optional()
+            })
+            .map_err(StoreError::database("reading the last program"))
     }
 
     /// Adds one row to the playback history.

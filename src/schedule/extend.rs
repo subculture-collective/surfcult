@@ -63,22 +63,26 @@ pub fn extend(
         return Ok(Extended::UpToDate { until_ms: from_ms });
     }
 
-    // Every earlier program, oldest first. A program cut into several events
-    // counts once. The last one is the cursor; shuffle replays all of them to
-    // find where the current pass stands.
-    let mut history = Vec::new();
-    for id in store.programs_before(n, from_ms)? {
-        if history.last() != Some(&id) {
-            history.push(id);
+    // Sequential needs only the last earlier program. Shuffle replays every
+    // earlier program, oldest first, to find where the current pass stands; a
+    // program cut into several events counts once. That read grows with the
+    // stored history, which is never pruned.
+    let resume = if mode == Mode::Shuffle {
+        let mut played = Vec::new();
+        for id in store.programs_before(n, from_ms)? {
+            if played.last() != Some(&id) {
+                played.push(id);
+            }
         }
-    }
-    let resume = Resume {
-        cursor: history.last().cloned(),
-        played: if mode == Mode::Shuffle {
-            history
-        } else {
-            Vec::new()
-        },
+        Resume {
+            cursor: played.last().cloned(),
+            played,
+        }
+    } else {
+        Resume {
+            cursor: store.last_program_before(n, from_ms)?,
+            played: Vec::new(),
+        }
     };
 
     let params = Params {

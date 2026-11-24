@@ -28,7 +28,7 @@ The words surfcult's code and documentation use, and the code item each one name
 - **Sequential**: a mode, `config::Mode::Sequential`. Items play in program pool order, continuing after the resume point and wrapping from the last item to the first.
 - **Shuffle** and **pass**: in shuffle mode (`config::Mode::Shuffle`) items play in a seeded random order. One trip through the whole program pool is a pass, and no item repeats inside a pass.
 - **Resume point** (cursor): the media id of the channel's last stored program event, which says where the next extend continues. It has no table of its own; `extend` derives it from the events, so it cannot disagree with them.
-- **Played history**: the media ids of the channel's stored program events before the new window, oldest first, read with `Store::programs_before`. Shuffle replays it to find where the current pass stands. It is not the `playback_history` table, which records what the tuner started.
+- **Played history**: the media ids of the channel's stored program events before the new window, oldest first, read with `Store::programs_before`. Only shuffle reads it; a sequential channel reads just its last program (`Store::last_program_before`). Shuffle replays it to find where the current pass stands. It is not the `playback_history` table, which records what the tuner started.
 
 ## Running
 

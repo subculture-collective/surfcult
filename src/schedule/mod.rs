@@ -70,8 +70,10 @@
 //! supplies the pool: it takes `source` from the channel's `Plan::Fixed`,
 //! resolves it with [`library::resolve_pool`](crate::library::resolve_pool) and
 //! passes the result to `extend`. Until issue #30 only collections resolve.
-//! `extend` reads the schedule end and the program history,
-//! then writes the new events in one transaction. There is no separate cursor
+//! `extend` reads the schedule end and where to resume, then writes the new
+//! events in one transaction. A sequential channel reads only its last stored
+//! program. A shuffle channel reads its whole program history, which grows
+//! because old events are never deleted yet. There is no separate cursor
 //! to write, so a crash cannot make the next run repeat items. Because the
 //! resume point is read from the events, `Store::replace_events_from` also moves
 //! it back to the last program it keeps. `extend` never reads the system clock;
