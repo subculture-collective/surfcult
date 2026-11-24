@@ -11,7 +11,7 @@ pub const HORIZON_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 /// What [`extend`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Refill {
+pub enum Extended {
     /// The caller said the clock is not trusted, so nothing was read or written.
     ClockNotTrusted,
     /// The stored schedule already reaches seven days past `now`.
@@ -40,9 +40,9 @@ pub fn extend(
     tz: Tz,
     now_ms: i64,
     clock_trusted: bool,
-) -> Result<Refill, ScheduleError> {
+) -> Result<Extended, ScheduleError> {
     if !clock_trusted {
-        return Ok(Refill::ClockNotTrusted);
+        return Ok(Extended::ClockNotTrusted);
     }
     let mode = match &channel.plan {
         Plan::Fixed { mode, .. } => *mode,
@@ -60,7 +60,7 @@ pub fn extend(
         .map(|event| event.end_ms);
     let from_ms = last_end.map_or(now_ms, |end| end.max(now_ms));
     if from_ms >= horizon_ms {
-        return Ok(Refill::UpToDate { until_ms: from_ms });
+        return Ok(Extended::UpToDate { until_ms: from_ms });
     }
 
     // Every earlier program, oldest first. A program cut into several events
@@ -90,7 +90,7 @@ pub fn extend(
     if !generated.events.is_empty() {
         store.write_events(n, &generated.events)?;
     }
-    Ok(Refill::Generated {
+    Ok(Extended::Generated {
         from_ms,
         to_ms: horizon_ms,
         written: generated.events.len(),

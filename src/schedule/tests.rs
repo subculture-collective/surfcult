@@ -475,7 +475,7 @@ fn nothing_is_generated_while_the_clock_is_not_trusted() {
     )
     .unwrap();
 
-    assert_eq!(result, Refill::ClockNotTrusted);
+    assert_eq!(result, Extended::ClockNotTrusted);
     assert!(
         store
             .events_between(3, i64::MIN, i64::MAX)
@@ -486,7 +486,7 @@ fn nothing_is_generated_while_the_clock_is_not_trusted() {
 }
 
 #[test]
-fn a_refill_stores_seven_days_with_no_gaps_and_ends_on_the_last_program() {
+fn an_extend_stores_seven_days_with_no_gaps_and_ends_on_the_last_program() {
     let items = pool(&["a", "b", "c", "d"]);
     let mut store = setup();
     let channel = channel(3, Mode::Sequential);
@@ -494,7 +494,7 @@ fn a_refill_stores_seven_days_with_no_gaps_and_ends_on_the_last_program() {
 
     let result = extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
 
-    let Refill::Generated {
+    let Extended::Generated {
         from_ms,
         to_ms,
         written,
@@ -633,7 +633,7 @@ fn a_reopened_store_continues_where_it_stopped() {
 }
 
 #[test]
-fn later_refills_extend_the_schedule_without_a_gap_or_a_repeat() {
+fn later_extends_continue_the_schedule_without_a_gap_or_a_repeat() {
     let items = pool(&["a", "b", "c", "d", "e", "f"]);
     for mode in [Mode::Sequential, Mode::Shuffle] {
         let mut store = setup();
@@ -643,7 +643,7 @@ fn later_refills_extend_the_schedule_without_a_gap_or_a_repeat() {
         extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
         // Up to date: the same moment again has nothing to add.
         let again = extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
-        assert!(matches!(again, Refill::UpToDate { .. }), "{mode:?}");
+        assert!(matches!(again, Extended::UpToDate { .. }), "{mode:?}");
         // Three days on, the next run fills the gap at the far end.
         let later = now + 3 * DAY + 37 * MINUTE;
         extend(&mut store, &channel, &items, CHICAGO, later, true).unwrap();
@@ -664,7 +664,7 @@ fn later_refills_extend_the_schedule_without_a_gap_or_a_repeat() {
 }
 
 #[test]
-fn a_refill_after_a_long_gap_starts_at_now() {
+fn an_extend_after_a_long_gap_starts_at_now() {
     let items = pool(&["a", "b", "c"]);
     let mut store = setup();
     let channel = channel(3, Mode::Sequential);
@@ -696,7 +696,7 @@ fn an_unplayable_library_writes_nothing_and_reports_it() {
 
     assert_eq!(
         result,
-        Refill::Generated {
+        Extended::Generated {
             from_ms: now,
             to_ms: now + HORIZON_MS,
             written: 0,

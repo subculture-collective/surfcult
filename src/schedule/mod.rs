@@ -91,7 +91,7 @@ use crate::library::MediaId;
 use crate::store::StoreError;
 use crate::timeline::Event;
 
-pub use extend::{HORIZON_MS, Refill, extend};
+pub use extend::{Extended, HORIZON_MS, extend};
 #[cfg(test)]
 use generate::local_date_days;
 pub(crate) use generate::{Params, Resume, generate};
