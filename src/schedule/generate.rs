@@ -7,7 +7,7 @@ use chrono::{DateTime, Datelike};
 use super::rng::{self, SplitMix64};
 use super::{Generated, MAX_EVENTS, Note, ScheduleError};
 use crate::config::{Mode, Tz};
-use crate::library::MediaItem;
+use crate::library::{MediaId, MediaItem};
 use crate::timeline::{Event, EventKind};
 
 /// Who the schedule is for and how it is ordered.
@@ -23,10 +23,10 @@ pub(crate) struct Params {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Resume {
     /// The media id of the last item scheduled.
-    pub cursor: Option<String>,
+    pub cursor: Option<MediaId>,
     /// Media ids of the programs scheduled before this run, oldest first. Only
     /// shuffle reads it, to know which items the current pass has used.
-    pub played: Vec<String>,
+    pub played: Vec<MediaId>,
 }
 
 /// Generates events covering `[start_ms, end_ms)`. The last event may end after
@@ -77,12 +77,12 @@ pub(crate) fn generate(
         events.push(Event {
             start_ms: at_ms,
             end_ms: next_ms,
-            media_id: item.id.as_str().to_string(),
+            media_id: item.id.clone(),
             media_offset_ms: 0,
             media_duration_ms: item.runtime_ms,
             kind: EventKind::Program,
         });
-        cursor = Some(item.id.as_str().to_string());
+        cursor = Some(item.id.clone());
         at_ms = next_ms;
     }
     Ok(Generated {
@@ -133,8 +133,8 @@ impl<'a> Picker<'a> {
     fn sequential(items: Vec<&'a MediaItem>, resume: &Resume, notes: &mut Vec<Note>) -> Self {
         let position = resume
             .cursor
-            .as_deref()
-            .and_then(|cursor| items.iter().position(|item| item.id.as_str() == cursor));
+            .as_ref()
+            .and_then(|cursor| items.iter().position(|item| &item.id == cursor));
         if let (Some(cursor), None) = (&resume.cursor, position) {
             notes.push(Note::CursorNotInPool {
                 media_id: cursor.clone(),

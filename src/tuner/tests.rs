@@ -41,7 +41,7 @@ fn event(start_ms: i64, end_ms: i64, media: &str, offset_ms: u64, kind: EventKin
     Event {
         start_ms,
         end_ms,
-        media_id: media.to_string(),
+        media_id: MediaId::new(media),
         media_offset_ms: offset_ms,
         media_duration_ms: 3_600_000,
         kind,

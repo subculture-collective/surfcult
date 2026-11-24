@@ -66,11 +66,12 @@
 //! If a break, filler or ident event is on at the time the clip ends, the clip
 //! stands in for the break: no second clip is played. The tuner queues the
 //! first program event after the break (a break may be several events in a
-//! row) at the offset where that event starts. That program starts when the
-//! clip ends, which is earlier than the schedule says, by at most the time left
-//! in the break. The tuner does not correct this: it only corrects a program
-//! that is behind. The next event boundary puts the screen back on the
-//! schedule.
+//! row) at the offset where that event starts.
+//! [`timeline::program_from`](crate::timeline::program_from) owns this rule,
+//! so the guide can ask the same question. That program starts when the clip
+//! ends, which is earlier than the schedule says, by at most the time left in
+//! the break. The tuner does not correct this: it only corrects a program that
+//! is behind. The next event boundary puts the screen back on the schedule.
 //!
 //! # A late start
 //!
@@ -322,9 +323,9 @@ impl<P: Player, S: ScheduleSource, M: MediaSource> Tuner<P, S, M> {
             return;
         };
         let live = match lookup(&plan.events, now_ms) {
-            Lookup::On { event, offset_ms }
-                if event.kind == EventKind::Program && event.media_id == plan.media_id.as_str() =>
-            {
+            Lookup::On {
+                event, offset_ms, ..
+            } if event.kind == EventKind::Program && event.media_id == plan.media_id => {
                 Some(offset_ms)
             }
             _ => None,

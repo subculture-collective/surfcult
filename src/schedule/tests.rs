@@ -2,7 +2,7 @@ use chrono::{TimeZone, Utc};
 
 use super::*;
 use crate::config::{Channel, Mode, Plan, Source, Tz};
-use crate::library::{MediaItem, MediaKind};
+use crate::library::{MediaId, MediaItem, MediaKind};
 use crate::store::Store;
 use crate::timeline::{Event, EventKind};
 
@@ -56,7 +56,7 @@ fn ids(events: &[Event]) -> Vec<&str> {
 
 fn resume(cursor: &str) -> Resume {
     Resume {
-        cursor: Some(cursor.into()),
+        cursor: Some(MediaId::new(cursor)),
         played: Vec::new(),
     }
 }
@@ -144,7 +144,10 @@ fn sequential_continues_after_the_cursor_and_wraps() {
 
     assert_eq!(&ids(&out.events)[..6], ["d", "a", "b", "c", "d", "a"]);
     let last = out.events.last().unwrap();
-    assert_eq!(out.cursor.as_deref(), Some(last.media_id.as_str()));
+    assert_eq!(
+        out.cursor.as_ref().map(MediaId::as_str),
+        Some(last.media_id.as_str())
+    );
 }
 
 #[test]
@@ -152,7 +155,7 @@ fn sequential_starts_at_the_beginning_without_a_cursor() {
     let items = pool(&["a", "b", "c"]);
     let out = generate(&params(Mode::Sequential), &items, &Resume::default(), 0, 1).unwrap();
     assert_eq!(ids(&out.events), ["a"]);
-    assert_eq!(out.cursor.as_deref(), Some("a"));
+    assert_eq!(out.cursor.as_ref().map(MediaId::as_str), Some("a"));
 }
 
 #[test]
@@ -165,7 +168,7 @@ fn sequential_restarts_and_says_so_when_the_cursor_item_vanished() {
     assert_eq!(
         out.notes,
         [Note::CursorNotInPool {
-            media_id: "gone".into()
+            media_id: MediaId::new("gone")
         }]
     );
 }
@@ -200,7 +203,7 @@ fn an_empty_or_unplayable_pool_gives_no_events_and_a_note() {
     for mode in [Mode::Sequential, Mode::Shuffle] {
         let none = generate(&params(mode), &[], &resume("x"), 0, DAY).unwrap();
         assert!(none.events.is_empty());
-        assert_eq!(none.cursor.as_deref(), Some("x"));
+        assert_eq!(none.cursor.as_ref().map(MediaId::as_str), Some("x"));
         assert_eq!(none.notes, [Note::NoPlayableItems]);
 
         let zeros = vec![item("a", 0), item("b", 0)];
@@ -218,7 +221,7 @@ fn an_empty_window_gives_no_events_and_keeps_the_cursor() {
     let items = pool(&["a", "b"]);
     let out = generate(&params(Mode::Sequential), &items, &resume("a"), 100, 100).unwrap();
     assert!(out.events.is_empty());
-    assert_eq!(out.cursor.as_deref(), Some("a"));
+    assert_eq!(out.cursor.as_ref().map(MediaId::as_str), Some("a"));
 }
 
 #[test]
@@ -301,7 +304,7 @@ fn a_shuffle_resumes_inside_its_pass_without_a_repeat() {
     .unwrap();
     // Cut so the run ends partway through a pass.
     assert!(!first.events.len().is_multiple_of(6));
-    let played: Vec<String> = first.events.iter().map(|e| e.media_id.clone()).collect();
+    let played: Vec<MediaId> = first.events.iter().map(|e| e.media_id.clone()).collect();
 
     let second = generate(
         &params(Mode::Shuffle),
@@ -317,7 +320,7 @@ fn a_shuffle_resumes_inside_its_pass_without_a_repeat() {
 
     let all: Vec<&str> = played
         .iter()
-        .map(String::as_str)
+        .map(MediaId::as_str)
         .chain(ids(&second.events))
         .collect();
     assert_passes_are_permutations(&all, 6);
@@ -336,7 +339,7 @@ fn a_shuffle_resumed_on_the_same_date_matches_an_unbroken_run() {
     )
     .unwrap();
     let cut = 2;
-    let played: Vec<String> = whole.events[..cut]
+    let played: Vec<MediaId> = whole.events[..cut]
         .iter()
         .map(|e| e.media_id.clone())
         .collect();
@@ -362,7 +365,7 @@ fn a_shuffle_with_only_a_cursor_does_not_open_with_it() {
     let items = pool(&["a", "b", "c"]);
     for cursor in ["a", "b", "c"] {
         let out = generate(&params(Mode::Shuffle), &items, &resume(cursor), 0, 1).unwrap();
-        assert_ne!(out.events[0].media_id, cursor);
+        assert_ne!(out.events[0].media_id.as_str(), cursor);
     }
 }
 
@@ -516,7 +519,7 @@ fn stored(start_ms: i64, end_ms: i64, media: &str, kind: EventKind) -> Event {
     Event {
         start_ms,
         end_ms,
-        media_id: media.into(),
+        media_id: MediaId::new(media),
         media_offset_ms: 0,
         media_duration_ms: (end_ms - start_ms) as u64,
         kind,
@@ -601,11 +604,8 @@ fn a_sequential_channel_resumes_where_it_stopped_after_a_long_gap() {
     extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
 
     let first_new = &store.events_between(3, now, now + HORIZON_MS).unwrap()[0];
-    let after = items
-        .iter()
-        .position(|i| i.id.as_str() == last_old)
-        .unwrap();
-    assert_eq!(first_new.media_id, items[(after + 1) % 3].id.as_str());
+    let after = items.iter().position(|i| i.id == last_old).unwrap();
+    assert_eq!(first_new.media_id, items[(after + 1) % 3].id);
 }
 
 #[test]

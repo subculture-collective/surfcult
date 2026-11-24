@@ -38,6 +38,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, params};
 
+use crate::library::MediaId;
 use crate::timeline::{Event, EventKind};
 
 pub use error::StoreError;
@@ -50,7 +51,7 @@ const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaybackRecord {
     pub channel: u32,
-    pub media_id: String,
+    pub media_id: MediaId,
     pub started_at_ms: i64,
     pub outcome: String,
 }
@@ -176,7 +177,11 @@ impl Store {
     /// Media ids of the channel's program events that start before
     /// `before_ms`, oldest first. Break, filler and ident events are left out;
     /// a program cut into several events appears once per event.
-    pub fn programs_before(&self, channel: u32, before_ms: i64) -> Result<Vec<String>, StoreError> {
+    pub fn programs_before(
+        &self,
+        channel: u32,
+        before_ms: i64,
+    ) -> Result<Vec<MediaId>, StoreError> {
         let action = "reading program history";
         let mut statement = self
             .conn
@@ -187,7 +192,9 @@ impl Store {
             )
             .map_err(StoreError::database(action))?;
         let rows = statement
-            .query_map(params![channel, before_ms], |row| row.get(0))
+            .query_map(params![channel, before_ms], |row| {
+                row.get::<_, String>(0).map(MediaId::new)
+            })
             .map_err(StoreError::database(action))?;
         rows.collect::<Result<_, _>>()
             .map_err(StoreError::database(action))
@@ -197,7 +204,7 @@ impl Store {
     pub fn record_playback(
         &mut self,
         channel: u32,
-        media_id: &str,
+        media_id: &MediaId,
         started_at_ms: i64,
         outcome: &str,
     ) -> Result<(), StoreError> {
@@ -205,7 +212,7 @@ impl Store {
             .execute(
                 "INSERT INTO playback_history (channel, media_id, started_at_ms, outcome)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![channel, media_id, started_at_ms, outcome],
+                params![channel, media_id.as_str(), started_at_ms, outcome],
             )
             .map_err(StoreError::database("recording playback"))?;
         Ok(())
@@ -233,7 +240,7 @@ impl Store {
             .query_map(params![channel, limit], |row| {
                 Ok(PlaybackRecord {
                     channel: row.get(0)?,
-                    media_id: row.get(1)?,
+                    media_id: MediaId::new(row.get::<_, String>(1)?),
                     started_at_ms: row.get(2)?,
                     outcome: row.get(3)?,
                 })
@@ -287,7 +294,7 @@ fn insert_events(
                 channel,
                 event.start_ms,
                 event.end_ms,
-                event.media_id,
+                event.media_id.as_str(),
                 event.media_offset_ms as i64,
                 event.media_duration_ms as i64,
                 kind_name(event.kind),
@@ -349,7 +356,7 @@ fn build_event(
     Ok(Event {
         start_ms,
         end_ms,
-        media_id,
+        media_id: MediaId::new(media_id),
         media_offset_ms: unsigned("media_offset_ms", media_offset_ms)?,
         media_duration_ms: unsigned("media_duration_ms", media_duration_ms)?,
         kind: kind_from_name(kind)?,

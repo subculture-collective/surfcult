@@ -85,6 +85,7 @@ use std::error::Error;
 use std::fmt;
 
 use crate::config::Mode;
+use crate::library::MediaId;
 use crate::store::StoreError;
 use crate::timeline::Event;
 
@@ -103,7 +104,7 @@ pub(crate) struct Generated {
     pub events: Vec<Event>,
     /// The media id of the last item scheduled. When no event was produced it
     /// is the cursor that came in.
-    pub cursor: Option<String>,
+    pub cursor: Option<MediaId>,
     /// Things the caller may want to log. Empty on an ordinary run.
     pub notes: Vec<Note>,
 }
@@ -115,7 +116,7 @@ pub enum Note {
     NoPlayableItems,
     /// A sequential channel's cursor item is not in the pool, so the order
     /// restarted at the first item.
-    CursorNotInPool { media_id: String },
+    CursorNotInPool { media_id: MediaId },
     /// This many items were left out because their runtime is 0.
     SkippedZeroRuntime { count: usize },
 }

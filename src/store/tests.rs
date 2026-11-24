@@ -31,11 +31,15 @@ impl Drop for TempDb {
     }
 }
 
+fn ids(names: &[&str]) -> Vec<MediaId> {
+    names.iter().map(|name| MediaId::new(*name)).collect()
+}
+
 fn event(start_ms: i64, end_ms: i64, media: &str, kind: EventKind) -> Event {
     Event {
         start_ms,
         end_ms,
-        media_id: media.to_string(),
+        media_id: MediaId::new(media),
         media_offset_ms: 0,
         media_duration_ms: 1_320_000,
         kind,
@@ -394,16 +398,22 @@ fn programs_before_lists_program_ids_oldest_first() {
         .unwrap();
 
     // The break and the filler are left out; `a` appears once per event.
-    assert_eq!(store.programs_before(3, i64::MAX).unwrap(), ["a", "a", "c"]);
+    assert_eq!(
+        store.programs_before(3, i64::MAX).unwrap(),
+        ids(&["a", "a", "c"])
+    );
     // The bound is exclusive: `c` starts at 40s.
-    assert_eq!(store.programs_before(3, 40_000).unwrap(), ["a", "a"]);
-    assert_eq!(store.programs_before(3, 0).unwrap(), Vec::<String>::new());
-    assert_eq!(store.programs_before(4, i64::MAX).unwrap(), ["other"]);
+    assert_eq!(store.programs_before(3, 40_000).unwrap(), ids(&["a", "a"]));
+    assert_eq!(store.programs_before(3, 0).unwrap(), ids(&[]));
+    assert_eq!(store.programs_before(4, i64::MAX).unwrap(), ids(&["other"]));
     assert!(store.programs_before(5, i64::MAX).unwrap().is_empty());
 
     drop(store);
     let store = Store::open(db.path()).unwrap();
-    assert_eq!(store.programs_before(3, i64::MAX).unwrap(), ["a", "a", "c"]);
+    assert_eq!(
+        store.programs_before(3, i64::MAX).unwrap(),
+        ids(&["a", "a", "c"])
+    );
 }
 
 #[test]
@@ -466,14 +476,22 @@ fn migration_3_drops_the_cursors_table() {
 fn playback_history_round_trips_newest_first_per_channel() {
     let db = TempDb::new();
     let mut store = Store::open(db.path()).unwrap();
-    store.record_playback(3, "a", 1_000, "played").unwrap();
-    store.record_playback(3, "b", 3_000, "failed").unwrap();
-    store.record_playback(3, "c", 2_000, "played").unwrap();
-    store.record_playback(4, "z", 9_000, "played").unwrap();
+    store
+        .record_playback(3, &MediaId::new("a"), 1_000, "played")
+        .unwrap();
+    store
+        .record_playback(3, &MediaId::new("b"), 3_000, "failed")
+        .unwrap();
+    store
+        .record_playback(3, &MediaId::new("c"), 2_000, "played")
+        .unwrap();
+    store
+        .record_playback(4, &MediaId::new("z"), 9_000, "played")
+        .unwrap();
 
     let record = |media: &str, at: i64, outcome: &str| PlaybackRecord {
         channel: 3,
-        media_id: media.to_string(),
+        media_id: MediaId::new(media),
         started_at_ms: at,
         outcome: outcome.to_string(),
     };
