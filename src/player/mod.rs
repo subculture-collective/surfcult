@@ -37,6 +37,7 @@
 //! queue and the overlays. The caller issues them again.
 
 mod fake;
+mod filter;
 pub mod mpv;
 
 use std::fmt;
@@ -45,6 +46,7 @@ use std::path::Path;
 use crate::library::MediaId;
 
 pub use fake::{Command, FakePlayer, Issued, VirtualClock};
+pub use filter::{DEFAULT_GLITCH_EVERY, DEFAULT_STANDBY_FILTERS, Filter, standby_filters};
 pub use mpv::MpvPlayer;
 
 /// Something the player did that the tuner needs to know about.
@@ -105,9 +107,10 @@ pub trait Player {
 
     /// Replaces everything on screen and queued with the stand-by card,
     /// colour bars with a message, for a channel that has nothing to play.
-    /// The player removes the card's own drawing when anything else is
-    /// shown, queued or stopped; overlays from [`Player::show_overlay`] are
-    /// not touched.
+    /// The player removes the card's own drawing and display filters when
+    /// anything else is shown, queued or stopped; overlays from
+    /// [`Player::show_overlay`] are not touched. A player that cannot show
+    /// the whole card shows static instead and returns the error.
     fn show_standby(&mut self) -> Result<(), PlayerError>;
 
     /// Replaces what is on screen with the local clip at `path`, and drops

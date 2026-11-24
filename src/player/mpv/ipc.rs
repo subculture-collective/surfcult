@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::Stream;
+use super::glitch::{STRIPS, Tear};
 use crate::player::PlayerEvent;
 
 /// Why a command did not work.
@@ -77,8 +78,14 @@ pub(super) struct Session {
     entries: HashMap<i64, Entry>,
     /// The entry on screen, from the last `start-file` event.
     current: Option<i64>,
-    /// Whether the stand-by card's overlay is up.
-    standby: bool,
+    /// The text of the stand-by card, while its overlay is up.
+    standby: Option<String>,
+    /// The `glsl-shaders` list outside the stand-by card.
+    global_shaders: Vec<String>,
+    /// The `glsl-shaders` list while the stand-by card shows.
+    standby_shaders: Vec<String>,
+    /// The `glsl-shaders` list MPV has now, as far as this session knows.
+    shaders: Vec<String>,
 }
 
 impl Session {
@@ -95,8 +102,32 @@ impl Session {
             events: VecDeque::new(),
             entries: HashMap::new(),
             current: None,
-            standby: false,
+            standby: None,
+            global_shaders: Vec::new(),
+            standby_shaders: Vec::new(),
+            shaders: Vec::new(),
         })
+    }
+
+    /// Sets the shader files for everything on screen (`global`) and for the
+    /// stand-by card (`standby`), and gives MPV the global ones. A new MPV
+    /// starts with none, so an empty `global` sends nothing.
+    pub(super) fn use_shaders(
+        &mut self,
+        global: Vec<String>,
+        standby: Vec<String>,
+    ) -> Result<(), IpcError> {
+        self.global_shaders = global;
+        self.standby_shaders = standby;
+        if self.shaders != self.global_shaders {
+            self.set_shaders(self.global_shaders.clone())?;
+        }
+        Ok(())
+    }
+
+    /// Whether the stand-by card's band and text are up.
+    pub(super) fn standby_up(&self) -> bool {
+        self.standby.is_some()
     }
 
     /// Plays `source`, replacing the playlist. `loop-file=inf` restarts a
@@ -105,20 +136,53 @@ impl Session {
         self.replace(source, json!({ "loop-file": "inf" }), Entry::Static)
     }
 
-    /// Plays `source` as [`Session::show_static`] does and draws the
-    /// stand-by card's band and `text` over it.
+    /// Switches MPV to the stand-by shaders, plays `source` as
+    /// [`Session::show_static`] does and draws the card's band and `text`
+    /// over it. On an error the card may be partly drawn; the caller replaces
+    /// it.
     pub(super) fn show_standby(&mut self, source: &str, text: &str) -> Result<(), IpcError> {
-        self.show_static(source)?;
+        self.leave_standby()?;
+        if self.shaders != self.standby_shaders {
+            self.set_shaders(self.standby_shaders.clone())?;
+        }
+        let id = self.loadfile(source, "replace", json!({ "loop-file": "inf" }))?;
+        self.entries.clear();
+        self.entries.insert(id, Entry::Static);
+        self.draw_standby(&standby_ass(text))?;
+        self.standby = Some(text.to_owned());
+        Ok(())
+    }
+
+    /// Redraws the stand-by card's band torn by `tear`, or as normal with
+    /// `None`. Does nothing when the card is not up.
+    pub(super) fn redraw_standby(&mut self, tear: Option<&Tear>) -> Result<(), IpcError> {
+        let Some(text) = self.standby.clone() else {
+            return Ok(());
+        };
+        let ass = match tear {
+            Some(tear) => torn_standby_ass(&text, tear),
+            None => standby_ass(&text),
+        };
+        self.draw_standby(&ass)
+    }
+
+    /// Draws `ass` as the stand-by card's overlay, replacing what it showed.
+    fn draw_standby(&mut self, ass: &str) -> Result<(), IpcError> {
         self.command(json!({
             "name": "osd-overlay",
             "id": STANDBY_OVERLAY,
             "format": "ass-events",
-            "data": standby_ass(text),
+            "data": ass,
             "res_x": CARD_WIDTH,
             "res_y": CARD_HEIGHT,
             "z": 0,
-        }))?;
-        self.standby = true;
+        }))
+        .map(drop)
+    }
+
+    fn set_shaders(&mut self, shaders: Vec<String>) -> Result<(), IpcError> {
+        self.command(json!(["set_property", "glsl-shaders", shaders]))?;
+        self.shaders = shaders;
         Ok(())
     }
 
@@ -132,27 +196,30 @@ impl Session {
         self.replace(path, json!({}), Entry::Clip)
     }
 
-    /// Removes the stand-by card's overlay, then loads `url` in place of the
-    /// playlist.
+    /// Leaves the stand-by card, then loads `url` in place of the playlist.
     fn replace(&mut self, url: &str, options: Value, entry: Entry) -> Result<(), IpcError> {
-        self.clear_standby()?;
+        self.leave_standby()?;
         let id = self.loadfile(url, "replace", options)?;
         self.entries.clear();
         self.entries.insert(id, entry);
         Ok(())
     }
 
-    /// Removes the stand-by card's overlay if it is up. MPV refuses the
-    /// command without `data`, even for the format `none`.
-    fn clear_standby(&mut self) -> Result<(), IpcError> {
-        if self.standby {
+    /// Removes the stand-by card's overlay if it is up, and gives MPV the
+    /// global shaders if it has others. MPV refuses `osd-overlay` without
+    /// `data`, even for the format `none`.
+    fn leave_standby(&mut self) -> Result<(), IpcError> {
+        if self.standby.is_some() {
             self.command(json!({
                 "name": "osd-overlay",
                 "id": STANDBY_OVERLAY,
                 "format": "none",
                 "data": "",
             }))?;
-            self.standby = false;
+            self.standby = None;
+        }
+        if self.shaders != self.global_shaders {
+            self.set_shaders(self.global_shaders.clone())?;
         }
         Ok(())
     }
@@ -168,7 +235,7 @@ impl Session {
     /// property, so a key is never sent to another server.
     pub(super) fn queue_program(&mut self, stream: &Stream, start_ms: u64) -> Result<(), IpcError> {
         let fields = header_fields(&stream.headers).map_err(IpcError::Rejected)?;
-        self.clear_standby()?;
+        self.leave_standby()?;
         self.command(json!(["set_property", "http-header-fields", fields]))?;
         let start = start_ms.saturating_sub(stream.stream_offset_ms);
         let options = json!({ "start": seconds(start) });
@@ -198,7 +265,7 @@ impl Session {
 
     /// Stops playback and empties the playlist.
     pub(super) fn stop(&mut self) -> Result<(), IpcError> {
-        self.clear_standby()?;
+        self.leave_standby()?;
         self.command(json!(["stop"]))?;
         self.entries.clear();
         self.current = None;
@@ -434,6 +501,35 @@ pub(super) fn standby_ass(text: &str) -> String {
         layer(mid_x, "FFFFFF"),
     ]
     .join("\n")
+}
+
+/// [`standby_ass`] torn by `tear`: the band is cut into horizontal strips
+/// that each move sideways by their offset, and the red and cyan copies of
+/// the text sit `tear.chroma` pixels from the white one. Each strip shows
+/// only its own rows of the text, through a `\clip`.
+pub(super) fn torn_standby_ass(text: &str, tear: &Tear) -> String {
+    let text = ass_escape(&text.to_uppercase());
+    let mid_y = (BAND_TOP + BAND_BOTTOM) / 2;
+    let height = BAND_BOTTOM - BAND_TOP;
+    let (width, mid_x) = (CARD_WIDTH as i32, (CARD_WIDTH / 2) as i32);
+    let chroma = tear.chroma as i32;
+    let mut events = Vec::new();
+    for (i, &dx) in tear.strips.iter().enumerate() {
+        let top = BAND_TOP + height * i as u32 / STRIPS as u32;
+        let bottom = BAND_TOP + height * (i as u32 + 1) / STRIPS as u32;
+        events.push(format!(
+            r"{{\an7\pos(0,0)\bord0\shad0\1c&H000000&\p1}}m {dx} {top} l {} {top} {} {bottom} {dx} {bottom}{{\p0}}",
+            width + dx,
+            width + dx
+        ));
+        for (shift, colour) in [(-chroma, "0000FF"), (chroma, "FFFF00"), (0, "FFFFFF")] {
+            events.push(format!(
+                r"{{\an5\pos({},{mid_y})\clip(0,{top},{CARD_WIDTH},{bottom})\fnDejaVu Sans\b1\fs150\fscx80\bord0\shad0\1c&H{colour}&}}{text}",
+                mid_x + dx + shift
+            ));
+        }
+    }
+    events.join("\n")
 }
 
 /// `text` as literal ASS text: a backslash cannot start an escape, a brace

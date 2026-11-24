@@ -577,3 +577,90 @@ fn rejects_bad_sign_off_fields_naming_each() {
         );
     }
 }
+
+// Display filters
+
+fn with_display(table: &str) -> String {
+    format!("{}\n[display]\n{table}\n", with_channel(PLAIN))
+}
+
+#[test]
+fn without_a_display_table_the_card_gets_the_crt_shader_and_the_glitch() {
+    let config = Config::parse(&with_channel(PLAIN)).unwrap();
+    assert_eq!(config.display, Display::default());
+    assert_eq!(config.display.filters, []);
+    assert_eq!(
+        config.display.standby_filters,
+        [Filter::Crt, Filter::Glitch]
+    );
+    assert_eq!(config.display.glitch_every, Duration::from_secs(20));
+    // An empty table means the same.
+    assert_eq!(
+        Config::parse(&with_display("")).unwrap().display,
+        Display::default()
+    );
+}
+
+#[test]
+fn the_display_table_sets_filters_and_the_glitch_rate() {
+    let config = Config::parse(&with_display(
+        "filters = [\"crt\"]\nstandby_filters = [\"glitch\"]\nglitch_every = \"1m\"",
+    ))
+    .unwrap();
+    assert_eq!(
+        config.display,
+        Display {
+            filters: vec![Filter::Crt],
+            standby_filters: vec![Filter::Glitch],
+            glitch_every: Duration::from_secs(60),
+        }
+    );
+    // An empty list turns the card's filters off.
+    let off = Config::parse(&with_display("standby_filters = []")).unwrap();
+    assert_eq!(off.display.standby_filters, []);
+}
+
+#[test]
+fn rejects_unknown_filters_and_bad_glitch_rates_naming_each() {
+    let found = problems(&with_display(
+        "filters = [\"crt\", \"vhs\"]\nstandby_filters = [\"Glitch\"]\nglitch_every = \"20\"",
+    ));
+    let names: Vec<&str> = found.iter().map(|p| p.field.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "display.filters[1]",
+            "display.standby_filters[0]",
+            "display.glitch_every",
+        ]
+    );
+    assert!(found[0].message.contains("\"vhs\""), "{}", found[0].message);
+    assert!(found[0].message.contains("crt or glitch"));
+    assert_eq!(
+        fields(&with_display("glitch_every = \"0s\"")),
+        ["display.glitch_every"]
+    );
+}
+
+#[test]
+fn the_commented_display_table_in_the_example_gives_the_defaults() {
+    let mut text = EXAMPLE.to_owned();
+    for line in [
+        "[display]",
+        "filters = []",
+        "standby_filters = [\"crt\", \"glitch\"]",
+        "glitch_every = \"20s\"",
+    ] {
+        let commented = format!("# {line}\n");
+        assert!(text.contains(&commented), "{line}");
+        text = text.replace(&commented, &format!("{line}\n"));
+    }
+    assert_eq!(Config::parse(&text).unwrap().display, Display::default());
+}
+
+#[test]
+fn rejects_unknown_display_keys_as_a_parse_error() {
+    let err = Config::parse(&with_display("shader = \"crt\"")).unwrap_err();
+    assert!(matches!(err, ConfigError::Parse(_)), "{err:?}");
+    assert!(err.to_string().contains("shader"), "{err}");
+}

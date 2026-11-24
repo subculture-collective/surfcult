@@ -38,6 +38,17 @@
 //! an FFmpeg built with `drawtext`. The text is drawn three times for a
 //! chromatic offset: red shifted left, cyan shifted right and white on top.
 //! The overlay is removed before anything else is shown, queued or stopped.
+//! If MPV refuses part of the card, the player shows static instead.
+//!
+//! # Display filters
+//!
+//! [`MpvConfig::filters`] are on everything on screen and
+//! [`MpvConfig::standby_filters`] are added while the card shows, each
+//! filter once. The CRT shader ([`CRT_SHADER`]) is written into the runtime
+//! directory and set through MPV's `glsl-shaders` property: the global list
+//! as soon as MPV is up (also after a restart), the card's list while it
+//! shows. The text glitch is stepped in [`Player::poll_event`], which redraws
+//! the card's overlay torn for a moment and then as it was.
 //!
 //! # Events
 //!
@@ -67,6 +78,7 @@
 //! position rather than where it was when MPV died. Commands sent while MPV
 //! is down fail with a [`PlayerError`].
 
+mod glitch;
 mod ipc;
 #[cfg(test)]
 mod tests;
@@ -80,8 +92,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::{Overlay, Player, PlayerError, PlayerEvent};
+use super::{
+    DEFAULT_GLITCH_EVERY, DEFAULT_STANDBY_FILTERS, Filter, Overlay, Player, PlayerError,
+    PlayerEvent, standby_filters,
+};
+use crate::config::Display;
 use crate::library::MediaId;
+use glitch::{Glitch, Step};
 use ipc::{IpcError, Session};
 
 /// MPV's output flags for the Pi 4B on its TV (ADR 0001, decision 2).
@@ -101,9 +118,15 @@ pub const STATIC_SOURCE: &str =
     "av://lavfi:nullsrc=s=320x180:r=25,geq=lum='random(1)*255':cb=128:cr=128";
 
 /// The stand-by card's picture: SMPTE HD colour bars generated live by
-/// FFmpeg's `lavfi`. The picture never changes, so one frame a second is
-/// enough and keeps MPV almost idle. Silent: the source has no audio.
-pub const STANDBY_SOURCE: &str = "av://lavfi:smptehdbars=s=1920x1080:r=1";
+/// FFmpeg's `lavfi` at 640x360 and scaled up by MPV on the GPU. 30 frames a
+/// second give the CRT shader's flicker and rolling band frames to move on.
+/// Silent: the source has no audio.
+pub const STANDBY_SOURCE: &str = "av://lavfi:smptehdbars=s=640x360:r=30";
+
+/// The CRT shader ([`Filter::Crt`]), from `assets/shaders/crt.glsl`.
+/// [`MpvPlayer::start`] writes it into the runtime directory, because MPV
+/// loads shaders from files.
+pub const CRT_SHADER: &str = include_str!("../../../assets/shaders/crt.glsl");
 
 /// The message across the middle of the stand-by card.
 pub const STANDBY_TEXT: &str = "PLEASE STAND BY";
@@ -128,6 +151,10 @@ const BASE_ARGS: [&str; 7] = [
 /// Unix socket paths are limited to 108 bytes, including the final zero.
 const MAX_SOCKET_PATH: usize = 107;
 
+/// The global shader files, the stand-by card's shader files and the glitch
+/// timer, from [`MpvConfig::filters_setup`].
+type FilterSetup = (Vec<String>, Vec<String>, Option<Glitch>);
+
 /// How to run MPV.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MpvConfig {
@@ -149,6 +176,12 @@ pub struct MpvConfig {
     /// The message [`Player::show_standby`] draws across the middle of the
     /// screen.
     pub standby_text: String,
+    /// Display filters on everything on screen.
+    pub filters: Vec<Filter>,
+    /// Display filters the stand-by card adds while it shows.
+    pub standby_filters: Vec<Filter>,
+    /// The mean time between two glitches of the stand-by card's text.
+    pub glitch_every: Duration,
     /// How long a command may wait for MPV's answer.
     pub command_timeout: Duration,
     /// How long a new MPV may take to open its socket.
@@ -166,13 +199,64 @@ impl MpvConfig {
             static_source: STATIC_SOURCE.into(),
             standby_source: STANDBY_SOURCE.into(),
             standby_text: STANDBY_TEXT.into(),
+            filters: Vec::new(),
+            standby_filters: DEFAULT_STANDBY_FILTERS.to_vec(),
+            glitch_every: DEFAULT_GLITCH_EVERY,
             command_timeout: Duration::from_secs(5),
             start_timeout: Duration::from_secs(10),
         }
     }
 
+    /// This config with the filters and glitch rate of `channels.toml`'s
+    /// `[display]` table.
+    pub fn with_display(self, display: &Display) -> Self {
+        Self {
+            filters: display.filters.clone(),
+            standby_filters: display.standby_filters.clone(),
+            glitch_every: display.glitch_every,
+            ..self
+        }
+    }
+
     fn socket(&self) -> PathBuf {
         self.runtime_dir.join("mpv.sock")
+    }
+
+    /// The file MPV loads the shader of `filter` from, if it has one.
+    fn shader_file(&self, filter: Filter) -> Option<PathBuf> {
+        match filter {
+            Filter::Crt => Some(self.runtime_dir.join("crt.glsl")),
+            Filter::Glitch => None,
+        }
+    }
+
+    /// The `glsl-shaders` lists outside the stand-by card and on it, and the
+    /// glitch timer if the card glitches. The card's filters are the global
+    /// ones followed by its own, each once ([`standby_filters`]).
+    fn filters_setup(&self) -> Result<FilterSetup, PlayerError> {
+        let global = standby_filters(&self.filters, &[]);
+        let on_card = standby_filters(&self.filters, &self.standby_filters);
+        let glitch = on_card
+            .contains(&Filter::Glitch)
+            .then(|| Glitch::new(self.glitch_every, glitch::SEED));
+        Ok((
+            self.shader_list(&global)?,
+            self.shader_list(&on_card)?,
+            glitch,
+        ))
+    }
+
+    /// The `glsl-shaders` list for `filters`.
+    fn shader_list(&self, filters: &[Filter]) -> Result<Vec<String>, PlayerError> {
+        filters
+            .iter()
+            .filter_map(|&f| self.shader_file(f))
+            .map(|path| {
+                path.into_os_string()
+                    .into_string()
+                    .map_err(|_| PlayerError("the runtime directory is not UTF-8".into()))
+            })
+            .collect()
     }
 }
 
@@ -237,6 +321,11 @@ pub struct MpvPlayer<R> {
     session: Option<Session>,
     last_start: Instant,
     last_ping: Instant,
+    /// The shader files outside the stand-by card and on it.
+    global_shaders: Vec<String>,
+    standby_shaders: Vec<String>,
+    /// The text glitch, when the stand-by card has it.
+    glitch: Option<Glitch>,
 }
 
 impl<R> MpvPlayer<R> {
@@ -270,6 +359,11 @@ impl<R: StreamResolver> MpvPlayer<R> {
                 socket.display()
             )));
         }
+        let (global_shaders, standby_shaders, glitch) = config.filters_setup()?;
+        if let Some(file) = config.shader_file(Filter::Crt) {
+            fs::write(&file, CRT_SHADER)
+                .map_err(|e| PlayerError(format!("cannot write the CRT shader: {e}")))?;
+        }
         let mut player = Self {
             config,
             resolver,
@@ -277,6 +371,9 @@ impl<R: StreamResolver> MpvPlayer<R> {
             session: None,
             last_start: Instant::now(),
             last_ping: Instant::now(),
+            global_shaders,
+            standby_shaders,
+            glitch,
         };
         player.launch()?;
         Ok(player)
@@ -306,7 +403,7 @@ impl<R: StreamResolver> MpvPlayer<R> {
                 ))
             })?;
         let deadline = Instant::now() + self.config.start_timeout;
-        let session = loop {
+        let mut session = loop {
             if let Ok(Some(status)) = child.try_wait() {
                 return Err(PlayerError(format!("MPV exited at start: {status}")));
             }
@@ -320,6 +417,19 @@ impl<R: StreamResolver> MpvPlayer<R> {
                 Err(_) => std::thread::sleep(Duration::from_millis(20)),
             }
         };
+        // A new MPV has no shaders: give it the global ones.
+        let shaders = (self.global_shaders.clone(), self.standby_shaders.clone());
+        if let Err(e) = session.use_shaders(shaders.0, shaders.1) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(PlayerError(format!(
+                "cannot set MPV's shaders: {}",
+                e.message()
+            )));
+        }
+        if let Some(glitch) = self.glitch.as_mut() {
+            glitch.disarm();
+        }
         self.child = Some(child);
         self.session = Some(session);
         self.last_ping = Instant::now();
@@ -362,6 +472,25 @@ impl<R: StreamResolver> MpvPlayer<R> {
         }
     }
 
+    /// Tears or settles the stand-by card's band when its glitch is due.
+    fn step_glitch(&mut self) {
+        let Some(glitch) = self.glitch.as_mut() else {
+            return;
+        };
+        if !self.session.as_ref().is_some_and(Session::standby_up) {
+            glitch.disarm();
+            return;
+        }
+        let tear = match glitch.step(Instant::now()) {
+            Step::Nothing => return,
+            Step::Tear(tear) => Some(tear),
+            Step::Settle => None,
+        };
+        if let Err(e) = self.with_session(|s| s.redraw_standby(tear.as_ref())) {
+            eprintln!("surfcult: cannot redraw the stand-by card: {e}");
+        }
+    }
+
     /// The watchdog's half of [`Player::poll_event`]: notices a dead or hung
     /// MPV and starts a new one when [`RESTART_DELAY`] has passed.
     fn check_alive(&mut self) -> Option<PlayerEvent> {
@@ -393,6 +522,9 @@ impl<R> Drop for MpvPlayer<R> {
     fn drop(&mut self) {
         self.shut_down();
         let _ = fs::remove_file(self.config.socket());
+        if let Some(file) = self.config.shader_file(Filter::Crt) {
+            let _ = fs::remove_file(file);
+        }
         for id in 0..64 {
             let _ = fs::remove_file(self.overlay_file(id));
         }
@@ -408,7 +540,23 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
     fn show_standby(&mut self) -> Result<(), PlayerError> {
         let source = self.config.standby_source.clone();
         let text = self.config.standby_text.clone();
-        self.with_session(|s| s.show_standby(&source, &text))
+        let result = self.with_session(|s| s.show_standby(&source, &text));
+        match &result {
+            Ok(()) => {
+                if let Some(glitch) = self.glitch.as_mut() {
+                    glitch.arm(Instant::now());
+                }
+            }
+            // MPV answered but refused part of the card, which may have left
+            // bars without their text. Static replaces them.
+            Err(_) if self.session.is_some() => {
+                if let Err(e) = self.show_static() {
+                    eprintln!("surfcult: cannot show static after the stand-by card failed: {e}");
+                }
+            }
+            Err(_) => {}
+        }
+        result
     }
 
     fn play_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
@@ -464,6 +612,7 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
         if let Some(event) = self.check_alive() {
             return Some(event);
         }
+        self.step_glitch();
         let session = self.session.as_mut()?;
         match session.poll() {
             Ok(event) => event,

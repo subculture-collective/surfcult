@@ -69,7 +69,9 @@ It leaves static up when:
 
 - the tune-in pool has no clip (`NoTuneInClip`);
 - the schedule cannot be read (`Schedule`);
-- the player rejects a command (`Player`). If the player rejects the stand-by card, the reason is `Player`, not the schedule reason.
+- the player rejects a command (`Player`). If the player rejects the stand-by card, the reason is `Player`, not the schedule reason, and `MpvPlayer` shows static in place of a card MPV refused in part.
+
+The card brings its display filters (by default the CRT shader and the text glitch; see [player.md](player.md#display-filters)), so they apply in each of the cases above.
 
 The player commands for a channel with no events are `ShowStatic` at the key press and `ShowStandby` 0.5 s later. The tuner does not retry. The screen stays as it is until the next `tune`, or until the player restarts.
 

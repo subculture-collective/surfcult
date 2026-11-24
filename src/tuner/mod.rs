@@ -122,7 +122,8 @@
 //! - the tune-in pool has no clip ([`Reason::NoTuneInClip`]);
 //! - the schedule cannot be read ([`Reason::Schedule`]);
 //! - the player rejects a command ([`Reason::Player`]), including the
-//!   stand-by card itself.
+//!   stand-by card itself. [`crate::player::MpvPlayer`] shows static in
+//!   place of a card that MPV refused in part.
 //!
 //! The screen stays as it is until the next [`Tuner::tune`]. The tuner does
 //! not retry.
