@@ -18,13 +18,26 @@ pub enum HttpError {
     Status(u16),
 }
 
-/// The one thing the Jellyfin client needs from HTTP: a GET that returns the
-/// body. Tests supply recorded responses through this trait.
+/// What the Jellyfin client needs from HTTP: a GET and a POST that return the
+/// body, and a DELETE. Tests supply recorded responses through this trait.
+///
+/// Every method takes the `Authorization` header value. The client builds the
+/// header; a transport must send it as given and must not log it.
 pub trait JellyfinHttp: Send + Sync {
-    /// Sends `GET <server><path_and_query>` with the given `Authorization`
-    /// header value and returns the response body. The client builds the header;
-    /// a transport must send it as given and must not log it.
+    /// Sends `GET <server><path_and_query>` and returns the response body.
     fn get(&self, path_and_query: &str, authorization: &str) -> Result<String, HttpError>;
+
+    /// Sends `POST <server><path_and_query>` with `json` as an
+    /// `application/json` body and returns the response body.
+    fn post_json(
+        &self,
+        path_and_query: &str,
+        json: &str,
+        authorization: &str,
+    ) -> Result<String, HttpError>;
+
+    /// Sends `DELETE <server><path_and_query>`. The response body is ignored.
+    fn delete(&self, path_and_query: &str, authorization: &str) -> Result<(), HttpError>;
 }
 
 /// [`JellyfinHttp`] over `ureq`, with a short timeout. Redirects are not
@@ -53,27 +66,64 @@ impl UreqHttp {
     }
 }
 
+impl UreqHttp {
+    fn url(&self, path_and_query: &str) -> String {
+        format!("{}{path_and_query}", self.base_url)
+    }
+}
+
 impl JellyfinHttp for UreqHttp {
     fn get(&self, path_and_query: &str, authorization: &str) -> Result<String, HttpError> {
-        let url = format!("{}{path_and_query}", self.base_url);
-        let mut response = self
+        let response = self
             .agent
-            .get(&url)
+            .get(&self.url(path_and_query))
             .header("Authorization", authorization)
             .header("Accept", "application/json")
-            .call()
-            .map_err(|source| HttpError::Unreachable(source.to_string()))?;
-        let status = response.status().as_u16();
-        if !(200..300).contains(&status) {
-            return Err(HttpError::Status(status));
-        }
-        let mut body = String::new();
-        response
-            .body_mut()
-            .as_reader()
-            .take(MAX_BODY_BYTES)
-            .read_to_string(&mut body)
-            .map_err(|source| HttpError::Unreachable(source.to_string()))?;
-        Ok(body)
+            .call();
+        read_body(response)
     }
+
+    fn post_json(
+        &self,
+        path_and_query: &str,
+        json: &str,
+        authorization: &str,
+    ) -> Result<String, HttpError> {
+        let response = self
+            .agent
+            .post(&self.url(path_and_query))
+            .header("Authorization", authorization)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .send(json);
+        read_body(response)
+    }
+
+    fn delete(&self, path_and_query: &str, authorization: &str) -> Result<(), HttpError> {
+        let response = self
+            .agent
+            .delete(&self.url(path_and_query))
+            .header("Authorization", authorization)
+            .call();
+        read_body(response).map(drop)
+    }
+}
+
+/// The body of a 2xx response, or why there is none.
+fn read_body(
+    response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+) -> Result<String, HttpError> {
+    let mut response = response.map_err(|source| HttpError::Unreachable(source.to_string()))?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(HttpError::Status(status));
+    }
+    let mut body = String::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(MAX_BODY_BYTES)
+        .read_to_string(&mut body)
+        .map_err(|source| HttpError::Unreachable(source.to_string()))?;
+    Ok(body)
 }

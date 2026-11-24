@@ -10,6 +10,9 @@ The words surfcult's code and documentation use, and the code item each one name
 - **Library cache**: the `library_*` tables in the store, a copy of the Jellyfin library. Everything except the sync step reads the library from here, so it keeps working while Jellyfin is down.
 - **Sync**: `jellyfin::sync`, which fetches the library from Jellyfin and replaces the library cache in one transaction. The caller passes the sync time; a failed sync leaves the cache as it was.
 - **Sync worker**: `jellyfin::SyncWorker`, which fetches the library on its own thread at a fixed interval and sends each result back. The store's owner writes the newest snapshot with `SyncWorker::apply`; the worker never touches the store.
+- **Device profile**: what the Pi plays directly and what Jellyfin transcodes to, ADR 0001 decisions 3 and 4. Its rules are the constants in `library::profile`; `needs_transcode` and the `DeviceProfile` that `JellyfinClient::playback` sends are both built from them.
+- **Playback**: how the player gets an item, `jellyfin::Playback`, from `JellyfinClient::playback`. `Direct` is the file as stored, and the player seeks to the start position; `Transcode` is a progressive MPEG-TS stream that already starts there. Neither URL carries the key, and playback is never reported to Jellyfin.
+- **Transcode session**: the device id and play session id of a transcode surfcult started, `jellyfin::TranscodeSession`. `JellyfinClient::stop_transcode` stops it when playback ends.
 - **Program pool**: the ordered items a channel draws its programs from, built from its source by `library::resolve_pool`. Until #30 only collections resolve; every other source returns `PoolError::Unsupported` instead of the whole library.
 
 ## Clips

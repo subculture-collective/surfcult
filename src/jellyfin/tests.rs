@@ -27,12 +27,24 @@ fn key() -> ApiKey {
 }
 
 type Handler = Box<dyn Fn(&str) -> Result<String, HttpError> + Send + Sync>;
+type PostHandler = Box<dyn Fn(&str, &str) -> Result<String, HttpError> + Send + Sync>;
 
-/// A transport that answers from a closure and records every request as
-/// `(path_and_query, authorization)`.
+/// One request a [`FakeHttp`] received.
+#[derive(Debug, Clone)]
+struct Call {
+    method: &'static str,
+    path: String,
+    authorization: String,
+    body: Option<String>,
+}
+
+/// A transport that answers from a closure and records every request. GET
+/// and DELETE go to `handler` with the path; POST goes to `post` with the
+/// path and the body when it is set, and to `handler` otherwise.
 struct FakeHttp {
     handler: Handler,
-    requests: Mutex<Vec<(String, String)>>,
+    post: Option<PostHandler>,
+    calls: Mutex<Vec<Call>>,
 }
 
 impl FakeHttp {
@@ -41,8 +53,34 @@ impl FakeHttp {
     ) -> Arc<Self> {
         Arc::new(Self {
             handler: Box::new(handler),
-            requests: Mutex::new(Vec::new()),
+            post: None,
+            calls: Mutex::new(Vec::new()),
         })
+    }
+
+    /// A transport whose POST answers come from `post`. GET and DELETE answer
+    /// with an empty body.
+    fn with_post(
+        post: impl Fn(&str, &str) -> Result<String, HttpError> + Send + Sync + 'static,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            handler: Box::new(|_| Ok(String::new())),
+            post: Some(Box::new(post)),
+            calls: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn record(&self, method: &'static str, path: &str, authorization: &str, body: Option<&str>) {
+        self.calls.lock().unwrap().push(Call {
+            method,
+            path: path.to_string(),
+            authorization: authorization.to_string(),
+            body: body.map(str::to_string),
+        });
+    }
+
+    fn calls(&self) -> Vec<Call> {
+        self.calls.lock().unwrap().clone()
     }
 
     /// Serves the recorded fixtures, at most `page_cap` items per page whatever
@@ -51,8 +89,12 @@ impl FakeHttp {
         Self::new(move |path| serve_fixtures(path, page_cap, ITEMS))
     }
 
+    /// Every request as `(path_and_query, authorization)`.
     fn requests(&self) -> Vec<(String, String)> {
-        self.requests.lock().unwrap().clone()
+        self.calls()
+            .into_iter()
+            .map(|call| (call.path, call.authorization))
+            .collect()
     }
 
     fn paths(&self) -> Vec<String> {
@@ -62,11 +104,26 @@ impl FakeHttp {
 
 impl JellyfinHttp for Arc<FakeHttp> {
     fn get(&self, path_and_query: &str, authorization: &str) -> Result<String, HttpError> {
-        self.requests
-            .lock()
-            .unwrap()
-            .push((path_and_query.to_string(), authorization.to_string()));
+        self.record("GET", path_and_query, authorization, None);
         (self.handler)(path_and_query)
+    }
+
+    fn post_json(
+        &self,
+        path_and_query: &str,
+        json: &str,
+        authorization: &str,
+    ) -> Result<String, HttpError> {
+        self.record("POST", path_and_query, authorization, Some(json));
+        match &self.post {
+            Some(post) => post(path_and_query, json),
+            None => (self.handler)(path_and_query),
+        }
+    }
+
+    fn delete(&self, path_and_query: &str, authorization: &str) -> Result<(), HttpError> {
+        self.record("DELETE", path_and_query, authorization, None);
+        (self.handler)(path_and_query).map(drop)
     }
 }
 
@@ -713,9 +770,502 @@ fn a_key_that_would_break_the_header_is_refused_without_echoing_it() {
     }
 }
 
+// ---- playback URLs --------------------------------------------------------
+
+const DIRECT_INFO: &str = include_str!("../../tests/fixtures/jellyfin/playback-info-direct.json");
+const TRANSCODE_INFO: &str =
+    include_str!("../../tests/fixtures/jellyfin/playback-info-transcode.json");
+const PLAY_SESSION: &str = "5f0d7e3c2b1a49e8a6c4d2b0f9e8d7c6";
+
+/// The first video and audio stream of an item, as Jellyfin describes them.
+struct Streams<'a> {
+    video: &'a str,
+    height: u32,
+    depth: Option<u8>,
+    range: &'a str,
+    audio: &'a str,
+}
+
+/// Whether Jellyfin would direct-play `streams` under `profile`: both codecs
+/// are in the direct-play entry and every condition of the video codec's codec
+/// profile holds, where a condition on a value the stream lacks passes unless
+/// it is required. This follows Jellyfin's rules only as far as surfcult's
+/// profile uses them, and fails on anything else it sends.
+fn jellyfin_direct_plays(profile: &Value, streams: &Streams) -> bool {
+    let direct = &profile["DirectPlayProfiles"][0];
+    assert!(direct.get("Container").is_none(), "any container plays");
+    let listed = |field: &str, codec: &str| {
+        direct[field]
+            .as_str()
+            .unwrap()
+            .split(',')
+            .any(|c| c == codec)
+    };
+    if !listed("VideoCodec", streams.video) || !listed("AudioCodec", streams.audio) {
+        return false;
+    }
+    profile["CodecProfiles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|codec| codec["Type"] == "Video" && codec["Codec"] == streams.video)
+        .flat_map(|codec| codec["Conditions"].as_array().unwrap())
+        .all(|condition| {
+            let expected = condition["Value"].as_str().unwrap();
+            let actual = match condition["Property"].as_str().unwrap() {
+                "VideoBitDepth" => streams.depth.map(|depth| depth.to_string()),
+                "Height" => Some(streams.height.to_string()),
+                "VideoRangeType" => Some(streams.range.to_string()),
+                other => panic!("unexpected property {other}"),
+            };
+            let Some(actual) = actual else {
+                return condition["IsRequired"] != true;
+            };
+            match condition["Condition"].as_str().unwrap() {
+                "LessThanEqual" => {
+                    actual.parse::<u64>().unwrap() <= expected.parse::<u64>().unwrap()
+                }
+                "EqualsAny" => expected.split('|').any(|value| value == actual),
+                other => panic!("unexpected condition {other}"),
+            }
+        })
+}
+
+/// A Jellyfin stand-in for `POST /Items/{id}/PlaybackInfo`. It looks the item
+/// up in the items fixture, applies the device profile the client sent with
+/// [`jellyfin_direct_plays`], and answers with the recorded direct-play or
+/// transcode response, rewritten to name the requested item.
+fn fake_jellyfin() -> Arc<FakeHttp> {
+    FakeHttp::with_post(|path, body| {
+        let id = path
+            .strip_prefix("/Items/")
+            .and_then(|rest| rest.strip_suffix("/PlaybackInfo"))
+            .unwrap_or_else(|| panic!("unexpected POST {path}"));
+        let request: Value = serde_json::from_str(body).unwrap();
+        let items: Value = serde_json::from_str(ITEMS).unwrap();
+        let item = items["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["Id"] == id)
+            .ok_or(HttpError::Status(404))?;
+        let first = |kind: &str| {
+            item["MediaStreams"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|stream| stream["Type"] == kind)
+                .unwrap()
+                .clone()
+        };
+        let (video, audio) = (first("Video"), first("Audio"));
+        let streams = Streams {
+            video: video["Codec"].as_str().unwrap(),
+            height: video["Height"].as_u64().unwrap() as u32,
+            depth: video["BitDepth"].as_u64().map(|depth| depth as u8),
+            range: video["VideoRangeType"].as_str().unwrap(),
+            audio: audio["Codec"].as_str().unwrap(),
+        };
+        let info = if jellyfin_direct_plays(&request["DeviceProfile"], &streams) {
+            DIRECT_INFO
+        } else {
+            TRANSCODE_INFO
+        };
+        Ok(for_item(info, id))
+    })
+}
+
+/// A playback-info fixture rewritten so its ids name `id` instead of the item
+/// it was made for.
+fn for_item(info: &str, id: &str) -> String {
+    let undashed = |id: &str| id.replace('-', "");
+    [MOVIE_1, MOVIE_3]
+        .iter()
+        .fold(info.to_string(), |info, fixture| {
+            info.replace(fixture, id)
+                .replace(&undashed(fixture), &undashed(id))
+        })
+}
+
+/// The values of every query parameter called `name`, in any case.
+fn params<'a>(path: &'a str, name: &str) -> Vec<&'a str> {
+    let query = path.split_once('?').map_or("", |(_, query)| query);
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value)
+        .collect()
+}
+
+/// The one value of the query parameter `name`.
+fn only(path: &str, name: &str) -> String {
+    let values = params(path, name);
+    assert_eq!(values.len(), 1, "{name} in {path}");
+    values[0].to_string()
+}
+
+#[test]
+fn an_h265_1080p_item_gets_a_direct_play_url() {
+    let http = fake_jellyfin();
+
+    let playback = client(&http)
+        .playback(&MediaId::new(MOVIE_1), 600_000)
+        .unwrap();
+
+    assert_eq!(
+        playback,
+        Playback::Direct {
+            path_and_query: format!(
+                "/Videos/{MOVIE_1}/stream?static=true&mediaSourceId=1e0ff4a8a553696127930e218769b7b7"
+            ),
+            seek_ms: 600_000,
+        }
+    );
+    assert_eq!(playback.transcode(), None);
+    assert_eq!(
+        playback.url("http://jellyfin.example:8096/"),
+        format!("http://jellyfin.example:8096{}", playback.path_and_query())
+    );
+}
+
+#[test]
+fn an_item_outside_the_profile_gets_a_transcode_url() {
+    let http = fake_jellyfin();
+    let client = client(&http);
+
+    // AV1, and H.264 at 10 bit.
+    for id in [MOVIE_3, EPISODE_2] {
+        let playback = client.playback(&MediaId::new(id), 0).unwrap();
+        let Playback::Transcode {
+            path_and_query,
+            session,
+        } = &playback
+        else {
+            panic!("{id} should be transcoded: {playback:?}");
+        };
+        assert!(
+            path_and_query.starts_with(&format!("/videos/{id}/stream.ts?")),
+            "{path_and_query}"
+        );
+        assert_eq!(
+            session,
+            &TranscodeSession {
+                device_id: DEVICE_ID.into(),
+                play_session_id: PLAY_SESSION.into(),
+            }
+        );
+        assert_eq!(playback.transcode(), Some(session));
+    }
+}
+
+#[test]
+fn the_transcode_url_starts_at_the_start_position_and_follows_the_adr() {
+    let http = fake_jellyfin();
+
+    let playback = client(&http)
+        .playback(&MediaId::new(MOVIE_3), 2_520_000)
+        .unwrap();
+
+    let path = playback.path_and_query();
+    assert_eq!(
+        only(path, "StartTimeTicks"),
+        "25200000000",
+        "42 min in ticks"
+    );
+    assert_eq!(only(path, "VideoCodec"), "h264");
+    assert_eq!(
+        only(path, "h264-videobitdepth"),
+        "8",
+        "a 10-bit H.264 source is re-encoded, never stream-copied"
+    );
+    assert_eq!(only(path, "AudioCodec"), "aac");
+    assert_eq!(
+        only(path, "VideoBitrate"),
+        "8000000",
+        "Jellyfin's 200 Mbps is replaced"
+    );
+    assert_eq!(only(path, "MaxWidth"), "1920");
+    assert_eq!(only(path, "MaxHeight"), "1080");
+    assert_eq!(only(path, "DeviceId"), DEVICE_ID, "Jellyfin's is replaced");
+    assert_eq!(only(path, "PlaySessionId"), PLAY_SESSION);
+    // What Jellyfin chose and surfcult does not override is kept.
+    assert_eq!(
+        only(path, "MediaSourceId"),
+        "3282307ad80560f83e46a3022f90087e"
+    );
+    assert_eq!(only(path, "AudioStreamIndex"), "1");
+    assert!(params(path, "api_key").is_empty(), "{path}");
+}
+
+#[test]
+fn the_playback_request_carries_the_profile_and_start_position() {
+    let http = fake_jellyfin();
+
+    client(&http)
+        .playback(&MediaId::new(MOVIE_1), 1_500)
+        .unwrap();
+
+    let calls = http.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].method, "POST");
+    assert_eq!(calls[0].path, format!("/Items/{MOVIE_1}/PlaybackInfo"));
+    let body: Value = serde_json::from_str(calls[0].body.as_deref().unwrap()).unwrap();
+    assert_eq!(body["DeviceProfile"], super::playback::device_profile());
+    assert_eq!(body["StartTimeTicks"], 15_000_000);
+    assert_eq!(body["SubtitleStreamIndex"], -1, "subtitles off");
+    assert_eq!(body["EnableTranscoding"], true);
+    let transcoding = &body["DeviceProfile"]["TranscodingProfiles"];
+    assert_eq!(
+        transcoding,
+        &json!([{
+            "Type": "Video",
+            "Container": "ts",
+            "VideoCodec": "h264",
+            "AudioCodec": "aac",
+            "Protocol": "http",
+            "Context": "Streaming",
+        }]),
+        "a progressive MPEG-TS transcode, not HLS"
+    );
+}
+
+#[test]
+fn the_device_profile_matches_the_census_decision() {
+    let profile = super::playback::device_profile();
+    let video = |video, height, depth, range| Streams {
+        video,
+        height,
+        depth,
+        range,
+        audio: "aac",
+    };
+    let audio = |audio| Streams {
+        audio,
+        ..video("hevc", 1080, Some(10), "SDR")
+    };
+    // ADR 0001, decision 3.
+    let cases = [
+        (
+            "H.265 8-bit 1080p",
+            video("hevc", 1080, Some(8), "SDR"),
+            true,
+        ),
+        (
+            "H.265 10-bit 1080p",
+            video("hevc", 1080, Some(10), "SDR"),
+            true,
+        ),
+        (
+            "H.264 8-bit 1080p",
+            video("h264", 1080, Some(8), "SDR"),
+            true,
+        ),
+        (
+            "H.264, bit depth unknown",
+            video("h264", 720, None, "SDR"),
+            true,
+        ),
+        ("H.264 10-bit", video("h264", 1080, Some(10), "SDR"), false),
+        ("AV1", video("av1", 1080, Some(10), "SDR"), false),
+        ("VVC", video("vvc", 1080, Some(10), "SDR"), false),
+        ("VC-1", video("vc1", 1080, Some(8), "SDR"), false),
+        ("MPEG-2", video("mpeg2video", 1080, Some(8), "SDR"), false),
+        ("VP9", video("vp9", 1080, Some(8), "SDR"), false),
+        ("MPEG-1", video("mpeg1video", 480, Some(8), "SDR"), false),
+        (
+            "H.265 above 1080p",
+            video("hevc", 2160, Some(10), "SDR"),
+            false,
+        ),
+        ("HDR10", video("hevc", 1080, Some(10), "HDR10"), false),
+        (
+            "Dolby Vision",
+            video("hevc", 1080, Some(10), "DOVIWithHDR10"),
+            false,
+        ),
+        ("HLG", video("hevc", 1080, Some(10), "HLG"), false),
+        ("TrueHD", audio("truehd"), true),
+        ("DTS", audio("dts"), true),
+        ("E-AC3", audio("eac3"), true),
+        ("PCM", audio("pcm_s16le"), false),
+    ];
+    for (name, streams, direct) in &cases {
+        assert_eq!(jellyfin_direct_plays(&profile, streams), *direct, "{name}");
+        // The tuner's `needs_transcode` reads the same rules; it cannot see HDR.
+        if streams.range == "SDR" {
+            let mut item = crate::library::MediaItem::new("x", "X", MediaKind::Movie, 1);
+            item.video.push(crate::library::VideoStream {
+                codec: streams.video.into(),
+                width: 0,
+                height: streams.height,
+                bit_depth: streams.depth,
+            });
+            item.audio.push(crate::library::AudioStream {
+                codec: streams.audio.into(),
+                channels: 2,
+                language: None,
+            });
+            assert_eq!(
+                crate::library::profile::needs_transcode(&item),
+                !direct,
+                "{name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn stopping_a_transcode_deletes_its_active_encoding() {
+    let http = fake_jellyfin();
+    let client = client(&http);
+    let playback = client.playback(&MediaId::new(MOVIE_3), 0).unwrap();
+
+    client
+        .stop_transcode(playback.transcode().unwrap())
+        .unwrap();
+
+    let calls = http.calls();
+    let stop = calls.last().unwrap();
+    assert_eq!(stop.method, "DELETE");
+    assert_eq!(
+        stop.path,
+        format!("/Videos/ActiveEncodings?DeviceId={DEVICE_ID}&PlaySessionId={PLAY_SESSION}")
+    );
+    // The transcode URL names the same device and session, so this is the
+    // transcode the delete stops.
+    assert_eq!(only(playback.path_and_query(), "DeviceId"), DEVICE_ID);
+    assert_eq!(
+        only(playback.path_and_query(), "PlaySessionId"),
+        PLAY_SESSION
+    );
+
+    // Jellyfin answers 404 for a session it no longer has: already stopped.
+    let ended = FakeHttp::new(|_| Err(HttpError::Status(404)));
+    let session = playback.transcode().unwrap();
+    assert_eq!(self::client(&ended).stop_transcode(session), Ok(()));
+
+    let refused = FakeHttp::new(|_| Err(HttpError::Status(401)));
+    assert_eq!(
+        self::client(&refused).stop_transcode(session),
+        Err(JellyfinError::Unauthorized)
+    );
+}
+
+#[test]
+fn nothing_is_reported_to_jellyfins_playback_sessions() {
+    let http = fake_jellyfin();
+    let client = client(&http);
+    for id in [MOVIE_1, MOVIE_3, EPISODE_2, MOVIE_4] {
+        let playback = client.playback(&MediaId::new(id), 60_000).unwrap();
+        if let Some(session) = playback.transcode() {
+            client.stop_transcode(session).unwrap();
+        }
+    }
+
+    let calls = http.calls();
+    assert!(calls.iter().any(|call| call.method == "DELETE"));
+    for call in &calls {
+        let path = call.path.to_lowercase();
+        assert!(!path.contains("sessions/playing"), "{}", call.path);
+        assert!(!path.contains("/sessions"), "{}", call.path);
+        assert!(!path.contains("playeditems"), "{}", call.path);
+    }
+}
+
+#[test]
+fn the_key_never_appears_in_a_playback_url_request_or_debug_output() {
+    let expected = format!("MediaBrowser Token=\"{SENTINEL}\"");
+    for spelling in ["api_key=", "ApiKey=", "API_KEY="] {
+        let info = TRANSCODE_INFO.replace("api_key=", spelling);
+        let http = FakeHttp::with_post(move |_, _| Ok(info.clone()));
+        let client = client(&http);
+
+        let playback = client.playback(&MediaId::new(MOVIE_3), 0).unwrap();
+        client
+            .stop_transcode(playback.transcode().unwrap())
+            .unwrap();
+
+        for text in [
+            playback.path_and_query().to_string(),
+            playback.url("http://jellyfin.example:8096"),
+            format!("{playback:?}"),
+        ] {
+            assert!(!text.contains(SENTINEL), "key leaked in: {text}");
+            assert!(!text.to_lowercase().contains("api_key"), "{text}");
+            assert!(!text.to_lowercase().contains("apikey"), "{text}");
+        }
+        for call in http.calls() {
+            assert_eq!(call.authorization, expected);
+            assert!(!call.path.contains(SENTINEL), "key in URL {}", call.path);
+            assert!(!call.body.unwrap_or_default().contains(SENTINEL));
+        }
+    }
+}
+
+#[test]
+fn a_refusal_or_an_answer_surfcult_cannot_use_is_an_error_without_the_key() {
+    let answer = |body: String| {
+        let http = FakeHttp::with_post(move |_, _| Ok(body.clone()));
+        client(&http)
+            .playback(&MediaId::new(MOVIE_3), 0)
+            .unwrap_err()
+    };
+
+    let refused =
+        answer(json!({ "MediaSources": [], "ErrorCode": "NoCompatibleStream" }).to_string());
+    assert_eq!(
+        refused,
+        JellyfinError::NoPlayback("NoCompatibleStream".into())
+    );
+    assert!(matches!(
+        answer(json!({ "MediaSources": [] }).to_string()),
+        JellyfinError::NoPlayback(_)
+    ));
+    let neither = json!({
+        "MediaSources": [{ "Id": "m", "SupportsDirectPlay": false, "SupportsTranscoding": false }],
+        "PlaySessionId": PLAY_SESSION,
+    });
+    assert!(matches!(
+        answer(neither.to_string()),
+        JellyfinError::NoPlayback(_)
+    ));
+
+    // HLS is never used: it took about 19 s to start at an offset.
+    let hls = TRANSCODE_INFO.replace("/stream.ts?", "/master.m3u8?");
+    let hls = answer(hls);
+    assert!(matches!(hls, JellyfinError::BadResponse(_)), "{hls:?}");
+    let no_session = TRANSCODE_INFO.replace(
+        &format!("\"PlaySessionId\": \"{PLAY_SESSION}\""),
+        "\"PlaySessionId\": null",
+    );
+    assert!(matches!(answer(no_session), JellyfinError::BadResponse(_)));
+    let malformed = answer(format!("not json {SENTINEL}"));
+    assert!(matches!(malformed, JellyfinError::BadResponse(_)));
+
+    let other_item = answer(TRANSCODE_INFO.replace(MOVIE_3, EPISODE_2));
+    assert_eq!(
+        other_item,
+        JellyfinError::WrongItem(EPISODE_2.into()),
+        "a transcode of another item is refused"
+    );
+
+    let failed = FakeHttp::with_post(|_, _| Err(HttpError::Status(404)));
+    assert_eq!(
+        client(&failed).playback(&MediaId::new("nope"), 0),
+        Err(JellyfinError::Status(404))
+    );
+
+    for err in [refused, hls, malformed] {
+        assert!(!err.to_string().contains(SENTINEL), "{err}");
+        assert!(!format!("{err:?}").contains(SENTINEL), "{err:?}");
+    }
+}
+
 // ---- the real transport, against a listener this test starts ------------
 
-/// Accepts one connection, returns the raw request text and answers with `reply`.
+/// Accepts one connection, returns the raw request text (headers and any
+/// `Content-Length` body) and answers with `reply`.
 fn serve_once(reply: &'static str) -> (String, std::thread::JoinHandle<String>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
@@ -723,7 +1273,18 @@ fn serve_once(reply: &'static str) -> (String, std::thread::JoinHandle<String>) 
         let (mut stream, _) = listener.accept().unwrap();
         let mut request = Vec::new();
         let mut buf = [0u8; 1024];
-        while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+        let complete = |request: &[u8]| {
+            let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                return false;
+            };
+            let head = String::from_utf8_lossy(&request[..end]).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map_or(0, |value| value.trim().parse().unwrap());
+            request.len() >= end + 4 + length
+        };
+        while !complete(&request) {
             let n = stream.read(&mut buf).unwrap();
             if n == 0 {
                 break;
@@ -795,6 +1356,62 @@ fn the_real_transport_reports_an_unreachable_server() {
         .unwrap_err();
 
     assert!(matches!(err, HttpError::Unreachable(_)), "{err:?}");
+}
+
+#[test]
+fn the_real_transport_posts_json_with_the_header() {
+    let (base, request) = serve_once(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\
+         Connection: close\r\n\r\n{}",
+    );
+
+    let body = UreqHttp::new(&base)
+        .post_json(
+            "/Items/x/PlaybackInfo",
+            "{\"StartTimeTicks\":0}",
+            &key().authorization_header(),
+        )
+        .unwrap();
+
+    assert_eq!(body, "{}");
+    let request = request.join().unwrap();
+    assert_eq!(
+        request.lines().next().unwrap(),
+        "POST /Items/x/PlaybackInfo HTTP/1.1"
+    );
+    let lower = request.to_lowercase();
+    assert!(
+        lower.contains("content-type: application/json"),
+        "{request}"
+    );
+    assert!(
+        lower.contains(&format!(
+            "authorization: mediabrowser token=\"{}\"",
+            SENTINEL.to_lowercase()
+        )),
+        "{request}"
+    );
+    assert!(request.ends_with("{\"StartTimeTicks\":0}"), "{request}");
+}
+
+#[test]
+fn the_real_transport_sends_a_delete_and_reports_its_status() {
+    let (base, request) =
+        serve_once("HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    UreqHttp::new(&base)
+        .delete("/Videos/ActiveEncodings?DeviceId=d&PlaySessionId=p", "x")
+        .unwrap();
+    assert_eq!(
+        request.join().unwrap().lines().next().unwrap(),
+        "DELETE /Videos/ActiveEncodings?DeviceId=d&PlaySessionId=p HTTP/1.1"
+    );
+
+    let (base, _) =
+        serve_once("HTTP/1.1 500 Oops\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    assert_eq!(
+        UreqHttp::new(&base).delete("/x", "x").unwrap_err(),
+        HttpError::Status(500)
+    );
 }
 
 // ---- the background worker ---------------------------------------------

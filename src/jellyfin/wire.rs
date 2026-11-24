@@ -11,7 +11,7 @@ use crate::library::{AudioStream, Chapter, MediaItem, MediaKind, VideoStream};
 use crate::store::LibraryEntry;
 
 /// Jellyfin counts time in ticks of 100 nanoseconds.
-const TICKS_PER_MS: i64 = 10_000;
+pub(super) const TICKS_PER_MS: i64 = 10_000;
 
 /// One page of `/Items`. The items stay as raw JSON so that one item with an
 /// unexpected shape can be skipped without failing the whole page.

@@ -1,0 +1,61 @@
+{
+  "MediaSources": [
+    {
+      "Protocol": "File",
+      "Id": "3282307ad80560f83e46a3022f90087e",
+      "Path": "/media/fixtures/movie-3.mkv",
+      "Type": "Default",
+      "Container": "mkv",
+      "Size": 2147483648,
+      "Name": "movie-3",
+      "IsRemote": false,
+      "ETag": "0a1b2c3d4e5f60718293a4b5c6d7e8f9",
+      "RunTimeTicks": 71284480000,
+      "ReadAtNativeFramerate": false,
+      "IgnoreDts": false,
+      "IgnoreIndex": false,
+      "GenPtsInput": false,
+      "SupportsTranscoding": true,
+      "SupportsDirectStream": false,
+      "SupportsDirectPlay": false,
+      "IsInfiniteStream": false,
+      "UseMostCompatibleTranscodingProfile": false,
+      "RequiresOpening": false,
+      "RequiresClosing": false,
+      "RequiresLooping": false,
+      "SupportsProbing": true,
+      "VideoType": "VideoFile",
+      "MediaStreams": [
+        {
+          "Codec": "av1",
+          "BitDepth": 10,
+          "VideoRange": "SDR",
+          "VideoRangeType": "SDR",
+          "Height": 1080,
+          "Width": 1920,
+          "Type": "Video",
+          "Index": 0,
+          "IsDefault": true
+        },
+        {
+          "Codec": "opus",
+          "Language": "eng",
+          "Channels": 2,
+          "Type": "Audio",
+          "Index": 1,
+          "IsDefault": true
+        }
+      ],
+      "MediaAttachments": [],
+      "Formats": [],
+      "Bitrate": 2410000,
+      "RequiredHttpHeaders": {},
+      "TranscodingUrl": "/videos/3282307a-d805-60f8-3e46-a3022f90087e/stream.ts?DeviceId=TW96aWxsYS81LjA&MediaSourceId=3282307ad80560f83e46a3022f90087e&VideoCodec=h264&AudioCodec=aac&AudioStreamIndex=1&VideoBitrate=199872000&AudioBitrate=128000&MaxFramerate=23.976025&PlaySessionId=5f0d7e3c2b1a49e8a6c4d2b0f9e8d7c6&api_key=SENTINEL-KEY-0123456789abcdef&TranscodingMaxAudioChannels=6&RequireAvc=false&EnableAudioVbrEncoding=true&Tag=0a1b2c3d4e5f60718293a4b5c6d7e8f9&h264-level=40&h264-profile=high&TranscodeReasons=VideoCodecNotSupported",
+      "TranscodingSubProtocol": "http",
+      "TranscodingContainer": "ts",
+      "DefaultAudioStreamIndex": 1,
+      "HasSegments": false
+    }
+  ],
+  "PlaySessionId": "5f0d7e3c2b1a49e8a6c4d2b0f9e8d7c6"
+}
