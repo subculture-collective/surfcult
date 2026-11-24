@@ -174,7 +174,7 @@ Select media randomly from an assigned collection.
 
 Assign different probabilities to individual media items or collections.
 
-As built in issue #32, weights are whole numbers of at least 1, keyed by item title, in the `weights` table of a weighted channel, block or default; other items weigh 1. Weights on collections and on commercials (`frequency_weight` below) are not built. See [the schedule reference](reference/schedule.md#weighted).
+As built, the weights are on sources, not on items. A weighted channel, block or default lists `sources`, each with a `weight` that is a whole number of at least 1 (1 when left out). A slot picks a source in proportion to its weight and then an item from it with the shuffle's cooldown, counted per source. Weights on single items and on commercials (`frequency_weight` below) are not built; give an item its own source, such as `jellyfin_series`, to weight it. See [the schedule reference](reference/schedule.md#weighted).
 
 ### Scheduled Blocks
 
@@ -453,7 +453,7 @@ SQLite is the authoritative data store.
 - channel_id: UUID
 - media_id: UUID
 - position: optional integer
-- weight: optional float (as built: a whole number per item title; see Weighted Random)
+- weight: optional float (not built per item; as built, a whole number per source in `sources`; see Weighted Random)
 - enabled: boolean
 
 ### Schedule

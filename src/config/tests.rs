@@ -49,9 +49,10 @@ fn the_example_file_loads_into_typed_config() {
     assert_eq!(
         cartoons.plan,
         Plan::Fixed {
-            source: Source::JellyfinCollection("Cartoons".into()),
+            sources: vec![WeightedSource::new(Source::JellyfinCollection(
+                "Cartoons".into()
+            ))],
             mode: Mode::Shuffle,
-            weights: Weights::new(),
         }
     );
     assert_eq!(cartoons.grid, Some(Duration::from_secs(30 * 60)));
@@ -81,7 +82,16 @@ fn the_example_file_loads_into_typed_config() {
     assert_eq!(blocks[1].days.len(), 7);
     assert_eq!(blocks[1].end_minute, 1440);
     assert_eq!(blocks[1].mode, Mode::Weighted);
-    assert_eq!(blocks[1].weights.get("Groundhog Day"), Some(&3));
+    assert_eq!(
+        blocks[1].sources,
+        vec![
+            WeightedSource {
+                source: Source::JellyfinGenre("Comedy".into()),
+                weight: 3
+            },
+            WeightedSource::new(Source::JellyfinCollection("Cartoon Shorts".into())),
+        ]
+    );
 }
 
 #[test]
@@ -175,7 +185,7 @@ mode = "sequential"
 days = ["sun"]
 start = "06:00"
 end = "12:00"
-source = { jellyfin_tag = "c" }
+sources = [{ jellyfin_tag = "c" }]
 mode = "weighted"
 "#;
     assert!(Config::parse(&blocks_channel(&format!("{BLOCK_MORNING}{touching}"))).is_ok());
@@ -417,43 +427,174 @@ fn display_lists_each_problem_with_its_field() {
     assert!(shown.starts_with("channel[0].mode: "), "{shown}");
 }
 
-#[test]
-fn weights_load_for_a_weighted_channel() {
-    let text = with_channel(
-        "source = { jellyfin_library = \"M\" }\nmode = \"weighted\"\nweights = { \"Cars\" = 3, \"Up\" = 1 }",
-    );
-    let config = Config::parse(&text).unwrap();
-    let Plan::Fixed { weights, .. } = &config.channels[0].plan else {
+/// The sources of a weighted fixed channel written as `entries`.
+fn weighted_channel(entries: &str) -> String {
+    with_channel(&format!("mode = \"weighted\"\nsources = [{entries}]"))
+}
+
+fn fixed_sources(config: &Config) -> &[WeightedSource] {
+    let Plan::Fixed { sources, .. } = &config.channels[0].plan else {
         panic!("expected a fixed plan");
     };
+    sources
+}
+
+fn ws(source: Source, weight: u32) -> WeightedSource {
+    WeightedSource { source, weight }
+}
+
+#[test]
+fn a_weighted_channel_lists_sources_with_weights() {
+    let text = weighted_channel(
+        r#"
+  { jellyfin_series = "The Simpsons", weight = 3 },
+  { jellyfin_series = "Futurama" },
+  { weight = 2, jellyfin_collection = "Cartoon Shorts" },
+  { jellyfin_library = "L", weight = 1 },
+  { jellyfin_tag = "t", weight = 4294967295 },
+  { jellyfin_genre = "g", weight = 5 },
+"#,
+    );
+    let config = Config::parse(&text).unwrap();
     assert_eq!(
-        weights,
-        &Weights::from([("Cars".into(), 3), ("Up".into(), 1)])
+        fixed_sources(&config),
+        [
+            ws(Source::JellyfinSeries("The Simpsons".into()), 3),
+            ws(Source::JellyfinSeries("Futurama".into()), 1),
+            ws(Source::JellyfinCollection("Cartoon Shorts".into()), 2),
+            ws(Source::JellyfinLibrary("L".into()), 1),
+            ws(Source::JellyfinTag("t".into()), u32::MAX),
+            ws(Source::JellyfinGenre("g".into()), 5),
+        ]
+    );
+    let Plan::Fixed { mode, .. } = &config.channels[0].plan else {
+        unreachable!()
+    };
+    assert_eq!(*mode, Mode::Weighted);
+}
+
+#[test]
+fn other_modes_keep_one_source_with_weight_one() {
+    let config = Config::parse(&with_channel(PLAIN)).unwrap();
+    assert_eq!(
+        fixed_sources(&config),
+        [ws(Source::JellyfinLibrary("Movies".into()), 1)]
     );
 }
 
 #[test]
-fn rejects_weights_outside_weighted_and_bad_values() {
-    let text = with_channel(&format!("{PLAIN}\nweights = {{ \"Cars\" = 2 }}"));
-    assert_eq!(fields(&text), vec!["channel[0].weights"]);
+fn a_weighted_lineup_needs_at_least_one_source() {
+    assert_eq!(
+        fields(&with_channel("mode = \"weighted\"")),
+        vec!["channel[0].sources"]
+    );
+    assert_eq!(
+        fields(&with_channel("mode = \"weighted\"\nsources = []")),
+        vec!["channel[0].sources"]
+    );
+    // The old form is not accepted: a weighted channel lists `sources`.
+    assert_eq!(
+        fields(&with_channel(
+            "source = { jellyfin_library = \"M\" }\nmode = \"weighted\""
+        )),
+        vec!["channel[0].source", "channel[0].sources"]
+    );
+}
 
-    let text = with_channel(
-        "source = { jellyfin_library = \"M\" }\nmode = \"weighted\"\nweights = { \"Cars\" = 0, \"Up\" = -1, \"Big\" = 4294967296 }",
+#[test]
+fn rejects_bad_weights_naming_each_entry() {
+    let text = weighted_channel(
+        r#"
+  { jellyfin_tag = "a", weight = 0 },
+  { jellyfin_tag = "b", weight = 2 },
+  { jellyfin_tag = "c", weight = -1 },
+  { jellyfin_tag = "d", weight = 4294967296 },
+"#,
     );
     assert_eq!(
         fields(&text),
         vec![
-            "channel[0].weights.\"Big\"",
-            "channel[0].weights.\"Cars\"",
-            "channel[0].weights.\"Up\"",
+            "channel[0].sources[0].weight",
+            "channel[0].sources[2].weight",
+            "channel[0].sources[3].weight",
         ]
     );
+    let found = problems(&text);
+    assert!(found[0].message.contains("whole number of at least 1"));
 }
 
 #[test]
-fn a_blocks_channel_takes_a_default_lineup_and_no_channel_weights() {
+fn rejects_the_same_source_twice() {
+    let text = weighted_channel(
+        r#"
+  { jellyfin_tag = "a", weight = 2 },
+  { jellyfin_tag = "b" },
+  { jellyfin_tag = "a" },
+"#,
+    );
+    let found = problems(&text);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].field, "channel[0].sources[2]");
+    assert!(found[0].message.contains("sources[0]"));
+}
+
+#[test]
+fn other_modes_reject_sources() {
+    for mode in ["sequential", "shuffle"] {
+        let text = with_channel(&format!(
+            "mode = \"{mode}\"\nsources = [{{ jellyfin_tag = \"a\", weight = 2 }}, {{ jellyfin_tag = \"b\" }}]"
+        ));
+        assert_eq!(fields(&text), vec!["channel[0].sources"], "{mode}");
+    }
+    // A weight beside a plain `source` is an unknown key.
+    let text = with_channel("source = { jellyfin_tag = \"a\", weight = 2 }\nmode = \"shuffle\"");
+    assert!(matches!(Config::parse(&text), Err(ConfigError::Parse(_))));
+}
+
+#[test]
+fn a_source_entry_with_an_unknown_or_missing_key_is_a_parse_error() {
+    for entry in [
+        "{ jellyfin_tag = \"a\", colour = \"red\" }",
+        "{ jellyfin_nonsense = \"a\" }",
+        "{ weight = 2 }",
+        "{ jellyfin_tag = \"a\", jellyfin_series = \"b\" }",
+        "{ jellyfin_tag = \"a\", weight = 2, weight = 3 }",
+        "{ jellyfin_tag = \"a\", weight = 1.5 }",
+        "{ jellyfin_tag = \"a\", weight = \"3\" }",
+        "{ jellyfin_tag = 4 }",
+        "\"a\"",
+    ] {
+        match Config::parse(&weighted_channel(entry)) {
+            Err(ConfigError::Parse(message)) => assert!(!message.is_empty(), "{entry}"),
+            other => panic!("{entry}: expected a parse error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn the_old_weights_table_is_an_unknown_key() {
+    for text in [
+        with_channel(
+            "source = { jellyfin_library = \"M\" }\nmode = \"weighted\"\nweights = { \"Cars\" = 3 }",
+        ),
+        blocks_channel(
+            &BLOCK_MORNING.replace("\"shuffle\"", "\"shuffle\"\nweights = { \"X\" = 2 }"),
+        ),
+        blocks_channel(&format!(
+            "default = {{ source = {{ jellyfin_tag = \"d\" }}, mode = \"shuffle\", weights = {{ \"X\" = 2 }} }}\n{BLOCK_MORNING}"
+        )),
+    ] {
+        assert!(
+            matches!(Config::parse(&text), Err(ConfigError::Parse(_))),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_blocks_channel_takes_a_default_lineup_and_sources_only_on_blocks() {
     let text = blocks_channel(&format!(
-        "default = {{ source = {{ jellyfin_tag = \"d\" }}, mode = \"weighted\", weights = {{ \"X\" = 2 }} }}\n{BLOCK_MORNING}"
+        "default = {{ sources = [{{ jellyfin_tag = \"d\", weight = 2 }}, {{ jellyfin_tag = \"e\" }}], mode = \"weighted\" }}\n{BLOCK_MORNING}"
     ));
     let config = Config::parse(&text).unwrap();
     let Plan::Blocks { default, .. } = &config.channels[0].plan else {
@@ -462,18 +603,20 @@ fn a_blocks_channel_takes_a_default_lineup_and_no_channel_weights() {
     assert_eq!(
         default,
         &Some(Lineup {
-            source: Source::JellyfinTag("d".into()),
+            sources: vec![
+                ws(Source::JellyfinTag("d".into()), 2),
+                ws(Source::JellyfinTag("e".into()), 1),
+            ],
             mode: Mode::Weighted,
-            weights: Weights::from([("X".into(), 2)]),
         })
     );
 
     let text = blocks_channel(&format!(
-        "weights = {{ \"X\" = 2 }}\ndefault = {{ source = {{ jellyfin_tag = \"d\" }}, mode = \"blocks\" }}\n{BLOCK_MORNING}"
+        "sources = [{{ jellyfin_tag = \"x\" }}]\ndefault = {{ source = {{ jellyfin_tag = \"d\" }}, mode = \"blocks\" }}\n{BLOCK_MORNING}"
     ));
     assert_eq!(
         fields(&text),
-        vec!["channel[0].weights", "channel[0].default.mode"]
+        vec!["channel[0].sources", "channel[0].default.mode"]
     );
 
     let text = with_channel(&format!(
@@ -483,14 +626,71 @@ fn a_blocks_channel_takes_a_default_lineup_and_no_channel_weights() {
 }
 
 #[test]
-fn rejects_block_weights_outside_weighted() {
-    let block = BLOCK_MORNING.replace(
-        "mode = \"shuffle\"",
-        "mode = \"shuffle\"\nweights = { \"X\" = 2 }",
+fn a_default_lineup_checks_its_sources_like_a_channel() {
+    let weighted =
+        |lineup: &str| blocks_channel(&format!("default = {{ {lineup} }}\n{BLOCK_MORNING}"));
+    assert_eq!(
+        fields(&weighted("mode = \"weighted\"")),
+        vec!["channel[0].default.sources"]
     );
     assert_eq!(
-        fields(&blocks_channel(&block)),
-        vec!["channel[0].block[0].weights"]
+        fields(&weighted(
+            "mode = \"weighted\", sources = [{ jellyfin_tag = \"d\", weight = 0 }]"
+        )),
+        vec!["channel[0].default.sources[0].weight"]
+    );
+    assert_eq!(
+        fields(&weighted(
+            "mode = \"shuffle\", sources = [{ jellyfin_tag = \"d\" }]"
+        )),
+        vec!["channel[0].default.sources"]
+    );
+    assert_eq!(
+        fields(&weighted("mode = \"shuffle\"")),
+        vec!["channel[0].default.source"]
+    );
+}
+
+#[test]
+fn a_weighted_block_lists_sources_and_other_blocks_take_one() {
+    let weighted = r#"
+[[channel.block]]
+start = "12:00"
+end = "18:00"
+sources = [{ jellyfin_tag = "w", weight = 3 }, { jellyfin_series = "S" }]
+mode = "weighted"
+"#;
+    let config = Config::parse(&blocks_channel(&format!("{BLOCK_MORNING}{weighted}"))).unwrap();
+    let Plan::Blocks { blocks, .. } = &config.channels[0].plan else {
+        panic!("expected blocks");
+    };
+    assert_eq!(blocks[0].sources, [ws(Source::JellyfinTag("a".into()), 1)]);
+    assert_eq!(
+        blocks[1].sources,
+        [
+            ws(Source::JellyfinTag("w".into()), 3),
+            ws(Source::JellyfinSeries("S".into()), 1),
+        ]
+    );
+
+    // Field paths name the block and the entry.
+    let bad = weighted.replace("weight = 3", "weight = 0");
+    assert_eq!(
+        fields(&blocks_channel(&format!("{BLOCK_MORNING}{bad}"))),
+        vec!["channel[0].block[1].sources[0].weight"]
+    );
+    let shuffle_with_sources = BLOCK_MORNING.replace(
+        "source = { jellyfin_tag = \"a\" }",
+        "sources = [{ jellyfin_tag = \"a\" }]",
+    );
+    assert_eq!(
+        fields(&blocks_channel(&shuffle_with_sources)),
+        vec!["channel[0].block[0].sources"]
+    );
+    let no_source = BLOCK_MORNING.replace("source = { jellyfin_tag = \"a\" }\n", "");
+    assert_eq!(
+        fields(&blocks_channel(&no_source)),
+        vec!["channel[0].block[0].source"]
     );
 }
 
@@ -502,6 +702,7 @@ fn sources_lists_each_source_once_in_config_order() {
         vec![
             &Source::JellyfinCollection("Cartoons".into()),
             &Source::JellyfinGenre("Comedy".into()),
+            &Source::JellyfinCollection("Cartoon Shorts".into()),
         ]
     );
     assert_eq!(

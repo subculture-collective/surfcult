@@ -8,7 +8,7 @@ use super::rng::{self, SplitMix64};
 use super::sign_off::Night;
 use super::{Generated, MAX_EVENTS, Note, ScheduleError};
 use crate::clips::Clip;
-use crate::config::{Mode, Weights};
+use crate::config::{Mode, Source};
 use crate::library::{MediaId, MediaItem};
 use crate::timeline::{Event, EventKind};
 
@@ -17,19 +17,36 @@ use crate::timeline::{Event, EventKind};
 pub(crate) struct Params<'a> {
     pub channel: u32,
     pub mode: Mode,
-    /// Used by `weighted`; other modes ignore it.
-    pub weights: &'a Weights,
     /// `None` schedules each program whole, with no breaks.
     pub breaks: Option<BreakPlan<'a>>,
 }
 
-/// One program pool played in one mode: a block or the default of a blocks
-/// channel.
+/// One source's program pool and its weight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SourcePool<'a> {
+    /// Named in [`Note::SourceNotPlayable`].
+    pub source: &'a Source,
+    /// Used by `weighted`; other modes ignore it. A weight of 0 counts as 1.
+    pub weight: u32,
+    pub items: &'a [MediaItem],
+}
+
+/// The program pools played in one mode: a block or the default of a blocks
+/// channel, or a whole channel with one lineup. A `weighted` lane picks among
+/// its sources; any other mode plays its first source (the config allows
+/// only one).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Lane<'a> {
     pub mode: Mode,
-    pub weights: &'a Weights,
-    pub pool: &'a [MediaItem],
+    pub sources: Vec<SourcePool<'a>>,
+}
+
+impl<'a> Lane<'a> {
+    /// The items a sequential or shuffle lane draws from, every source's in
+    /// order.
+    pub(crate) fn items(&self) -> impl Iterator<Item = &'a MediaItem> {
+        self.sources.iter().flat_map(|entry| entry.items)
+    }
 }
 
 /// A blocks channel's inputs to [`generate_blocks`].
@@ -85,11 +102,11 @@ impl Resume {
 }
 
 /// Generates events covering `[start_ms, end_ms)` for a channel with one
-/// source and mode. The last event may end after `end_ms`.
+/// mode over `sources`. The last event may end after `end_ms`.
 /// `start_ms >= end_ms` gives no events.
 pub(crate) fn generate(
     params: &Params<'_>,
-    pool: &[MediaItem],
+    sources: &[SourcePool<'_>],
     resume: &Resume,
     start_ms: i64,
     end_ms: i64,
@@ -99,8 +116,7 @@ pub(crate) fn generate(
         breaks: params.breaks,
         lanes: vec![Lane {
             mode: params.mode,
-            weights: params.weights,
-            pool,
+            sources: sources.to_vec(),
         }],
         default: None,
         spans: vec![Span {
@@ -115,7 +131,7 @@ pub(crate) fn generate(
     run(&layout, true, resume, start_ms, end_ms)
 }
 
-/// Like [`generate`], for a channel with one source and mode and a sign-off:
+/// Like [`generate`], for a channel with one lineup and a sign-off:
 /// `layout` has one lane and one span over all time, the channel's filler
 /// clips for the gap before each sign-off, and its nights off the air.
 pub(crate) fn generate_fixed(
@@ -545,12 +561,13 @@ fn cooldown(n: usize) -> usize {
     n.saturating_sub(n.div_ceil(4).max(1))
 }
 
-/// The ids a shuffle over `pool` counts toward its cooldown, its distinct
+/// The ids a shuffle over `items` counts toward its cooldown, its distinct
 /// playable items, and how many of them it keeps cooling down.
-pub(crate) fn cooling_target(pool: &[MediaItem]) -> (HashSet<&str>, usize) {
+pub(crate) fn cooling_target<'a>(
+    items: impl Iterator<Item = &'a MediaItem>,
+) -> (HashSet<&'a str>, usize) {
     let mut seen = HashSet::new();
-    let playable: HashSet<&str> = pool
-        .iter()
+    let playable: HashSet<&str> = items
         .filter(|item| seen.insert(item.id.as_str()))
         .filter(|item| item.runtime_ms > 0)
         .map(|item| item.id.as_str())
@@ -567,6 +584,74 @@ fn nothing(resume: &Resume, notes: Vec<Note>) -> Generated {
     }
 }
 
+/// The distinct items of `items`, first of each id, in order.
+fn distinct<'a>(items: impl Iterator<Item = &'a MediaItem>) -> Vec<&'a MediaItem> {
+    let mut seen = HashSet::new();
+    items.filter(|item| seen.insert(item.id.as_str())).collect()
+}
+
+/// One pool's shuffle: what it picks from and what is cooling down.
+#[derive(Clone)]
+struct Cooldown<'a> {
+    playable: Vec<&'a MediaItem>,
+    position: HashMap<&'a str, usize>,
+    /// Indexes into `playable` of the programs before this slot, oldest
+    /// first: the resumed history that is still in the pool, then this
+    /// run's programs from the pool.
+    played: Vec<usize>,
+    /// How many distinct items are cooling down: N - k.
+    cooldown: usize,
+}
+
+impl<'a> Cooldown<'a> {
+    /// `items` are distinct; the ones with no runtime are left out.
+    fn new(items: Vec<&'a MediaItem>, resume: &Resume) -> Self {
+        let playable: Vec<&MediaItem> = items.into_iter().filter(|i| i.runtime_ms > 0).collect();
+        let position: HashMap<&str, usize> = playable
+            .iter()
+            .enumerate()
+            .map(|(i, item)| (item.id.as_str(), i))
+            .collect();
+        // An id that is no longer in the pool is ignored.
+        let played = resume
+            .recent
+            .iter()
+            .rev()
+            .filter_map(|id| position.get(id.as_str()).copied())
+            .collect();
+        Self {
+            cooldown: cooldown(playable.len()),
+            playable,
+            position,
+            played,
+        }
+    }
+
+    /// Picks one of the items that are not cooling down, with one draw from
+    /// `rng`.
+    fn pick(&self, rng: &mut SplitMix64) -> &'a MediaItem {
+        // Walk back to the `cooldown` most recent distinct items. A program
+        // cut into several events appears once in the walk.
+        let mut cooling = HashSet::new();
+        for &i in self.played.iter().rev() {
+            if cooling.len() == self.cooldown {
+                break;
+            }
+            cooling.insert(i);
+        }
+        let eligible: Vec<usize> = (0..self.playable.len())
+            .filter(|i| !cooling.contains(i))
+            .collect();
+        self.playable[eligible[rng.below(eligible.len())]]
+    }
+
+    fn record(&mut self, id: &MediaId) {
+        if let Some(&i) = self.position.get(id.as_str()) {
+            self.played.push(i);
+        }
+    }
+}
+
 /// Chooses the next item to play from one lane. At least one item has a
 /// runtime above 0.
 #[derive(Clone)]
@@ -579,20 +664,14 @@ enum Picker<'a> {
         next: usize,
     },
     Shuffle {
-        playable: Vec<&'a MediaItem>,
-        position: HashMap<&'a str, usize>,
+        pool: Cooldown<'a>,
         channel: u32,
-        /// Indexes into `playable` of the programs before this slot, oldest
-        /// first: the resumed history that is still in the pool, then this
-        /// run's programs from the pool.
-        played: Vec<usize>,
-        /// How many distinct items are cooling down: N - k.
-        cooldown: usize,
     },
     Weighted {
-        playable: Vec<&'a MediaItem>,
-        /// Running totals of the weights: entry i is the sum of the weights of
-        /// items 0 to i.
+        /// The sources with something playable, each with its own shuffle.
+        pools: Vec<Cooldown<'a>>,
+        /// Running totals of the sources' weights: entry i is the sum of the
+        /// weights of sources 0 to i.
         cumulative: Vec<u64>,
         channel: u32,
     },
@@ -607,12 +686,10 @@ impl<'a> Picker<'a> {
         fixed: bool,
         notes: &mut Vec<Note>,
     ) -> Option<Self> {
-        let mut seen = HashSet::new();
-        let unique: Vec<&MediaItem> = lane
-            .pool
-            .iter()
-            .filter(|item| seen.insert(item.id.as_str()))
-            .collect();
+        if lane.mode == Mode::Weighted {
+            return Self::weighted(lane, channel, resume, notes);
+        }
+        let unique = distinct(lane.items());
         let skipped = unique.iter().filter(|item| item.runtime_ms == 0).count();
         if skipped > 0 {
             notes.push(Note::SkippedZeroRuntime { count: skipped });
@@ -622,9 +699,11 @@ impl<'a> Picker<'a> {
             return None;
         }
         Some(match lane.mode {
-            Mode::Sequential => Self::sequential(unique, resume, fixed, notes),
-            Mode::Shuffle => Self::shuffle(unique, channel, resume),
-            Mode::Weighted => Self::weighted(unique, lane.weights, channel, notes),
+            Mode::Shuffle => Self::Shuffle {
+                pool: Cooldown::new(unique, resume),
+                channel,
+            },
+            _ => Self::sequential(unique, resume, fixed, notes),
         })
     }
 
@@ -661,57 +740,43 @@ impl<'a> Picker<'a> {
         }
     }
 
-    fn shuffle(items: Vec<&'a MediaItem>, channel: u32, resume: &Resume) -> Self {
-        let playable: Vec<&MediaItem> = items.into_iter().filter(|i| i.runtime_ms > 0).collect();
-        let position: HashMap<&str, usize> = playable
-            .iter()
-            .enumerate()
-            .map(|(i, item)| (item.id.as_str(), i))
-            .collect();
-        // An id that is no longer in the pool is ignored.
-        let played = resume
-            .recent
-            .iter()
-            .rev()
-            .filter_map(|id| position.get(id.as_str()).copied())
-            .collect();
-        Self::Shuffle {
-            cooldown: cooldown(playable.len()),
-            channel,
-            playable,
-            position,
-            played,
-        }
-    }
-
-    /// Notes each weight whose title matches no playable item.
+    /// Each source with something playable gets its own shuffle over its own
+    /// pool; the others are noted and left out of the draw. `None` when none
+    /// is playable.
     fn weighted(
-        items: Vec<&'a MediaItem>,
-        weights: &Weights,
+        lane: &Lane<'a>,
         channel: u32,
+        resume: &Resume,
         notes: &mut Vec<Note>,
-    ) -> Self {
-        let playable: Vec<&MediaItem> = items.into_iter().filter(|i| i.runtime_ms > 0).collect();
-        for title in weights.keys() {
-            if !playable.iter().any(|item| &item.title == title) {
-                notes.push(Note::WeightNotInPool {
-                    title: title.clone(),
-                });
-            }
-        }
+    ) -> Option<Self> {
+        let mut pools = Vec::new();
+        let mut cumulative = Vec::new();
         let mut total = 0u64;
-        let cumulative = playable
-            .iter()
-            .map(|item| {
-                total += u64::from(weights.get(&item.title).copied().unwrap_or(1));
-                total
-            })
-            .collect();
-        Self::Weighted {
-            playable,
+        for entry in &lane.sources {
+            let unique = distinct(entry.items.iter());
+            let skipped = unique.iter().filter(|item| item.runtime_ms == 0).count();
+            if skipped > 0 {
+                notes.push(Note::SkippedZeroRuntime { count: skipped });
+            }
+            if skipped == unique.len() {
+                notes.push(Note::SourceNotPlayable {
+                    source: entry.source.clone(),
+                });
+                continue;
+            }
+            total += u64::from(entry.weight.max(1));
+            cumulative.push(total);
+            pools.push(Cooldown::new(unique, resume));
+        }
+        if pools.is_empty() {
+            notes.push(Note::NoPlayableItems);
+            return None;
+        }
+        Some(Self::Weighted {
+            pools,
             cumulative,
             channel,
-        }
+        })
     }
 
     fn next(&mut self, at_ms: i64) -> &'a MediaItem {
@@ -723,37 +788,21 @@ impl<'a> Picker<'a> {
                     return item;
                 }
             },
-            Self::Shuffle {
-                playable,
-                channel,
-                played,
-                cooldown,
-                ..
-            } => {
-                // Walk back to the `cooldown` most recent distinct items. A
-                // program cut into several events appears once in the walk.
-                let mut cooling = HashSet::new();
-                for &i in played.iter().rev() {
-                    if cooling.len() == *cooldown {
-                        break;
-                    }
-                    cooling.insert(i);
-                }
-                let eligible: Vec<usize> = (0..playable.len())
-                    .filter(|i| !cooling.contains(i))
-                    .collect();
+            Self::Shuffle { pool, channel } => {
                 let mut rng = SplitMix64::new(rng::seed(*channel, at_ms));
-                playable[eligible[rng.below(eligible.len())]]
+                pool.pick(&mut rng)
             }
             Self::Weighted {
-                playable,
+                pools,
                 cumulative,
                 channel,
             } => {
-                let total = *cumulative.last().expect("at least one playable item");
+                // One generator for the slot: the first draw picks the
+                // source, the next the item inside it.
+                let total = *cumulative.last().expect("at least one playable source");
                 let mut rng = SplitMix64::new(rng::seed(*channel, at_ms));
                 let draw = rng.below_u64(total);
-                playable[cumulative.partition_point(|&sum| sum <= draw)]
+                pools[cumulative.partition_point(|&sum| sum <= draw)].pick(&mut rng)
             }
         }
     }
@@ -772,14 +821,12 @@ impl<'a> Picker<'a> {
                     *next = (p + 1) % items.len();
                 }
             }
-            Self::Shuffle {
-                position, played, ..
-            } => {
-                if let Some(&i) = position.get(id.as_str()) {
-                    played.push(i);
+            Self::Shuffle { pool, .. } => pool.record(id),
+            Self::Weighted { pools, .. } => {
+                for pool in pools {
+                    pool.record(id);
                 }
             }
-            Self::Weighted { .. } => {}
         }
     }
 }
