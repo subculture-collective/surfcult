@@ -1,8 +1,8 @@
 //! The screen as the tuner sees it.
 //!
 //! [`Player`] is a list of intentions: show static or the stand-by card, play
-//! a local clip, queue a program, seek, stop, and show or clear an overlay.
-//! It says nothing about
+//! or queue a local clip, play or queue a program, seek, stop, show or clear
+//! an overlay, and show or clear the channel banner. It says nothing about
 //! MPV. [`MpvPlayer`] turns these into commands for a real MPV process (see
 //! the [`mpv`] module); [`FakePlayer`] records them so tests can check the
 //! tuner without hardware.
@@ -11,17 +11,23 @@
 //!
 //! The player keeps one item on screen and at most one queued behind it.
 //!
-//! - [`Player::show_static`], [`Player::show_standby`] and
-//!   [`Player::play_clip`] replace what is on screen and drop anything
-//!   queued. Calling `show_static` is how a sequence is cancelled.
-//! - [`Player::queue_program`] appends a program behind the current item. The
-//!   player may open it early, so it starts as soon as the current item ends.
-//!   One MPV process cannot hold a second file paused, so a program is queued
-//!   rather than preloaded (ADR 0001, decision 5).
+//! - [`Player::show_static`], [`Player::show_standby`],
+//!   [`Player::play_clip`] and [`Player::play_program`] replace what is on
+//!   screen and drop anything queued. Calling `show_static` is how a sequence
+//!   is cancelled.
+//! - [`Player::queue_program`] and [`Player::queue_clip`] append an item
+//!   behind the current one. The player may open it early, so it starts as
+//!   soon as the current item ends. One MPV process cannot hold a second file
+//!   paused, so a program is queued rather than preloaded (ADR 0001,
+//!   decision 5).
 //! - [`Player::seek`] moves the item on screen to a position in milliseconds.
 //! - [`Player::show_overlay`] draws a bitmap over whatever is on screen, in one
 //!   of 64 numbered layers, and [`Player::clear_overlay`] removes it. Overlays
 //!   stay up when the item on screen changes.
+//! - [`Player::show_banner`] shows the channel banner, text drawn over the
+//!   picture, and [`Player::clear_banner`] removes it. Unlike an overlay, the
+//!   banner goes when a command replaces what is on screen or stops it;
+//!   queueing an item leaves it up.
 //!
 //! # Events
 //!
@@ -44,6 +50,7 @@ use std::fmt;
 use std::path::Path;
 
 use crate::library::MediaId;
+use crate::overlay::Banner;
 
 pub use fake::{Command, FakePlayer, Issued, VirtualClock};
 pub use filter::{DEFAULT_GLITCH_EVERY, DEFAULT_STANDBY_FILTERS, Filter, standby_filters};
@@ -121,6 +128,13 @@ pub trait Player {
     /// starting `start_ms` into it.
     fn queue_program(&mut self, media: &MediaId, start_ms: u64) -> Result<(), PlayerError>;
 
+    /// Replaces what is on screen with `media` starting `start_ms` into it,
+    /// and drops anything queued.
+    fn play_program(&mut self, media: &MediaId, start_ms: u64) -> Result<(), PlayerError>;
+
+    /// Queues the local clip at `path` behind the current item.
+    fn queue_clip(&mut self, path: &Path) -> Result<(), PlayerError>;
+
     /// Moves the item on screen to `position_ms` into the media.
     fn seek(&mut self, position_ms: u64) -> Result<(), PlayerError>;
 
@@ -134,6 +148,14 @@ pub trait Player {
     /// Removes the overlay in layer `id`. Clearing an empty layer is not an
     /// error.
     fn clear_overlay(&mut self, id: u8) -> Result<(), PlayerError>;
+
+    /// Shows `banner` over the picture, replacing a banner already shown.
+    /// Any command that replaces what is on screen or stops it removes the
+    /// banner; queueing does not.
+    fn show_banner(&mut self, banner: &Banner) -> Result<(), PlayerError>;
+
+    /// Removes the banner. Clearing when none shows is not an error.
+    fn clear_banner(&mut self) -> Result<(), PlayerError>;
 
     /// The next thing the player reports, oldest first, or `None`.
     fn poll_event(&mut self) -> Option<PlayerEvent>;

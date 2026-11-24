@@ -2,6 +2,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use surfcult::config::Config;
+use surfcult::run::{app, now_lines};
 use surfcult::server::{self, ServerSettings};
 use surfcult::store::Store;
 
@@ -15,9 +16,11 @@ fn main() -> ExitCode {
     {
         ["check-config", file] => check_config(Path::new(file)),
         ["serve", config, db] => serve(Path::new(config), Path::new(db)),
+        ["run", config, db] => run(Path::new(config), Path::new(db)),
+        ["now", config, db] => now(Path::new(config), Path::new(db)),
         _ => {
             eprintln!(
-                "usage: surfcult check-config <channels.toml>\n       surfcult serve <channels.toml> <db>"
+                "usage: surfcult check-config <channels.toml>\n       surfcult serve <channels.toml> <db>\n       surfcult run <channels.toml> <db>\n       surfcult now <channels.toml> <db>"
             );
             ExitCode::from(2)
         }
@@ -78,6 +81,40 @@ fn serve(config_path: &Path, db_path: &Path) -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("surfcult serve: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Runs the TV until a quit key or a signal. See `docs/reference/run.md`.
+fn run(config_path: &Path, db_path: &Path) -> ExitCode {
+    match app::run(config_path, db_path) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("surfcult run: {err}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Prints what each channel is showing now, from the store, read-only.
+fn now(config_path: &Path, db_path: &Path) -> ExitCode {
+    let config = match Config::load(config_path) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("{}: invalid\n{err}", config_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    match Store::open_read_only(db_path) {
+        Ok(store) => {
+            for line in now_lines(&config, &store, app::now_ms()) {
+                println!("{line}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(err) => {
+            eprintln!("surfcult now: {}: {err}", db_path.display());
             ExitCode::FAILURE
         }
     }

@@ -209,6 +209,18 @@ pub enum Reason {
     Player(String),
 }
 
+impl Reason {
+    /// Whether a sequence that ends for this reason shows the stand-by card:
+    /// the schedule has nothing to play, or the item cannot be looked up.
+    /// Other failures leave static up.
+    pub fn shows_standby(&self) -> bool {
+        matches!(
+            self,
+            Self::NoEvents | Self::Gap { .. } | Self::NoProgramSoon { .. } | Self::Media(_)
+        )
+    }
+}
+
 impl fmt::Display for Reason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -329,7 +341,7 @@ impl<P: Player> Tuner<P> {
         {
             self.state = match self.start_clip(channel, now_ms, store, media) {
                 Ok(()) => State::ClipPlaying { channel },
-                Err(reason) if shows_standby(&reason) => match self.player.show_standby() {
+                Err(reason) if reason.shows_standby() => match self.player.show_standby() {
                     Ok(()) => State::Failed { channel, reason },
                     Err(e) => failed(channel, e),
                 },
@@ -481,16 +493,6 @@ impl<P: Player> Tuner<P> {
             needs_transcode: needs_transcode(&item),
         })
     }
-}
-
-/// Whether a sequence that ends for `reason` shows the stand-by card: the
-/// schedule has nothing to play, or the item cannot be looked up. Other
-/// failures leave static up.
-fn shows_standby(reason: &Reason) -> bool {
-    matches!(
-        reason,
-        Reason::NoEvents | Reason::Gap { .. } | Reason::NoProgramSoon { .. } | Reason::Media(_)
-    )
 }
 
 fn failed(channel: u32, error: PlayerError) -> State {

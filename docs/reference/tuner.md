@@ -82,6 +82,6 @@ When the player reports `Restarted` (MPV died and the watchdog started a new one
 ## What it does not do
 
 - It does not wait for a slow program. A slow transcode keeps the state at `AwaitingProgram`; there is no timeout. Giving up and showing a slate is failure handling (issue #34).
-- It does not leave the stand-by card when the schedule later has something to play. That needs the player's loop (issue #23) or a new `tune`.
+- It does not leave the stand-by card when the schedule later has something to play. The run loop's playback driver does ([run.md](run.md#the-playback-driver)).
 - It does not build playback URLs or ask Jellyfin to transcode (issue #21).
-- It does not follow the schedule after the program has started. Moving to the next event is the player's loop (issue #23).
+- It does not follow the schedule after the program has started. The playback driver moves to the next event ([run.md](run.md#the-playback-driver)).

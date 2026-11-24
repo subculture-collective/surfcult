@@ -281,6 +281,113 @@ fn commands_become_mpv_commands() {
     );
 }
 
+#[test]
+fn a_program_can_replace_the_screen_and_a_clip_can_be_queued() {
+    let fake = FakeMpv::new();
+    let mut session = fake.connect();
+    session.play_program(&keyed_stream(), 61_000).unwrap();
+    session.queue_clip(Path::new("/clips/ad.mp4")).unwrap();
+    assert_eq!(
+        fake.commands(),
+        [
+            json!([
+                "set_property",
+                "http-header-fields",
+                ["Authorization: MediaBrowser Token=\"KEY\""]
+            ]),
+            json!(["loadfile", "http://jellyfin/Videos/abc/stream?static=true", "replace", -1, {
+                "start": "61.000",
+                "sid": "no"
+            }]),
+            json!(["loadfile", "/clips/ad.mp4", "append", -1, {}]),
+        ]
+    );
+    // The program reports its start; the queued clip reports its end.
+    fake.event(start_file(1));
+    *fake.time_pos.lock().unwrap() = json!(61.2);
+    fake.event(restart());
+    fake.event(end_file(1, "eof"));
+    fake.event(start_file(2));
+    fake.event(end_file(2, "eof"));
+    assert_eq!(
+        drain(&mut session),
+        [
+            PlayerEvent::ProgramStarted {
+                position_ms: 61_200
+            },
+            PlayerEvent::ClipEnded
+        ]
+    );
+}
+
+fn banner_shown(command: &Value) -> bool {
+    command["name"] == json!("osd-overlay") && command["format"] == json!("ass-events")
+}
+
+fn banner_removed(command: &Value) -> bool {
+    command["name"] == json!("osd-overlay") && command["format"] == json!("none")
+}
+
+#[test]
+fn the_banner_is_an_osd_overlay_of_ass_events() {
+    let fake = FakeMpv::new();
+    let mut session = fake.connect();
+    session.show_banner("{\\an7}3  CARTOONS").unwrap();
+    session.hide_banner().unwrap();
+    // Nothing is up any more, so a second clear sends nothing.
+    session.hide_banner().unwrap();
+    assert_eq!(
+        fake.commands(),
+        [
+            json!({ "name": "osd-overlay", "id": 1, "format": "ass-events",
+                    "data": "{\\an7}3  CARTOONS", "res_x": 1920, "res_y": 1080, "z": 10 }),
+            json!({ "name": "osd-overlay", "id": 1, "format": "none", "data": "" }),
+        ]
+    );
+}
+
+#[test]
+fn a_command_that_changes_the_screen_removes_the_banner_and_queueing_does_not() {
+    let fake = FakeMpv::new();
+    let mut session = fake.connect();
+    type Change = fn(&mut Session);
+    let changes: [(&str, Change); 5] = [
+        ("show_static", |s| {
+            s.show_static("av://lavfi:noise").unwrap()
+        }),
+        ("show_standby", |s| {
+            s.show_standby("av://lavfi:bars", "/run/standby.ass")
+                .unwrap()
+        }),
+        ("play_clip", |s| {
+            s.play_clip(Path::new("/clips/a.mp4")).unwrap()
+        }),
+        ("play_program", |s| {
+            s.play_program(&Stream::new("http://jellyfin/x"), 0)
+                .unwrap()
+        }),
+        ("stop", |s| s.stop().unwrap()),
+    ];
+    for (name, change) in changes {
+        session.show_banner("x").unwrap();
+        fake.commands();
+        change(&mut session);
+        let commands = fake.commands();
+        assert!(banner_removed(&commands[0]), "{name}: {commands:?}");
+        // Once removed, it is not removed again.
+        change(&mut session);
+        assert!(!fake.commands().iter().any(banner_removed), "{name}");
+    }
+    session.show_banner("x").unwrap();
+    session.queue_clip(Path::new("/clips/a.mp4")).unwrap();
+    session
+        .queue_program(&Stream::new("http://jellyfin/x"), 0)
+        .unwrap();
+    let commands = fake.commands();
+    assert!(banner_shown(&commands[0]));
+    assert!(!commands.iter().any(banner_removed));
+}
+
 /// The `loadfile` of the stand-by card `source` with its subtitle file.
 fn card_loadfile(source: &str, subtitles: &str) -> Value {
     json!(["loadfile", source, "replace", -1, {
@@ -1090,6 +1197,45 @@ mod real {
         // Static never ends and the program was replaced: neither reports
         // anything.
         assert_eq!(wait_for(&mut player, 2, |_| false), []);
+        player.stop().unwrap();
+    }
+
+    #[test]
+    fn a_program_replaces_the_screen_a_clip_queues_behind_it_and_the_banner_shows() {
+        if !tools() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let clip = make_clip(dir.path(), "clip.mp4", 1);
+        let program = make_clip(dir.path(), "program.mp4", 3);
+        let url = program.to_str().unwrap().to_owned();
+        let resolver = move |_: &MediaId, _: u64| Ok(Stream::new(url.clone()));
+        let mut player = MpvPlayer::start(headless(&dir.path().join("run")), resolver).unwrap();
+
+        player.show_standby().unwrap();
+        player.play_program(&MediaId::new("p"), 1_000).unwrap();
+        player.queue_clip(&clip).unwrap();
+        let banner = Banner {
+            number: 3,
+            name: "CAR{TOONS}".into(),
+            title: "The Show".into(),
+            times: "19:00–19:30".into(),
+        };
+        player.show_banner(&banner).unwrap();
+        let events = wait_for(&mut player, 15, |e| *e == PlayerEvent::ClipEnded);
+        let [
+            PlayerEvent::ProgramStarted { position_ms },
+            PlayerEvent::ClipEnded,
+        ] = events[..]
+        else {
+            panic!("unexpected events {events:?}");
+        };
+        assert!((900..=1_400).contains(&position_ms), "{position_ms}");
+        player.clear_banner().unwrap();
+        player.show_banner(&banner).unwrap();
+        player.play_clip(&clip).unwrap();
+        // The clip removed the banner, so clearing it sends nothing.
+        player.clear_banner().unwrap();
         player.stop().unwrap();
     }
 

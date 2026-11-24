@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::Stream;
+use super::banner::{BANNER_OSD_ID, RES};
 use crate::player::PlayerEvent;
 
 /// Why a command did not work.
@@ -74,6 +75,8 @@ pub(super) struct Session {
     standby_shaders: Vec<String>,
     /// The `glsl-shaders` list MPV has now, as far as this session knows.
     shaders: Vec<String>,
+    /// Whether the channel banner is up.
+    banner: bool,
 }
 
 impl Session {
@@ -95,6 +98,7 @@ impl Session {
             global_shaders: Vec::new(),
             standby_shaders: Vec::new(),
             shaders: Vec::new(),
+            banner: false,
         })
     }
 
@@ -135,6 +139,7 @@ impl Session {
     /// whatever replaces the card shows no subtitles. On an error the card
     /// may be partly set up; the caller replaces it.
     pub(super) fn show_standby(&mut self, source: &str, subtitles: &str) -> Result<(), IpcError> {
+        self.hide_banner()?;
         self.leave_standby()?;
         if self.shaders != self.standby_shaders {
             self.set_shaders(self.standby_shaders.clone())?;
@@ -194,16 +199,22 @@ impl Session {
 
     /// Plays the local file at `path`, replacing the playlist.
     pub(super) fn play_clip(&mut self, path: &Path) -> Result<(), IpcError> {
-        let absolute = std::path::absolute(path)
-            .map_err(|e| IpcError::Rejected(format!("bad clip path: {e}")))?;
-        let path = absolute
-            .to_str()
-            .ok_or_else(|| IpcError::Rejected("the clip path is not UTF-8".into()))?;
-        self.replace(path, json!({}), Entry::Clip)
+        let path = clip_path(path)?;
+        self.replace(&path, json!({}), Entry::Clip)
     }
 
-    /// Leaves the stand-by card, then loads `url` in place of the playlist.
+    /// Queues the local file at `path` behind the current entry.
+    pub(super) fn queue_clip(&mut self, path: &Path) -> Result<(), IpcError> {
+        let path = clip_path(path)?;
+        let id = self.loadfile(&path, "append", json!({}))?;
+        self.entries.insert(id, Entry::Clip);
+        Ok(())
+    }
+
+    /// Removes the banner and leaves the stand-by card, then loads `url` in
+    /// place of the playlist.
     fn replace(&mut self, url: &str, options: Value, entry: Entry) -> Result<(), IpcError> {
+        self.hide_banner()?;
         self.leave_standby()?;
         let id = self.loadfile(url, "replace", options)?;
         self.entries.clear();
@@ -236,21 +247,55 @@ impl Session {
         let fields = header_fields(&stream.headers).map_err(IpcError::Rejected)?;
         self.leave_standby()?;
         self.command(json!(["set_property", "http-header-fields", fields]))?;
-        let start = start_ms.saturating_sub(stream.stream_offset_ms);
-        // `sid` off: a program never shows the subtitle track MPV would pick
-        // from the file (the device profile offers every subtitle format only
-        // so that Jellyfin does not transcode for them).
-        let options = json!({ "start": seconds(start), "sid": "no" });
+        let (options, entry) = program_entry(stream, start_ms);
         let id = self.loadfile(&stream.url, "append", options)?;
-        self.entries.insert(
-            id,
-            Entry::Program {
-                stream_offset_ms: stream.stream_offset_ms,
-                start_ms,
-                started: false,
-            },
-        );
+        self.entries.insert(id, entry);
         Ok(())
+    }
+
+    /// Plays `stream` from media position `start_ms` in place of the
+    /// playlist, with its headers set as [`Session::queue_program`] sets them.
+    pub(super) fn play_program(&mut self, stream: &Stream, start_ms: u64) -> Result<(), IpcError> {
+        let fields = header_fields(&stream.headers).map_err(IpcError::Rejected)?;
+        self.hide_banner()?;
+        self.leave_standby()?;
+        self.command(json!(["set_property", "http-header-fields", fields]))?;
+        let (options, entry) = program_entry(stream, start_ms);
+        let id = self.loadfile(&stream.url, "replace", options)?;
+        self.entries.clear();
+        self.entries.insert(id, entry);
+        Ok(())
+    }
+
+    /// Shows the ASS events `ass` as the banner, an `osd-overlay` on a
+    /// 1920x1080 layout that MPV scales to the screen.
+    pub(super) fn show_banner(&mut self, ass: &str) -> Result<(), IpcError> {
+        self.command(json!({
+            "name": "osd-overlay",
+            "id": BANNER_OSD_ID,
+            "format": "ass-events",
+            "data": ass,
+            "res_x": RES.0,
+            "res_y": RES.1,
+            "z": 10,
+        }))?;
+        self.banner = true;
+        Ok(())
+    }
+
+    /// Removes the banner, if it is up.
+    pub(super) fn hide_banner(&mut self) -> Result<(), IpcError> {
+        if !self.banner {
+            return Ok(());
+        }
+        self.banner = false;
+        self.command(json!({
+            "name": "osd-overlay",
+            "id": BANNER_OSD_ID,
+            "format": "none",
+            "data": "",
+        }))
+        .map(drop)
     }
 
     /// Seeks the entry on screen to media position `position_ms`.
@@ -267,6 +312,7 @@ impl Session {
 
     /// Stops playback and empties the playlist.
     pub(super) fn stop(&mut self) -> Result<(), IpcError> {
+        self.hide_banner()?;
         self.leave_standby()?;
         self.command(json!(["stop"]))?;
         self.entries.clear();
@@ -477,6 +523,32 @@ impl Session {
         }
         Ok(())
     }
+}
+
+/// The `loadfile` options and the playlist entry of a program that plays
+/// `stream` from media position `start_ms`.
+fn program_entry(stream: &Stream, start_ms: u64) -> (Value, Entry) {
+    let start = start_ms.saturating_sub(stream.stream_offset_ms);
+    // `sid` off: a program never shows the subtitle track MPV would pick
+    // from the file (the device profile offers every subtitle format only
+    // so that Jellyfin does not transcode for them).
+    let options = json!({ "start": seconds(start), "sid": "no" });
+    let entry = Entry::Program {
+        stream_offset_ms: stream.stream_offset_ms,
+        start_ms,
+        started: false,
+    };
+    (options, entry)
+}
+
+/// `path` made absolute, as the text MPV's `loadfile` takes.
+fn clip_path(path: &Path) -> Result<String, IpcError> {
+    let absolute =
+        std::path::absolute(path).map_err(|e| IpcError::Rejected(format!("bad clip path: {e}")))?;
+    absolute
+        .into_os_string()
+        .into_string()
+        .map_err(|_| IpcError::Rejected("the clip path is not UTF-8".into()))
 }
 
 /// Milliseconds as the seconds string MPV's `start` option takes.

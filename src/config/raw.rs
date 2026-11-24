@@ -12,8 +12,8 @@ use serde::{Deserialize, Deserializer};
 
 use super::duration::{parse_duration, parse_minute_of_day};
 use super::{
-    Block, Breaks, Channel, Config, Day, Display, Filter, InterstitialPool, Lineup, Mode, Plan,
-    Problem, Rotation, SignOff, Source, Tz, WeightedSource,
+    Block, Breaks, Channel, Config, DEFAULT_TUNE_IN_POOL, Day, Display, Filter, InterstitialPool,
+    Lineup, Mode, Plan, Problem, Rotation, SignOff, Source, Tz, WeightedSource,
 };
 
 #[derive(Deserialize)]
@@ -25,6 +25,7 @@ pub struct RawConfig {
     #[serde(default)]
     interstitial_pool: Vec<RawPool>,
     display: Option<RawDisplay>,
+    tune_in_pool: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -276,6 +277,19 @@ impl RawConfig {
             }
         }
 
+        if let Some(name) = &self.tune_in_pool
+            && !pool_index.contains_key(name.as_str())
+        {
+            problems.add(
+                "tune_in_pool",
+                format!("no interstitial_pool named {name:?}"),
+            );
+        }
+        let tune_in_pool = self
+            .tune_in_pool
+            .clone()
+            .unwrap_or_else(|| DEFAULT_TUNE_IN_POOL.to_string());
+
         let display = self
             .display
             .as_ref()
@@ -287,6 +301,7 @@ impl RawConfig {
                 channels,
                 pools,
                 display,
+                tune_in_pool,
             }),
             _ => Err(problems.0),
         }
