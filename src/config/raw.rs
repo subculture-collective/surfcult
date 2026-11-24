@@ -11,8 +11,8 @@ use serde::Deserialize;
 
 use super::duration::{parse_duration, parse_minute_of_day};
 use super::{
-    Block, Breaks, Channel, Config, Day, InterstitialPool, Lineup, Mode, Plan, Problem, Source, Tz,
-    Weights,
+    Block, Breaks, Channel, Config, Day, InterstitialPool, Lineup, Mode, Plan, Problem, Rotation,
+    Source, Tz, Weights,
 };
 
 #[derive(Deserialize)]
@@ -48,6 +48,7 @@ struct RawBreaks {
     every: String,
     length: String,
     pool: String,
+    pad: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +78,8 @@ struct RawLineup {
 struct RawPool {
     name: String,
     path: PathBuf,
+    rotation: Option<String>,
+    repeat_after: Option<String>,
 }
 
 #[derive(Default)]
@@ -112,6 +115,22 @@ impl RawConfig {
         let mut pools = Vec::new();
         let mut pool_index: HashMap<&str, usize> = HashMap::new();
         for (i, pool) in self.interstitial_pool.iter().enumerate() {
+            let at = |key: &str| format!("interstitial_pool[{i}].{key}");
+            let rotation = match pool.rotation.as_deref() {
+                None | Some("order") => Rotation::Order,
+                Some("shuffle") => Rotation::Shuffle,
+                Some(other) => {
+                    problems.add(
+                        at("rotation"),
+                        format!("unknown rotation {other:?}; use order or shuffle"),
+                    );
+                    Rotation::Order
+                }
+            };
+            let repeat_after = pool
+                .repeat_after
+                .as_deref()
+                .and_then(|text| positive_duration(text, &at("repeat_after"), &mut problems));
             if pool.name.trim().is_empty() {
                 problems.add(format!("interstitial_pool[{i}].name"), "must not be empty");
             }
@@ -127,6 +146,8 @@ impl RawConfig {
             pools.push(InterstitialPool {
                 name: pool.name.clone(),
                 path: pool.path.clone(),
+                rotation,
+                repeat_after,
             });
         }
 
@@ -139,8 +160,35 @@ impl RawConfig {
                     format!("{} is already used by channel[{first}]", raw.number),
                 );
             }
-            if let Some(channel) = raw.check(i, &pool_index, &mut problems) {
+            if let Some(channel) = raw.check(i, &pool_index, &pools, &mut problems) {
                 channels.push(channel);
+            }
+        }
+
+        // Rotation and repeat limits only drive the filling of breaks, so they
+        // are refused on a pool no channel uses as its break pool rather than
+        // silently ignored.
+        for (i, pool) in self.interstitial_pool.iter().enumerate() {
+            let is_break_pool = self
+                .channel
+                .iter()
+                .any(|raw| raw.breaks.as_ref().is_some_and(|b| b.pool == pool.name));
+            if is_break_pool {
+                continue;
+            }
+            for (key, set) in [
+                ("rotation", pool.rotation.is_some()),
+                ("repeat_after", pool.repeat_after.is_some()),
+            ] {
+                if set {
+                    problems.add(
+                        format!("interstitial_pool[{i}].{key}"),
+                        format!(
+                            "applies only to a break pool, and no channel uses {:?} as breaks.pool",
+                            pool.name
+                        ),
+                    );
+                }
             }
         }
 
@@ -160,6 +208,7 @@ impl RawChannel {
         &self,
         i: usize,
         pools: &HashMap<&str, usize>,
+        configured: &[InterstitialPool],
         problems: &mut Problems,
     ) -> Option<Channel> {
         let at = |key: &str| format!("channel[{i}].{key}");
@@ -185,6 +234,16 @@ impl RawChannel {
                     format!("no interstitial_pool named {:?}", b.pool),
                 );
             }
+            if let Some(pad) = &b.pad
+                && !pools.contains_key(pad.as_str())
+            {
+                problems.add(
+                    at("breaks.pad"),
+                    format!("no interstitial_pool named {pad:?}"),
+                );
+            }
+            // The break pool's own settings. A missing pool is reported above.
+            let pool = pools.get(b.pool.as_str()).map(|&j| &configured[j]);
             match (every, length) {
                 (Some(every), Some(length)) if length >= every => {
                     problems.add(at("breaks.length"), "must be shorter than breaks.every");
@@ -194,6 +253,9 @@ impl RawChannel {
                     every,
                     length,
                     pool: b.pool.clone(),
+                    rotation: pool.map_or(Rotation::Order, |pool| pool.rotation),
+                    repeat_after: pool.and_then(|pool| pool.repeat_after),
+                    pad: b.pad.clone(),
                 }),
                 _ => None,
             }

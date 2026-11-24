@@ -13,6 +13,9 @@ source = { jellyfin_collection = "Cartoons" }
 mode = "shuffle"
 grid = "30m"                                          # programs start on the half hour; gaps are filled
 breaks = { every = "11m", length = "2m", pool = "ads-90s" }
+# Add pad = "<pool>" to pad a break the clips leave short from that pool of
+# idents and slates before the filler pool:
+# breaks = { every = "11m", length = "2m", pool = "ads-90s", pad = "idents" }
 filler = "filler"                                     # pool used to fill grid gaps
 
 # Sources: jellyfin_library, jellyfin_collection, jellyfin_tag,
@@ -59,6 +62,11 @@ path = "/var/lib/surfcult/clips/tune-in"
 [[interstitial_pool]]
 name = "ads-90s"
 path = "/var/lib/surfcult/clips/ads-90s"
+# When the pool fills breaks:
+# rotation = "order"     # order: pool order, continuing from break to break (the
+#                        # default); shuffle: a new random order for each break
+# repeat_after = "2h"    # on one channel, a clip does not air again until 2h after
+#                        # its last airing started; without it, only once per break
 
 [[interstitial_pool]]
 name = "filler"

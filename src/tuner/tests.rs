@@ -318,6 +318,8 @@ fn clips_come_from_a_scanned_pool() {
         &[InterstitialPool {
             name: "tune-in".into(),
             path: dir.path().to_path_buf(),
+            rotation: Default::default(),
+            repeat_after: None,
         }],
         prober,
     );

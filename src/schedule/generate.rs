@@ -61,6 +61,10 @@ pub(crate) struct Resume {
     /// this run. The break pool's rotation continues after it unless the next
     /// break starts more than [`ROTATION_MEMORY_MS`](super::ROTATION_MEMORY_MS) later.
     pub last_break: Option<(i64, MediaId)>,
+    /// The start times and media ids of the break clips scheduled before
+    /// this run, newest first, back to [`BreakPlan::memory_ms`]: what the
+    /// break pool's `repeat_after` counts from.
+    pub aired: Vec<(i64, MediaId)>,
 }
 
 impl Resume {
@@ -145,7 +149,12 @@ fn run(
     let mut rotation = layout.breaks.as_ref().map(|plan| {
         (
             plan.every_ms,
-            Rotation::new(plan, resume.last_break.as_ref()),
+            Rotation::new(
+                plan,
+                layout.channel,
+                resume.last_break.as_ref(),
+                &resume.aired,
+            ),
         )
     });
     let mut last_break = resume.last_break.clone();
@@ -238,9 +247,10 @@ fn run(
                 EventKind::Program,
             )?;
             // Break clips cut off by the end of a block never play, so the
-            // rotation continues after the last one that does.
+            // rotation continues after the last one that does and the repeat
+            // limit forgets them.
             if dropped_break && let Some((_, rotation)) = rotation.as_mut() {
-                rotation.continue_after(last_break.as_ref());
+                rotation.continue_after(last_break.as_ref(), cut_at);
             }
             for picker in pickers.iter_mut().flatten() {
                 picker.record(&item.id);

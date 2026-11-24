@@ -481,38 +481,38 @@ fn reading_the_last_program_uses_the_index() {
 }
 
 #[test]
-fn last_break_before_is_the_newest_break_that_starts_before_the_bound() {
+fn breaks_between_are_the_breaks_in_the_window_newest_first() {
     let mut store = Store::open_in_memory().unwrap();
     store.write_events(3, &schedule()).unwrap();
     store
         .write_events(3, &[event(40_000, 41_000, "ad2", EventKind::Break)])
         .unwrap();
+    let ad = (10_000, MediaId::new("ad"));
+    let ad2 = (40_000, MediaId::new("ad2"));
 
     assert_eq!(
-        store.last_break_before(3, 0, i64::MAX).unwrap(),
-        Some((40_000, MediaId::new("ad2")))
+        store.breaks_between(3, 0, i64::MAX).unwrap(),
+        [ad2.clone(), ad.clone()]
     );
     // The upper bound is exclusive; programs and filler are skipped.
     assert_eq!(
-        store.last_break_before(3, 0, 40_000).unwrap(),
-        Some((10_000, MediaId::new("ad")))
+        store.breaks_between(3, 0, 40_000).unwrap(),
+        std::slice::from_ref(&ad)
     );
-    assert_eq!(store.last_break_before(3, 0, 10_000).unwrap(), None);
-    assert_eq!(store.last_break_before(4, 0, i64::MAX).unwrap(), None);
+    assert!(store.breaks_between(3, 0, 10_000).unwrap().is_empty());
+    assert!(store.breaks_between(4, 0, i64::MAX).unwrap().is_empty());
     // The lower bound is inclusive, and the walk stops there.
-    assert_eq!(
-        store.last_break_before(3, 10_000, 40_000).unwrap(),
-        Some((10_000, MediaId::new("ad")))
-    );
-    assert_eq!(store.last_break_before(3, 10_001, 40_000).unwrap(), None);
+    assert_eq!(store.breaks_between(3, 10_000, 40_000).unwrap(), [ad]);
+    assert!(store.breaks_between(3, 10_001, 40_000).unwrap().is_empty());
+    assert_eq!(store.breaks_between(3, 10_001, i64::MAX).unwrap(), [ad2]);
 }
 
 #[test]
-fn reading_the_last_break_uses_the_index() {
+fn reading_recent_breaks_uses_the_index() {
     let store = Store::open_in_memory().unwrap();
     let plan: Vec<String> = store
         .conn
-        .prepare(&format!("EXPLAIN QUERY PLAN {LAST_BREAK_BEFORE}"))
+        .prepare(&format!("EXPLAIN QUERY PLAN {BREAKS_BETWEEN}"))
         .unwrap()
         .query_map(params![3, 0, 10], |row| row.get::<_, String>(3))
         .unwrap()
