@@ -39,6 +39,9 @@ pub const URL_ENV: &str = "SURFCULT_JELLYFIN_URL";
 pub const SYNC_ENV: &str = "SURFCULT_SYNC_MINUTES";
 /// Seconds the banner stays up.
 pub const BANNER_ENV: &str = "SURFCULT_BANNER_SECONDS";
+/// The environment variable that names MPV's audio device, such as
+/// `alsa/plughw:CARD=vc4hdmi1,DEV=0`. The default is the first HDMI port.
+pub const AUDIO_DEVICE_ENV: &str = "SURFCULT_AUDIO_DEVICE";
 
 const DEFAULT_SYNC_MINUTES: u64 = 15;
 
@@ -64,7 +67,15 @@ pub fn run(config_path: &Path, db_path: &Path) -> Result<(), String> {
     let worker = SyncWorker::spawn(JellyfinClient::new(jellyfin.clone()), sync_every)
         .map_err(|e| format!("cannot start the sync thread: {e}"))?;
     let (resolver, transcodes) = jellyfin_streams(&jellyfin);
-    let mpv = MpvConfig::new(runtime_dir()?).with_display(&config.display);
+    let mut mpv = MpvConfig::new(runtime_dir()?).with_display(&config.display);
+    if let Some(device) = std::env::var(AUDIO_DEVICE_ENV)
+        .ok()
+        .filter(|device| !device.trim().is_empty())
+    {
+        // A later flag wins over the default in `PI_OUTPUT_ARGS`.
+        mpv.output_args
+            .push(format!("--audio-device={}", device.trim()));
+    }
     let player = MpvPlayer::start(mpv, resolver).map_err(|e| e.to_string())?;
 
     let stop = Arc::new(AtomicBool::new(false));

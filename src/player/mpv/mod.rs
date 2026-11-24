@@ -113,7 +113,13 @@ use ipc::{IpcError, Session};
 /// stand-by card's frames even for an empty shader, and 8 bits made that 0%
 /// (Pi check of 2026-11-24, `docs/research/2026-11-24-pi-hardware-checks.md`).
 /// The pictures are SDR, so nothing is lost.
-pub const PI_OUTPUT_ARGS: [&str; 7] = [
+///
+/// Sound goes to the first HDMI port, `vc4hdmi0`, through ALSA. Without it MPV
+/// takes ALSA's default, which on the Pi is the analog headphone jack, so the
+/// TV is silent (found on the first run of `surfcult run`, 2026-11-24). A Pi
+/// whose TV is on the other port sets `SURFCULT_AUDIO_DEVICE`
+/// (`alsa/plughw:CARD=vc4hdmi1,DEV=0`).
+pub const PI_OUTPUT_ARGS: [&str; 9] = [
     "--profile=fast",
     "--vo=gpu",
     "--gpu-context=drm",
@@ -121,6 +127,8 @@ pub const PI_OUTPUT_ARGS: [&str; 7] = [
     "--hwdec=drm,v4l2m2m",
     "--fbo-format=rgba8",
     "--force-window=yes",
+    "--ao=alsa",
+    "--audio-device=alsa/plughw:CARD=vc4hdmi0,DEV=0",
 ];
 
 /// TV static: grey noise generated live by FFmpeg's `lavfi` at a low

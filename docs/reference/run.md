@@ -30,6 +30,7 @@ A program line has the title (`Series: Episode` for an episode), the local start
 | `SURFCULT_JELLYFIN_USER_ID` | The Jellyfin user playback is asked for as. Without it, the first enabled user. See [Jellyfin source](jellyfin.md#playback-urls). |
 | `SURFCULT_SYNC_MINUTES` | Minutes between two library syncs. Default 15. |
 | `SURFCULT_BANNER_SECONDS` | Seconds the banner stays up. Default 5. |
+| `SURFCULT_AUDIO_DEVICE` | MPV's audio device. Default `alsa/plughw:CARD=vc4hdmi0,DEV=0`, the first HDMI port. List the devices with `mpv --audio-device=help`; the second port is `alsa/plughw:CARD=vc4hdmi1,DEV=0`. |
 | `SURFCULT_CLOCK_TRUSTED` | `1` trusts the clock and `0` distrusts it, overriding systemd. For testing. |
 | `XDG_RUNTIME_DIR` | MPV's runtime directory is `$XDG_RUNTIME_DIR/surfcult`, or `/run/user/<uid>/surfcult` without it. |
 

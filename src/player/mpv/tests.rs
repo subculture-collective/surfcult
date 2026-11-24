@@ -763,6 +763,10 @@ fn the_arguments_hold_the_socket_and_outputs_but_no_header() {
     assert!(args.contains(&"--input-ipc-server=/run/user/1000/surfcult/mpv.sock".into()));
     assert!(args.contains(&"--hwdec=drm,v4l2m2m".into()));
     assert!(args.contains(&"--fbo-format=rgba8".into()), "8-bit frames");
+    assert!(
+        args.contains(&"--audio-device=alsa/plughw:CARD=vc4hdmi0,DEV=0".into()),
+        "sound on HDMI, not the headphone jack"
+    );
     assert!(args.contains(&"--profile=fast".into()));
     assert!(args.contains(&"--input-terminal=no".into()));
     assert!(args.contains(&"--idle=yes".into()));
