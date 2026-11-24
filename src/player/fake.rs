@@ -30,6 +30,7 @@ impl VirtualClock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     ShowStatic,
+    ShowStandby,
     PlayClip(PathBuf),
     QueueProgram {
         media_id: MediaId,
@@ -130,6 +131,10 @@ impl Player for FakePlayer {
         self.record(Command::ShowStatic)
     }
 
+    fn show_standby(&mut self) -> Result<(), PlayerError> {
+        self.record(Command::ShowStandby)
+    }
+
     fn play_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
         self.record(Command::PlayClip(path.to_path_buf()))
     }
@@ -177,6 +182,7 @@ mod tests {
         let clock = VirtualClock::new(1_000);
         let mut player = FakePlayer::new(clock.clone());
         player.show_static().unwrap();
+        player.show_standby().unwrap();
         clock.set(1_500);
         player.play_clip(Path::new("/clips/a.mp4")).unwrap();
         player.queue_program(&MediaId::new("m"), 4_000).unwrap();
@@ -193,6 +199,7 @@ mod tests {
         player.clear_overlay(3).unwrap();
         let expected = [
             (1_000, Command::ShowStatic),
+            (1_000, Command::ShowStandby),
             (1_500, Command::PlayClip(PathBuf::from("/clips/a.mp4"))),
             (
                 1_500,

@@ -2490,9 +2490,9 @@ fn a_blocks_regeneration_reaches_dead_air_after_the_freeze_point() {
 }
 
 #[test]
-fn a_regeneration_with_nothing_playable_keeps_the_stored_schedule() {
-    // An empty pool, as after a failed library fetch, would leave the channel
-    // without programs for a week.
+fn a_regeneration_with_nothing_playable_replaces_the_future() {
+    // The source now matches no playable item: the frozen half hour stays and
+    // nothing is scheduled from the boundary on.
     let items = pool(&["a", "b", "c"]);
     let mut store = setup();
     let channel = channel(3, Mode::Sequential);
@@ -2502,12 +2502,22 @@ fn a_regeneration_with_nothing_playable_keeps_the_stored_schedule() {
 
     let result = regenerate_fixed(&mut store, &channel, &[], &[], now);
 
-    let Extended::Generated { written, notes, .. } = result else {
+    let Extended::Generated {
+        from_ms,
+        written,
+        notes,
+        ..
+    } = result
+    else {
         panic!("expected events, got {result:?}");
     };
+    assert!(from_ms >= now + FREEZE_MS);
     assert_eq!(written, 0);
     assert_eq!(notes, [Note::NoPlayableItems]);
-    assert_eq!(all_events(&store), before);
+    let after = all_events(&store);
+    let kept = before.iter().take_while(|e| e.start_ms < from_ms).count();
+    assert!(kept < before.len());
+    assert_eq!(after, before[..kept]);
 }
 
 #[test]

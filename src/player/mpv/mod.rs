@@ -29,11 +29,22 @@
 //! preloaded paused: one MPV process cannot hold a second file paused (ADR
 //! 0001, decision 5).
 //!
+//! # The stand-by card
+//!
+//! [`Player::show_standby`] plays [`MpvConfig::standby_source`], colour bars
+//! generated live by FFmpeg's `lavfi`, and draws a black band with
+//! [`MpvConfig::standby_text`] across the middle as an MPV `osd-overlay` in
+//! ASS. MPV draws the text itself through libass, so the card does not need
+//! an FFmpeg built with `drawtext`. The text is drawn three times for a
+//! chromatic offset: red shifted left, cyan shifted right and white on top.
+//! The overlay is removed before anything else is shown, queued or stopped.
+//!
 //! # Events
 //!
 //! - `end-file` with reason `eof` for a clip becomes
-//!   [`PlayerEvent::ClipEnded`]. Static and programs never produce one, and
-//!   nor does an entry that a later command replaced or stopped.
+//!   [`PlayerEvent::ClipEnded`]. Static, the stand-by card and programs
+//!   never produce one, and nor does an entry that a later command replaced
+//!   or stopped.
 //! - The first `playback-restart` of a program becomes
 //!   [`PlayerEvent::ProgramStarted`], with MPV's `time-pos` plus the stream's
 //!   offset. Later ones come from seeks and are dropped.
@@ -83,10 +94,19 @@ pub const PI_OUTPUT_ARGS: [&str; 6] = [
     "--force-window=yes",
 ];
 
-/// TV static: grey noise drawn by FFmpeg at a low resolution and scaled up by
-/// MPV, so it costs little CPU.
+/// TV static: grey noise generated live by FFmpeg's `lavfi` at a low
+/// resolution and scaled up by MPV, so it costs little CPU. The generator
+/// never ends, so no file loops.
 pub const STATIC_SOURCE: &str =
     "av://lavfi:nullsrc=s=320x180:r=25,geq=lum='random(1)*255':cb=128:cr=128";
+
+/// The stand-by card's picture: SMPTE HD colour bars generated live by
+/// FFmpeg's `lavfi`. The picture never changes, so one frame a second is
+/// enough and keeps MPV almost idle. Silent: the source has no audio.
+pub const STANDBY_SOURCE: &str = "av://lavfi:smptehdbars=s=1920x1080:r=1";
+
+/// The message across the middle of the stand-by card.
+pub const STANDBY_TEXT: &str = "PLEASE STAND BY";
 
 /// The shortest time between two starts of MPV.
 pub const RESTART_DELAY: Duration = Duration::from_secs(1);
@@ -119,8 +139,16 @@ pub struct MpvConfig {
     pub runtime_dir: PathBuf,
     /// Video and audio output flags, after the fixed ones.
     pub output_args: Vec<String>,
-    /// What [`Player::show_static`] plays, in a loop.
+    /// What [`Player::show_static`] plays. It is loaded with
+    /// `loop-file=inf`, which matters only for a source that ends; the
+    /// default is a generator that never does.
     pub static_source: String,
+    /// What [`Player::show_standby`] plays under its message, loaded like
+    /// `static_source`.
+    pub standby_source: String,
+    /// The message [`Player::show_standby`] draws across the middle of the
+    /// screen.
+    pub standby_text: String,
     /// How long a command may wait for MPV's answer.
     pub command_timeout: Duration,
     /// How long a new MPV may take to open its socket.
@@ -128,14 +156,16 @@ pub struct MpvConfig {
 }
 
 impl MpvConfig {
-    /// The Pi setup: `mpv` from `PATH`, [`PI_OUTPUT_ARGS`] and
-    /// [`STATIC_SOURCE`].
+    /// The Pi setup: `mpv` from `PATH`, [`PI_OUTPUT_ARGS`],
+    /// [`STATIC_SOURCE`], [`STANDBY_SOURCE`] and [`STANDBY_TEXT`].
     pub fn new(runtime_dir: impl Into<PathBuf>) -> Self {
         Self {
             binary: PathBuf::from("mpv"),
             runtime_dir: runtime_dir.into(),
             output_args: PI_OUTPUT_ARGS.iter().map(|a| a.to_string()).collect(),
             static_source: STATIC_SOURCE.into(),
+            standby_source: STANDBY_SOURCE.into(),
+            standby_text: STANDBY_TEXT.into(),
             command_timeout: Duration::from_secs(5),
             start_timeout: Duration::from_secs(10),
         }
@@ -373,6 +403,12 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
     fn show_static(&mut self) -> Result<(), PlayerError> {
         let source = self.config.static_source.clone();
         self.with_session(|s| s.show_static(&source))
+    }
+
+    fn show_standby(&mut self) -> Result<(), PlayerError> {
+        let source = self.config.standby_source.clone();
+        let text = self.config.standby_text.clone();
+        self.with_session(|s| s.show_standby(&source, &text))
     }
 
     fn play_clip(&mut self, path: &Path) -> Result<(), PlayerError> {

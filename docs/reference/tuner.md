@@ -46,7 +46,7 @@ The program depends on the clip length and the clip depends on the program, so t
 
 If a break, filler or ident event is on when the clip ends, the clip stands in for the break and no second clip plays. The tuner queues the first program event after the break (a break can be several events in a row) at the offset where that event starts. `timeline::program_from` holds this rule. That program starts when the clip ends, so it is early by at most the time left in the break. The tuner does not correct that. The next event boundary puts the screen back on the schedule.
 
-A filler stretch can be much longer than a break: a blocks channel with no default plays its filler pool through the time no block covers ([schedule.md](schedule.md), "What plays"). So the tuner queues the program after the run only if it starts at most 10 minutes after the clip ends (`Timing::max_early_ms`). Otherwise it leaves static up with `NoProgramSoon { next_program_ms }`; it cannot play the filler clips itself yet. A stretch that runs past the hour of schedule the tuner reads has no program in view and ends on `Gap` with no next start. A break longer than 10 minutes is treated the same way.
+A filler stretch can be much longer than a break: a blocks channel with no default plays its filler pool through the time no block covers ([schedule.md](schedule.md), "What plays"). So the tuner queues the program after the run only if it starts at most 10 minutes after the clip ends (`Timing::max_early_ms`). Otherwise it shows the stand-by card with `NoProgramSoon { next_program_ms }`; it cannot play the filler clips itself yet. A stretch that runs past the hour of schedule the tuner reads has no program in view and ends on `Gap` with no next start. A break longer than 10 minutes is treated the same way.
 
 ## A late start
 
@@ -58,23 +58,28 @@ A second `tune` replaces the running sequence. It shows static, which also clear
 
 ## When there is nothing to show
 
-The tuner leaves static on screen and sets `State::Failed` with a `Reason` when:
+The tuner sets `State::Failed` with a `Reason`. When the schedule has nothing to play, it replaces static with the stand-by card (`Player::show_standby`, colour bars with PLEASE STAND BY; see [player.md](player.md#the-stand-by-card)):
 
-- the tune-in pool has no clip (`NoTuneInClip`);
 - the channel has no events from now to an hour after the clip ends (`NoEvents`);
 - nothing is scheduled when the clip ends, or nothing follows the break (`Gap`);
 - a break, filler or ident run is on when the clip ends and the next program starts more than `Timing::max_early_ms` later (`NoProgramSoon`);
-- the schedule or the media source fails (`Schedule`, `Media`);
-- the player rejects a command (`Player`).
+- the media source cannot look up the program (`Media`).
 
-It does not retry. Static stays up until the next `tune`.
+It leaves static up when:
+
+- the tune-in pool has no clip (`NoTuneInClip`);
+- the schedule cannot be read (`Schedule`);
+- the player rejects a command (`Player`). If the player rejects the stand-by card, the reason is `Player`, not the schedule reason.
+
+The player commands for a channel with no events are `ShowStatic` at the key press and `ShowStandby` 0.5 s later. The tuner does not retry. The screen stays as it is until the next `tune`, or until the player restarts.
 
 ## When the player restarts
 
-When the player reports `Restarted` (MPV died and the watchdog started a new one), the tuner tunes the current channel again, as if the viewer had picked it: static, a tune-in clip, then the program at its live position. This also happens from `Failed`, since a dead MPV is a common cause of a player failure. Nothing happens when the tuner is `Idle`. The schedule is in the store, so nothing about it is lost.
+When the player reports `Restarted` (MPV died and the watchdog started a new one), the tuner tunes the current channel again, as if the viewer had picked it: static, a tune-in clip, then the program at its live position. This also happens from `Failed`, since a dead MPV is a common cause of a player failure; a channel with nothing to play goes back to the stand-by card. Nothing happens when the tuner is `Idle`. The schedule is in the store, so nothing about it is lost.
 
 ## What it does not do
 
 - It does not wait for a slow program. A slow transcode keeps the state at `AwaitingProgram`; there is no timeout. Giving up and showing a slate is failure handling (issue #34).
+- It does not leave the stand-by card when the schedule later has something to play. That needs the player's loop (issue #23) or a new `tune`.
 - It does not build playback URLs or ask Jellyfin to transcode (issue #21).
 - It does not follow the schedule after the program has started. Moving to the next event is the player's loop (issue #23).

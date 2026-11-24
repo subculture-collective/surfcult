@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::ipc::{IpcError, Session, header_fields, seconds};
+use super::ipc::{IpcError, Session, header_fields, seconds, standby_ass};
 use super::*;
 
 struct FakeMpv {
@@ -199,6 +199,88 @@ fn commands_become_mpv_commands() {
             json!(["stop"]),
         ]
     );
+}
+
+fn standby_overlay() -> Value {
+    json!({
+        "name": "osd-overlay",
+        "id": 1,
+        "format": "ass-events",
+        "data": standby_ass("PLEASE STAND BY"),
+        "res_x": 1920,
+        "res_y": 1080,
+        "z": 0
+    })
+}
+
+fn standby_removed() -> Value {
+    json!({ "name": "osd-overlay", "id": 1, "format": "none", "data": "" })
+}
+
+#[test]
+fn the_standby_card_loads_the_bars_and_draws_its_band_and_text() {
+    let fake = FakeMpv::new();
+    let mut session = fake.connect();
+    session.show_standby(STANDBY_SOURCE, STANDBY_TEXT).unwrap();
+    assert_eq!(
+        fake.commands(),
+        [
+            json!(["loadfile", "av://lavfi:smptehdbars=s=1920x1080:r=1", "replace", -1, {
+                "loop-file": "inf"
+            }]),
+            standby_overlay(),
+        ]
+    );
+    let card = standby_ass("PLEASE STAND BY");
+    let lines: Vec<&str> = card.lines().collect();
+    assert_eq!(
+        lines,
+        [
+            r"{\an7\pos(0,0)\bord0\shad0\1c&H000000&\p1}m 0 430 l 1920 430 1920 650 0 650{\p0}",
+            r"{\an5\pos(952,540)\fnDejaVu Sans\b1\fs150\fscx80\bord0\shad0\1c&H0000FF&}PLEASE STAND BY",
+            r"{\an5\pos(968,540)\fnDejaVu Sans\b1\fs150\fscx80\bord0\shad0\1c&HFFFF00&}PLEASE STAND BY",
+            r"{\an5\pos(960,540)\fnDejaVu Sans\b1\fs150\fscx80\bord0\shad0\1c&HFFFFFF&}PLEASE STAND BY",
+        ]
+    );
+}
+
+#[test]
+fn the_standby_text_is_capitalized_and_cannot_inject_ass() {
+    let card = standby_ass("off {\\p1} air\\n\nnow");
+    let text = card.lines().nth(3).unwrap().split_once('}').unwrap().1;
+    assert_eq!(text, "OFF \\{\\\u{2060}P1\\} AIR\\\u{2060}N\\NNOW");
+}
+
+#[test]
+fn whatever_replaces_the_standby_card_removes_its_overlay_first() {
+    let fake = FakeMpv::new();
+    let mut session = fake.connect();
+    type Replace = fn(&mut Session);
+    let replacements: [(&str, Replace); 4] = [
+        ("show_static", |s| {
+            s.show_static("av://lavfi:noise").unwrap()
+        }),
+        ("play_clip", |s| {
+            s.play_clip(Path::new("/clips/a.mp4")).unwrap()
+        }),
+        ("queue_program", |s| {
+            s.queue_program(&Stream::new("http://jellyfin/x"), 0)
+                .unwrap()
+        }),
+        ("stop", |s| s.stop().unwrap()),
+    ];
+    for (name, replace) in replacements {
+        session.show_standby("av://lavfi:bars", "STAND BY").unwrap();
+        fake.commands();
+        replace(&mut session);
+        let commands = fake.commands();
+        assert_eq!(commands[0], standby_removed(), "{name}");
+        assert!(!commands[1..].contains(&standby_removed()), "{name}");
+
+        // The overlay is gone, so the next command removes nothing.
+        replace(&mut session);
+        assert!(!fake.commands().contains(&standby_removed()), "{name}");
+    }
 }
 
 #[test]
@@ -625,9 +707,37 @@ mod real {
         player.show_overlay(5, &overlay).unwrap();
         player.clear_overlay(5).unwrap();
         player.show_static().unwrap();
-        // Static loops and the program was replaced: neither reports anything.
+        // Static never ends and the program was replaced: neither reports
+        // anything.
         assert_eq!(wait_for(&mut player, 2, |_| false), []);
         player.stop().unwrap();
+    }
+
+    #[test]
+    fn the_standby_card_stays_up_and_a_clip_replaces_it() {
+        if !tools() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let clip = make_clip(dir.path(), "clip.mp4", 1);
+        let resolver = |_: &MediaId, _: u64| Err(PlayerError("no programs here".into()));
+        let mut player = MpvPlayer::start(headless(&dir.path().join("run")), resolver).unwrap();
+        player.show_standby().unwrap();
+
+        // The generator never ends: after a few seconds the bars still play
+        // and nothing was reported.
+        assert_eq!(wait_for(&mut player, 4, |_| false), []);
+        let mut property =
+            |name: &str| player.session.as_mut().unwrap().get_property(name).unwrap();
+        assert_eq!(property("path"), json!(STANDBY_SOURCE));
+        assert_eq!(property("idle-active"), json!(false));
+        assert_eq!(property("eof-reached"), json!(false));
+        let seconds = property("time-pos").as_f64().unwrap();
+        assert!(seconds >= 2.0, "{seconds}");
+
+        player.play_clip(&clip).unwrap();
+        let events = wait_for(&mut player, 10, |e| *e == PlayerEvent::ClipEnded);
+        assert_eq!(events, [PlayerEvent::ClipEnded]);
     }
 
     #[test]

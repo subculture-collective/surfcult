@@ -44,11 +44,13 @@ pub const FREEZE_MS: i64 = 30 * 60 * 1000;
 /// When the stored schedule offers no boundary, because it ends before one,
 /// the time after its end is filled as [`extend`](super::extend) fills it.
 ///
-/// If the new events have no program and the replaced ones do, the stored
-/// schedule is kept and nothing is written (`written` is 0): a pool with
-/// nothing playable more often means a library fetch failed than that the
-/// channel should go dark. The notes say why, for example
-/// [`Note::NoPlayableItems`](super::Note::NoPlayableItems).
+/// A pool with nothing playable replaces the future too: from the boundary on
+/// the channel has filler, or no events at all, and the tuner shows the
+/// stand-by card. The notes say why, for example
+/// [`Note::NoPlayableItems`](super::Note::NoPlayableItems). This does not
+/// follow from a failed library fetch: a failed sync leaves the library cache
+/// as it was, and a source that matches nothing is an error before
+/// `regenerate` runs. So an empty pool is a deliberate config change.
 ///
 /// Does nothing unless `clock_trusted` is true.
 pub fn regenerate(
@@ -89,18 +91,11 @@ pub fn regenerate(
     }
 
     let generated = fill(store, channel, pools, clips, timezone, from_ms, horizon_ms)?;
-    let is_program = |event: &Event| event.kind == EventKind::Program;
-    let replaced = stored.iter().filter(|event| event.start_ms >= from_ms);
-    let written = if !generated.events.iter().any(is_program) && replaced.clone().any(is_program) {
-        0
-    } else {
-        store.replace_events_from(n, from_ms, &generated.events)?;
-        generated.events.len()
-    };
+    store.replace_events_from(n, from_ms, &generated.events)?;
     Ok(Extended::Generated {
         from_ms,
         to_ms: horizon_ms,
-        written,
+        written: generated.events.len(),
         notes: generated.notes,
     })
 }

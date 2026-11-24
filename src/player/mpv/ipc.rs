@@ -35,9 +35,23 @@ impl IpcError {
     }
 }
 
+/// The `osd-overlay` id of the stand-by card's band and text. These ids are
+/// separate from the `overlay-add` layers that [`Session::overlay_add`] uses.
+const STANDBY_OVERLAY: u32 = 1;
+
+/// The stand-by card's layout, in pixels of a 1920x1080 screen. MPV scales
+/// it to the real one.
+const CARD_WIDTH: u32 = 1920;
+const CARD_HEIGHT: u32 = 1080;
+const BAND_TOP: u32 = 430;
+const BAND_BOTTOM: u32 = 650;
+/// How far the red and cyan copies of the text sit from the white one.
+const CHROMA_SHIFT: u32 = 8;
+
 /// What a playlist entry is, by MPV's `playlist_entry_id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Entry {
+    /// Static or the stand-by card. Neither reports anything.
     Static,
     Clip,
     Program {
@@ -63,6 +77,8 @@ pub(super) struct Session {
     entries: HashMap<i64, Entry>,
     /// The entry on screen, from the last `start-file` event.
     current: Option<i64>,
+    /// Whether the stand-by card's overlay is up.
+    standby: bool,
 }
 
 impl Session {
@@ -79,15 +95,30 @@ impl Session {
             events: VecDeque::new(),
             entries: HashMap::new(),
             current: None,
+            standby: false,
         })
     }
 
-    /// Plays `source` in a loop, replacing the playlist.
+    /// Plays `source`, replacing the playlist. `loop-file=inf` restarts a
+    /// source that ends; a `lavfi` generator never does.
     pub(super) fn show_static(&mut self, source: &str) -> Result<(), IpcError> {
-        let options = json!({ "loop-file": "inf" });
-        let id = self.loadfile(source, "replace", options)?;
-        self.entries.clear();
-        self.entries.insert(id, Entry::Static);
+        self.replace(source, json!({ "loop-file": "inf" }), Entry::Static)
+    }
+
+    /// Plays `source` as [`Session::show_static`] does and draws the
+    /// stand-by card's band and `text` over it.
+    pub(super) fn show_standby(&mut self, source: &str, text: &str) -> Result<(), IpcError> {
+        self.show_static(source)?;
+        self.command(json!({
+            "name": "osd-overlay",
+            "id": STANDBY_OVERLAY,
+            "format": "ass-events",
+            "data": standby_ass(text),
+            "res_x": CARD_WIDTH,
+            "res_y": CARD_HEIGHT,
+            "z": 0,
+        }))?;
+        self.standby = true;
         Ok(())
     }
 
@@ -98,9 +129,31 @@ impl Session {
         let path = absolute
             .to_str()
             .ok_or_else(|| IpcError::Rejected("the clip path is not UTF-8".into()))?;
-        let id = self.loadfile(path, "replace", json!({}))?;
+        self.replace(path, json!({}), Entry::Clip)
+    }
+
+    /// Removes the stand-by card's overlay, then loads `url` in place of the
+    /// playlist.
+    fn replace(&mut self, url: &str, options: Value, entry: Entry) -> Result<(), IpcError> {
+        self.clear_standby()?;
+        let id = self.loadfile(url, "replace", options)?;
         self.entries.clear();
-        self.entries.insert(id, Entry::Clip);
+        self.entries.insert(id, entry);
+        Ok(())
+    }
+
+    /// Removes the stand-by card's overlay if it is up. MPV refuses the
+    /// command without `data`, even for the format `none`.
+    fn clear_standby(&mut self) -> Result<(), IpcError> {
+        if self.standby {
+            self.command(json!({
+                "name": "osd-overlay",
+                "id": STANDBY_OVERLAY,
+                "format": "none",
+                "data": "",
+            }))?;
+            self.standby = false;
+        }
         Ok(())
     }
 
@@ -115,6 +168,7 @@ impl Session {
     /// property, so a key is never sent to another server.
     pub(super) fn queue_program(&mut self, stream: &Stream, start_ms: u64) -> Result<(), IpcError> {
         let fields = header_fields(&stream.headers).map_err(IpcError::Rejected)?;
+        self.clear_standby()?;
         self.command(json!(["set_property", "http-header-fields", fields]))?;
         let start = start_ms.saturating_sub(stream.stream_offset_ms);
         let options = json!({ "start": seconds(start) });
@@ -144,6 +198,7 @@ impl Session {
 
     /// Stops playback and empties the playlist.
     pub(super) fn stop(&mut self) -> Result<(), IpcError> {
+        self.clear_standby()?;
         self.command(json!(["stop"]))?;
         self.entries.clear();
         self.current = None;
@@ -184,6 +239,12 @@ impl Session {
     /// meanwhile are queued for [`Session::poll`].
     pub(super) fn ping(&mut self) -> Result<(), IpcError> {
         self.command(json!(["get_property", "pid"])).map(drop)
+    }
+
+    /// Reads one MPV property, for tests that check what MPV is doing.
+    #[cfg(test)]
+    pub(super) fn get_property(&mut self, name: &str) -> Result<Value, IpcError> {
+        self.command(json!(["get_property", name]))
     }
 
     /// The next [`PlayerEvent`], from the events MPV has sent so far, or
@@ -257,7 +318,11 @@ impl Session {
     /// Sends one command and waits for its reply. Error messages name the
     /// command but never its arguments, which can hold an HTTP header.
     fn command(&mut self, args: Value) -> Result<Value, IpcError> {
-        let name = args[0].as_str().unwrap_or("command").to_owned();
+        let name = args[0]
+            .as_str()
+            .or_else(|| args["name"].as_str())
+            .unwrap_or("command")
+            .to_owned();
         self.next_request += 1;
         let request_id = self.next_request;
         let mut line = json!({ "command": args, "request_id": request_id }).to_string();
@@ -343,6 +408,51 @@ impl Session {
         }
         Ok(())
     }
+}
+
+/// The stand-by card as ASS events for a 1920x1080 screen, one per line: a
+/// black band across the middle, then `text` three times in bold condensed
+/// capitals, red shifted left, cyan shifted right and white on top. Later
+/// events are drawn over earlier ones.
+pub(super) fn standby_ass(text: &str) -> String {
+    let text = ass_escape(&text.to_uppercase());
+    let (mid_x, mid_y) = (CARD_WIDTH / 2, (BAND_TOP + BAND_BOTTOM) / 2);
+    let band = format!(
+        r"{{\an7\pos(0,0)\bord0\shad0\1c&H000000&\p1}}m 0 {BAND_TOP} l {CARD_WIDTH} {BAND_TOP} {CARD_WIDTH} {BAND_BOTTOM} 0 {BAND_BOTTOM}{{\p0}}"
+    );
+    // DejaVu Sans is on the Pi; `\fscx80` narrows it to a condensed face.
+    // ASS colours are &HBBGGRR&.
+    let layer = |x: u32, colour: &str| {
+        format!(
+            r"{{\an5\pos({x},{mid_y})\fnDejaVu Sans\b1\fs150\fscx80\bord0\shad0\1c&H{colour}&}}{text}"
+        )
+    };
+    [
+        band,
+        layer(mid_x - CHROMA_SHIFT, "0000FF"),
+        layer(mid_x + CHROMA_SHIFT, "FFFF00"),
+        layer(mid_x, "FFFFFF"),
+    ]
+    .join("\n")
+}
+
+/// `text` as literal ASS text: a backslash cannot start an escape, a brace
+/// cannot open an override block, and a line break becomes `\N`.
+fn ass_escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            // A word joiner after the backslash keeps it from escaping the
+            // next character, as MPV does for its own OSD text.
+            '\\' => escaped.push_str("\\\u{2060}"),
+            '{' => escaped.push_str(r"\{"),
+            '}' => escaped.push_str(r"\}"),
+            '\n' => escaped.push_str(r"\N"),
+            '\r' => {}
+            c => escaped.push(c),
+        }
+    }
+    escaped
 }
 
 /// Milliseconds as the seconds string MPV's `start` option takes.
