@@ -16,9 +16,12 @@ The sync sends only `GET` requests. `StartIndex` and `Limit` (500) page every li
 
 | What | Request |
 |---|---|
-| Items | `GET /Items?Recursive=true&IncludeItemTypes=Movie,Episode&Fields=MediaStreams,Chapters,Path,MediaSources&SortBy=SortName` |
+| Items | `GET /Items?Recursive=true&IncludeItemTypes=Movie,Episode&Fields=MediaStreams,Chapters,Path,MediaSources,Tags,Genres&SortBy=SortName` |
+| Series, for their tags and genres | `GET /Items?Recursive=true&IncludeItemTypes=Series&Fields=Tags,Genres&SortBy=SortName` |
+| Libraries | `GET /Library/MediaFolders?IsHidden=false` |
+| One library's items | `GET /Items?ParentId=<library id>&Recursive=true&IncludeItemTypes=Movie,Episode&SortBy=SortName` |
 | Collections | `GET /Items?Recursive=true&IncludeItemTypes=BoxSet&SortBy=SortName` |
-| One collection's members | `GET /Items?ParentId=<collection id>&IncludeItemTypes=Movie,Episode` |
+| One collection's members | `GET /Items?ParentId=<collection id>&IncludeItemTypes=Movie,Episode,Series` |
 | How to play one item | `POST /Items/<id>/PlaybackInfo` with a JSON body |
 | Stop a transcode | `DELETE /Videos/ActiveEncodings?DeviceId=surfcult&PlaySessionId=<session>` |
 
@@ -64,13 +67,30 @@ The requests carry no user id, so the key decides what is visible. Give surfcult
 
 ## What is cached
 
-For each kept item: id (the Jellyfin item id), title, kind (`movie` or `episode`), runtime, file path, chapters, video streams (codec, width, height, bit depth), audio streams (codec, channels, language) and the time of the sync.
+For each kept item: id (the Jellyfin item id), title, kind (`movie` or `episode`), runtime, file path, chapters, video streams (codec, width, height, bit depth), audio streams (codec, channels, language), the names of the libraries it is in, its tags and genres, and the time of the sync. An episode also keeps its series id (`SeriesId`), series name (`SeriesName`), season (`ParentIndexNumber`) and episode number (`IndexNumber`).
 
 - Jellyfin counts time in ticks of 100 ns. Runtime and chapter starts are stored in milliseconds, ticks divided by 10,000.
 - Items come back in the order Jellyfin listed them (sorted by name). Chapters and streams keep their order.
 - The file path is in the cache and in `Store::library_items()`, but not in `MediaItem`, which is unchanged. The path is for reconciling items by path when an id changes.
-- Collections are Jellyfin `BoxSet` items. Each keeps its members in Jellyfin's order. A member that is not a cached item (a series, or an item that was skipped) is left out. `library::resolve_pool` turns a `jellyfin_collection` source into a channel's pool from the cached collection. Libraries, tags, genres and series are not resolved yet; that is #30.
+- An episode carries its series' tags and genres after its own, without repeats, because Jellyfin usually sets them on the series. Empty names are dropped.
+- Libraries are Jellyfin's media folders. An item gets the name of each library whose recursive listing includes it. The library list needs a key that may read `/Library/MediaFolders`.
+- Collections are Jellyfin `BoxSet` items. Each keeps its members in Jellyfin's order. A movie or episode member is kept by its item id, and a series member by its series id when at least one of its episodes is cached. Other members (an item that was skipped, a series with no cached episode) are left out.
+- A database from before migration 0004 has no libraries, tags, genres or series until the next sync replaces the cache.
 - Playback URLs are not cached; `playback` asks Jellyfin each time.
+
+## Channel sources
+
+`library::resolve_pool(channel, source, media)` turns a channel's `source` into its program pool from the cache. Names match exactly, including case.
+
+| Source | Pool |
+|---|---|
+| `jellyfin_collection` | The first collection with that name, members in collection order. A series member becomes its episodes in episode order; movies and episodes stay as they are. An empty collection gives an empty pool. |
+| `jellyfin_library`, `jellyfin_tag`, `jellyfin_genre` | Every item in that library or with that tag or genre, in cache order (Jellyfin's sort by name), except that one series' episodes are gathered, in episode order, where its first matching episode was. |
+| `jellyfin_series` | The episodes of the first series in cache order with that name, in episode order. |
+
+Episode order is season, then episode number. Season 0 (Jellyfin's specials) comes first, a missing number sorts after the numbered ones, and ties keep cache order. An item reached twice, such as an episode a collection lists both directly and through its series, is kept once at its first place.
+
+A collection that does not exist, and a library, tag, genre or series that matches no cached item, returns a `PoolError` whose message names the channel and the source, for example `channel 3: jellyfin_tag "Retro" matches nothing in the library`. A cache read failure is a `PoolError` too. No source falls back to the whole library.
 
 ## What is skipped
 
@@ -84,6 +104,6 @@ Unknown fields never matter. Apart from an item's `Id`, every field may be missi
 
 ## Tests
 
-No test needs a Jellyfin server. The fixtures in `tests/fixtures/jellyfin/` are real Jellyfin 12.4.0 responses with fake names, paths and ids. Tests give the client a fake transport (the `JellyfinHttp` trait: `get`, `post_json` and `delete`) that serves them. The two `playback-info-*.json` fixtures are made up in the shape of Jellyfin's `PlaybackInfoResponse`, and the transcode one puts a key in `TranscodingUrl` as Jellyfin does. For playback tests the fake applies the device profile the client sent to the item's streams and answers with the direct-play or the transcode fixture, rewritten to name the requested item; a census test checks that profile against every case in ADR 0001 decision 3 and against `needs_transcode`. A few tests start a listener on `127.0.0.1` to check the real `ureq` transport (header sent, POST body, DELETE, 401, redirect not followed, closed port); they do not leave the machine.
+No test needs a Jellyfin server. The fixtures in `tests/fixtures/jellyfin/` are real Jellyfin 12.4.0 responses with fake names, paths and ids. The `Tags`, `Genres` and `SeriesId` fields in `items-page.json`, the series member of Fixture Collection B, and the files `series-page.json`, `media-folders.json` and `library-children-by-parent-id.json` were written by hand in the same shape; they were not recorded from a server. Tests give the client a fake transport (the `JellyfinHttp` trait: `get`, `post_json` and `delete`) that serves them. The two `playback-info-*.json` fixtures are made up in the shape of Jellyfin's `PlaybackInfoResponse`, and the transcode one puts a key in `TranscodingUrl` as Jellyfin does. For playback tests the fake applies the device profile the client sent to the item's streams and answers with the direct-play or the transcode fixture, rewritten to name the requested item; a census test checks that profile against every case in ADR 0001 decision 3 and against `needs_transcode`. A few tests start a listener on `127.0.0.1` to check the real `ureq` transport (header sent, POST body, DELETE, 401, redirect not followed, closed port); they do not leave the machine.
 
 Not covered by tests: whether the URLs play in MPV on the owner's network. That needs a manual check on the Pi.

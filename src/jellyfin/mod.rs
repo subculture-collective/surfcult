@@ -22,8 +22,10 @@
 //! given position. [`JellyfinClient::stop_transcode`] stops that transcode.
 //! Playback is never reported to Jellyfin.
 //!
-//! Out of scope here: turning collections, libraries, tags or series into
-//! episodes for a channel. See `docs/reference/jellyfin.md`.
+//! The sync records what channel sources need: each item's libraries, tags
+//! and genres, an episode's series, and collections that list a series.
+//! Turning a source into episodes is `library::resolve_pool`'s job. See
+//! `docs/reference/jellyfin.md`.
 //!
 //! [`MediaSource`]: crate::library::MediaSource
 //! [`Store`]: crate::store::Store

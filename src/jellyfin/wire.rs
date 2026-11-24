@@ -7,7 +7,9 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::library::{AudioStream, Chapter, MediaItem, MediaKind, VideoStream};
+use crate::library::{
+    AudioStream, Chapter, MediaId, MediaItem, MediaKind, SeriesEpisode, VideoStream,
+};
 use crate::store::LibraryEntry;
 
 /// Jellyfin counts time in ticks of 100 nanoseconds.
@@ -34,6 +36,24 @@ struct RawItem {
     media_sources: Option<Vec<RawSource>>,
     media_streams: Option<Vec<RawStream>>,
     chapters: Option<Vec<RawChapter>>,
+    tags: Option<Vec<String>>,
+    genres: Option<Vec<String>>,
+    series_id: Option<String>,
+    series_name: Option<String>,
+    /// The season number, for an episode.
+    parent_index_number: Option<i64>,
+    /// The episode number within the season.
+    index_number: Option<i64>,
+}
+
+/// A series as listed by `/Items`, with the tags and genres its episodes
+/// inherit.
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub(super) struct RawSeries {
+    pub id: String,
+    pub tags: Option<Vec<String>>,
+    pub genres: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -62,7 +82,8 @@ struct RawChapter {
     name: Option<String>,
 }
 
-/// A collection (`BoxSet`) as listed by `/Items`.
+/// A collection (`BoxSet`) as listed by `/Items`, or a library as listed by
+/// `/Library/MediaFolders`.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub(super) struct RawCollection {
@@ -70,7 +91,8 @@ pub(super) struct RawCollection {
     pub name: Option<String>,
 }
 
-/// An item that only has an id, as when listing a collection's children.
+/// An item that only has an id, as when listing a collection's or a
+/// library's children.
 #[derive(Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub(super) struct RawChild {
@@ -79,7 +101,7 @@ pub(super) struct RawChild {
 
 /// What became of one item in a page.
 pub(super) enum Parsed {
-    Playable(LibraryEntry),
+    Playable(Box<LibraryEntry>),
     /// Not playable: no video stream (Jellyfin lists missing episodes), no
     /// runtime, or not a movie or episode.
     Skipped,
@@ -143,18 +165,38 @@ pub(super) fn parse_item(value: Value) -> Parsed {
             .find_map(|source| non_empty(source.path))
     });
     let title = non_empty(raw.name).unwrap_or_else(|| raw.id.clone());
+    let number = |value: Option<i64>| value.and_then(|n| u32::try_from(n).ok());
+    let series = match (kind, non_empty(raw.series_id)) {
+        (MediaKind::Episode, Some(series_id)) => Some(SeriesEpisode {
+            series_name: non_empty(raw.series_name).unwrap_or_else(|| series_id.clone()),
+            series_id: MediaId::new(series_id),
+            season: number(raw.parent_index_number),
+            number: number(raw.index_number),
+        }),
+        _ => None,
+    };
 
-    Parsed::Playable(LibraryEntry {
+    Parsed::Playable(Box::new(LibraryEntry {
         item: MediaItem {
             chapters,
             video,
             audio,
+            tags: names(raw.tags),
+            genres: names(raw.genres),
+            series,
             ..MediaItem::new(raw.id, title, kind, runtime_ms)
         },
         path,
-    })
+    }))
 }
 
 fn non_empty(text: Option<String>) -> Option<String> {
     text.filter(|t| !t.is_empty())
+}
+
+/// A list of tag or genre names without empty ones.
+pub(super) fn names(list: Option<Vec<String>>) -> Vec<String> {
+    let mut list = list.unwrap_or_default();
+    list.retain(|name| !name.is_empty());
+    list
 }

@@ -13,7 +13,9 @@ The words surfcult's code and documentation use, and the code item each one name
 - **Device profile**: what the Pi plays directly and what Jellyfin transcodes to, ADR 0001 decisions 3 and 4. Its rules are the constants in `library::profile`; `needs_transcode` and the `DeviceProfile` that `JellyfinClient::playback` sends are both built from them.
 - **Playback**: how the player gets an item, `jellyfin::Playback`, from `JellyfinClient::playback`. `Direct` is the file as stored, and the player seeks to the start position; `Transcode` is a progressive MPEG-TS stream that already starts there. Neither URL carries the key, and playback is never reported to Jellyfin.
 - **Transcode session**: the device id and play session id of a transcode surfcult started, `jellyfin::TranscodeSession`. `JellyfinClient::stop_transcode` stops it when playback ends.
-- **Program pool**: the ordered items a channel draws its programs from, built from its source by `library::resolve_pool`. Until #30 only collections resolve; every other source returns `PoolError::Unsupported` instead of the whole library.
+- **Program pool**: the ordered items a channel draws its programs from, built from its source by `library::resolve_pool(channel, source, media)`. A collection keeps its member order and expands each series in it to its episodes; a library, tag or genre keeps the cache's order with each series' episodes gathered together; a series gives its episodes. A source that matches nothing is a `PoolError` naming the channel and the source, never the whole library.
+- **Episode order**: season, then episode number, `library::SeriesEpisode`. Season 0 (specials) comes first, missing numbers come last, and ties keep the cache's order.
+- **Series member**: a collection member that is a series id rather than an item id, `library::Collection::members`. It stands for all of the series' cached episodes.
 
 ## Clips
 

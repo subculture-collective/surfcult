@@ -13,6 +13,8 @@ pub mod profile;
 mod source;
 
 pub use fake::FakeMediaSource;
-pub use model::{AudioStream, Chapter, Collection, MediaId, MediaItem, MediaKind, VideoStream};
-pub use pool::{PoolError, resolve_pool};
+pub use model::{
+    AudioStream, Chapter, Collection, MediaId, MediaItem, MediaKind, SeriesEpisode, VideoStream,
+};
+pub use pool::{PoolError, PoolErrorReason, resolve_pool};
 pub use source::{MediaSource, SourceError};

@@ -1,0 +1,39 @@
+{
+ "33333333-3333-3333-3333-333333333333": {
+  "Items": [
+   {
+    "Id": "1e0ff4a8-a553-6961-2793-0e218769b7b7",
+    "Type": "Movie",
+    "Name": "Fixture Movie 1"
+   },
+   {
+    "Id": "3282307a-d805-60f8-3e46-a3022f90087e",
+    "Type": "Movie",
+    "Name": "Fixture Movie 3"
+   },
+   {
+    "Id": "a57a957c-1ae6-5318-4137-e200281aa5af",
+    "Type": "Movie",
+    "Name": "Fixture Movie 4"
+   }
+  ],
+  "TotalRecordCount": 3,
+  "StartIndex": 0
+ },
+ "44444444-4444-4444-4444-444444444444": {
+  "Items": [
+   {
+    "Id": "010f6f59-58ca-cbc6-0c2f-14f3bde31d24",
+    "Type": "Episode",
+    "Name": "Fixture Episode 2"
+   },
+   {
+    "Id": "9dcf7a71-56f7-1431-f94d-63ec6d240e42",
+    "Type": "Episode",
+    "Name": "Fixture Episode (missing)"
+   }
+  ],
+  "TotalRecordCount": 2,
+  "StartIndex": 0
+ }
+}

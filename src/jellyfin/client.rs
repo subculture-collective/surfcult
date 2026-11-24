@@ -130,13 +130,13 @@ impl JellyfinClient {
         self.key.scrub(text)
     }
 
-    /// Reads every page of `/Items?{query}` and returns the raw items.
-    fn get_items(&self, query: &str) -> Result<Vec<Value>, JellyfinError> {
+    /// Reads every page of `{path}?{query}` and returns the raw items.
+    fn get_list(&self, path: &str, query: &str) -> Result<Vec<Value>, JellyfinError> {
         let mut items = Vec::new();
         loop {
             let start = items.len();
             let body = self.get(&format!(
-                "/Items?{query}&StartIndex={start}&Limit={PAGE_SIZE}"
+                "{path}?{query}&StartIndex={start}&Limit={PAGE_SIZE}"
             ))?;
             let page: wire::Page = serde_json::from_str(&body).map_err(|source| {
                 JellyfinError::BadResponse(self.key.scrub(&source.to_string()))
@@ -157,26 +157,34 @@ impl JellyfinClient {
         }
     }
 
-    /// Fetches the playable movies and episodes and the collections.
+    /// Reads every page of `/Items?{query}` and returns the raw items.
+    fn get_items(&self, query: &str) -> Result<Vec<Value>, JellyfinError> {
+        self.get_list("/Items", query)
+    }
+
+    /// Fetches the playable movies and episodes with their series, tags,
+    /// genres and libraries, and the collections.
     pub(super) fn fetch_library(&self) -> Result<FetchedLibrary, JellyfinError> {
         let mut skipped = 0;
         let mut entries: Vec<LibraryEntry> = Vec::new();
         let mut seen = HashSet::new();
         for value in self.get_items(
             "Recursive=true&IncludeItemTypes=Movie,Episode\
-             &Fields=MediaStreams,Chapters,Path,MediaSources&SortBy=SortName",
+             &Fields=MediaStreams,Chapters,Path,MediaSources,Tags,Genres&SortBy=SortName",
         )? {
             match wire::parse_item(value) {
                 Parsed::Playable(entry) => {
                     // Paging by name can repeat an item that shares its name with another.
                     if seen.insert(entry.item.id.clone()) {
-                        entries.push(entry);
+                        entries.push(*entry);
                     }
                 }
                 Parsed::Skipped | Parsed::Invalid => skipped += 1,
             }
         }
 
+        self.add_series_labels(&mut entries)?;
+        self.add_libraries(&mut entries)?;
         let collections = self.fetch_collections(&entries)?;
         Ok(FetchedLibrary {
             entries,
@@ -185,24 +193,89 @@ impl JellyfinClient {
         })
     }
 
-    /// Fetches each `BoxSet` and its children. Children that are not cached
-    /// items (a series, or an item that was skipped) are left out: turning
-    /// those into episodes is the channel generator's job.
+    /// Fetches every series and adds its tags and genres to its episodes,
+    /// after the episode's own and without repeating a name.
+    fn add_series_labels(&self, entries: &mut [LibraryEntry]) -> Result<(), JellyfinError> {
+        let mut series = HashMap::new();
+        for value in self.get_items(
+            "Recursive=true&IncludeItemTypes=Series&Fields=Tags,Genres&SortBy=SortName",
+        )? {
+            let Ok(raw) = serde_json::from_value::<wire::RawSeries>(value) else {
+                continue;
+            };
+            series.insert(
+                normalize_id(&raw.id),
+                (wire::names(raw.tags), wire::names(raw.genres)),
+            );
+        }
+        for entry in entries {
+            let item = &mut entry.item;
+            let Some(episode) = &item.series else {
+                continue;
+            };
+            let Some((tags, genres)) = series.get(&normalize_id(episode.series_id.as_str())) else {
+                continue;
+            };
+            extend_unique(&mut item.tags, tags);
+            extend_unique(&mut item.genres, genres);
+        }
+        Ok(())
+    }
+
+    /// Fetches each library (Jellyfin's media folders) and the movies and
+    /// episodes in it, and adds the library's name to those items.
+    fn add_libraries(&self, entries: &mut [LibraryEntry]) -> Result<(), JellyfinError> {
+        let index: HashMap<String, usize> = entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (normalize_id(entry.item.id.as_str()), i))
+            .collect();
+        for value in self.get_list("/Library/MediaFolders", "IsHidden=false")? {
+            let Ok(raw) = serde_json::from_value::<wire::RawCollection>(value) else {
+                continue;
+            };
+            let name = raw.name.unwrap_or_else(|| raw.id.clone());
+            let children = self.get_items(&format!(
+                "ParentId={}&Recursive=true&IncludeItemTypes=Movie,Episode&SortBy=SortName",
+                encode(&raw.id)
+            ))?;
+            for child in children {
+                let Ok(child) = serde_json::from_value::<wire::RawChild>(child) else {
+                    continue;
+                };
+                if let Some(&i) = index.get(&normalize_id(&child.id)) {
+                    extend_unique(&mut entries[i].item.libraries, std::slice::from_ref(&name));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Fetches each `BoxSet` and its children. A child that is a cached item
+    /// is kept by its id, and a series with a cached episode by its series id;
+    /// `library::resolve_pool` turns the series into its episodes. Other
+    /// children (an item that was skipped, a series with no cached episode)
+    /// are left out.
     fn fetch_collections(
         &self,
         entries: &[LibraryEntry],
     ) -> Result<Vec<Collection>, JellyfinError> {
-        let known: HashMap<String, &MediaId> = entries
-            .iter()
-            .map(|entry| (normalize_id(entry.item.id.as_str()), &entry.item.id))
-            .collect();
+        let mut known: HashMap<String, &MediaId> = HashMap::new();
+        for entry in entries {
+            if let Some(episode) = &entry.item.series {
+                known.insert(normalize_id(episode.series_id.as_str()), &episode.series_id);
+            }
+        }
+        for entry in entries {
+            known.insert(normalize_id(entry.item.id.as_str()), &entry.item.id);
+        }
         let mut collections = Vec::new();
         for value in self.get_items("Recursive=true&IncludeItemTypes=BoxSet&SortBy=SortName")? {
             let Ok(raw) = serde_json::from_value::<wire::RawCollection>(value) else {
                 continue;
             };
             let children = self.get_items(&format!(
-                "ParentId={}&IncludeItemTypes=Movie,Episode",
+                "ParentId={}&IncludeItemTypes=Movie,Episode,Series",
                 encode(&raw.id)
             ))?;
             let mut members: Vec<MediaId> = Vec::new();
@@ -252,4 +325,13 @@ pub(super) fn encode(value: &str) -> String {
         }
     }
     out
+}
+
+/// Appends the names in `more` that `list` does not have yet.
+fn extend_unique(list: &mut Vec<String>, more: &[String]) {
+    for name in more {
+        if !list.contains(name) {
+            list.push(name.clone());
+        }
+    }
 }

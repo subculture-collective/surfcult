@@ -1,0 +1,20 @@
+{
+ "Items": [
+  {
+   "Name": "Fixture Series",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "5e1e5000-0000-4000-8000-000000000001",
+   "Type": "Series",
+   "IsFolder": true,
+   "Tags": [
+    "Saturday Morning"
+   ],
+   "Genres": [
+    "Animation",
+    "Comedy"
+   ]
+  }
+ ],
+ "TotalRecordCount": 1,
+ "StartIndex": 0
+}
