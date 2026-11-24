@@ -118,7 +118,7 @@
 //! the channel's last stored event up to `now` plus seven days. The caller
 //! supplies the pool: it takes `source` from the channel's `Plan::Fixed`,
 //! resolves it with [`library::resolve_pool`](crate::library::resolve_pool) and
-//! passes the result to `extend`. Until issue #30 only collections resolve.
+//! passes the result to `extend`. `resolve_pool` handles every source kind.
 //! The caller also passes the scanned clip pools
 //! ([`ClipLibrary::pools`](crate::clips::ClipLibrary::pools)); `extend` looks
 //! up the channel's break and filler pools there by name, and a pool that is

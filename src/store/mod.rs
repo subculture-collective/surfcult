@@ -14,7 +14,8 @@
 //!   short outcome word. Read newest first.
 //!
 //! - `library_*`: a copy of the Jellyfin library (items, chapters, streams,
-//!   collections), replaced as a whole by each sync. See [`LibraryEntry`].
+//!   libraries, tags, genres, series and collections), replaced as a whole by
+//!   each sync. See [`LibraryEntry`].
 //!
 //! Times are Unix epoch milliseconds (`i64`), as in [`crate::timeline`].
 //!

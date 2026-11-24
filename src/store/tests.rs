@@ -567,8 +567,8 @@ fn migration_3_drops_the_cursors_table() {
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    // Only migration 3 ran; 1 and 2 kept their recorded times.
-    assert_eq!(applied.len(), 3);
+    // Migration 3 and the later ones ran; 1 and 2 kept their recorded times.
+    assert_eq!(applied.len() as u32, migrate::latest_version());
     assert_eq!(&applied[..2], [(1, 1), (2, 2)]);
     assert_eq!(applied[2].0, 3);
     assert_eq!(
@@ -578,6 +578,76 @@ fn migration_3_drops_the_cursors_table() {
             e
         })
     );
+}
+
+#[test]
+fn migration_4_keeps_cached_collections_and_adds_source_fields() {
+    use crate::library::{Collection, MediaItem, MediaKind, SeriesEpisode};
+
+    // A database a version-3 build left behind, with a cached collection.
+    let db = TempDb::new();
+    {
+        let conn = Connection::open(db.path()).unwrap();
+        conn.execute_batch(concat!(
+            "CREATE TABLE schema_migrations (
+                version       INTEGER PRIMARY KEY,
+                name          TEXT    NOT NULL,
+                applied_at_ms INTEGER NOT NULL
+            );",
+            include_str!("../../migrations/0001_schedule.sql"),
+            include_str!("../../migrations/0002_library_cache.sql"),
+            include_str!("../../migrations/0003_drop_cursors.sql"),
+            "INSERT INTO schema_migrations VALUES
+                 (1, 'schedule', 1), (2, 'library_cache', 2), (3, 'drop_cursors', 3);
+             INSERT INTO library_items VALUES ('a', 0, 'A', 'episode', 1000, NULL, 7);
+             INSERT INTO library_collections VALUES (0, 'Cartoons');
+             INSERT INTO library_collection_members VALUES (0, 0, 'a');",
+        ))
+        .unwrap();
+    }
+
+    let mut store = Store::open(db.path()).unwrap();
+
+    // The old row has no source fields until the next sync.
+    let items = store.library_items().unwrap();
+    assert_eq!(
+        items[0].item,
+        MediaItem::new("a", "A", MediaKind::Episode, 1000)
+    );
+    assert_eq!(
+        store.library_collections().unwrap(),
+        [Collection {
+            name: "Cartoons".into(),
+            members: ids(&["a"]),
+        }]
+    );
+    // A collection can now list a series.
+    let episode = LibraryEntry {
+        item: MediaItem {
+            series: Some(SeriesEpisode {
+                series_id: MediaId::new("s"),
+                series_name: "S".into(),
+                season: Some(1),
+                number: Some(1),
+            }),
+            tags: vec!["Retro".into()],
+            ..MediaItem::new("b", "B", MediaKind::Episode, 1000)
+        },
+        path: None,
+    };
+    let series_collection = Collection {
+        name: "Series".into(),
+        members: ids(&["s"]),
+    };
+    store
+        .replace_library(
+            std::slice::from_ref(&episode),
+            std::slice::from_ref(&series_collection),
+            8,
+        )
+        .unwrap();
+    assert_eq!(store.library_items().unwrap(), [episode]);
+    assert_eq!(store.library_collections().unwrap(), [series_collection]);
 }
 
 #[test]
@@ -637,7 +707,7 @@ fn a_collection_pool_resolves_from_the_library_cache() {
     };
     store.replace_library(&entries, &[cartoons], 1).unwrap();
 
-    let pool = resolve_pool(&Source::JellyfinCollection("Cartoons".into()), &store).unwrap();
+    let pool = resolve_pool(3, &Source::JellyfinCollection("Cartoons".into()), &store).unwrap();
 
     assert_eq!(pool, vec![entries[2].item.clone(), entries[0].item.clone()]);
 }

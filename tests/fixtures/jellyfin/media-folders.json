@@ -1,0 +1,22 @@
+{
+ "Items": [
+  {
+   "Name": "Fixture Movies",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "33333333-3333-3333-3333-333333333333",
+   "Type": "CollectionFolder",
+   "CollectionType": "movies",
+   "IsFolder": true
+  },
+  {
+   "Name": "Fixture Shows",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "44444444-4444-4444-4444-444444444444",
+   "Type": "CollectionFolder",
+   "CollectionType": "tvshows",
+   "IsFolder": true
+  }
+ ],
+ "TotalRecordCount": 2,
+ "StartIndex": 0
+}

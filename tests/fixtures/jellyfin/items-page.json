@@ -82,6 +82,13 @@
      "StartPositionTicks": 12725620000,
      "Name": "Chapter 6"
     }
+   ],
+   "Tags": [
+    "Fixture Tag"
+   ],
+   "Genres": [
+    "Drama",
+    "Comedy"
    ]
   },
   {
@@ -96,6 +103,7 @@
    "MediaType": "Video",
    "LocationType": "FileSystem",
    "SeriesName": "Fixture Series",
+   "SeriesId": "5e1e5000-0000-4000-8000-000000000001",
    "SeasonName": "Season 1",
    "IndexNumber": 2,
    "ParentIndexNumber": 1,
@@ -167,7 +175,9 @@
      "StartPositionTicks": 14200020000,
      "Name": "Chapter 5"
     }
-   ]
+   ],
+   "Tags": [],
+   "Genres": []
   },
   {
    "Name": "Fixture Movie 3",
@@ -227,7 +237,11 @@
      "SampleRate": 48000
     }
    ],
-   "Chapters": []
+   "Chapters": [],
+   "Tags": [],
+   "Genres": [
+    "Comedy"
+   ]
   },
   {
    "Name": "Fixture Movie 4",
@@ -327,7 +341,11 @@
      "StartPositionTicks": 11477710000,
      "Name": "Chapter 6"
     }
-   ]
+   ],
+   "Tags": [
+    "fixture tag"
+   ],
+   "Genres": []
   },
   {
    "Name": "Fixture Episode (missing)",
@@ -338,8 +356,11 @@
    "MediaType": "Video",
    "LocationType": "Virtual",
    "SeriesName": "Fixture Series",
+   "SeriesId": "5e1e5000-0000-4000-8000-000000000001",
    "MediaStreams": [],
-   "Chapters": []
+   "Chapters": [],
+   "Tags": [],
+   "Genres": []
   }
  ],
  "TotalRecordCount": 5,

@@ -771,7 +771,7 @@ fn a_resolved_collection_pool_schedules_only_its_items() {
     let Plan::Fixed { source, .. } = &channel.plan else {
         unreachable!()
     };
-    let items = resolve_pool(source, &media).unwrap();
+    let items = resolve_pool(channel.number, source, &media).unwrap();
     let mut store = setup();
     let now = at(2026, 6, 1, 12, 0);
 

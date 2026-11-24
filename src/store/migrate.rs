@@ -27,6 +27,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "drop_cursors",
         sql: include_str!("../../migrations/0003_drop_cursors.sql"),
     },
+    Migration {
+        version: 4,
+        name: "library_sources",
+        sql: include_str!("../../migrations/0004_library_sources.sql"),
+    },
 ];
 
 /// Applies the migrations the database has not seen yet. Each one runs in its

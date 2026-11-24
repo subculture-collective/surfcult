@@ -21,9 +21,14 @@
     "Id": "a57a957c-1ae6-5318-4137-e200281aa5af",
     "Type": "Movie",
     "Name": "Fixture Movie 4"
+   },
+   {
+    "Id": "5e1e5000-0000-4000-8000-000000000001",
+    "Type": "Series",
+    "Name": "Fixture Series"
    }
   ],
-  "TotalRecordCount": 1,
+  "TotalRecordCount": 2,
   "StartIndex": 0
  }
 }

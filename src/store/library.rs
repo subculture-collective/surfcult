@@ -9,14 +9,14 @@
 //! [`MediaSource`], and its reads never reach Jellyfin. The Jellyfin sync step
 //! (`jellyfin::sync`) is what fills it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use rusqlite::{Transaction, params};
 
 use super::{Store, StoreError};
 use crate::library::{
-    AudioStream, Chapter, Collection, MediaId, MediaItem, MediaKind, MediaSource, SourceError,
-    VideoStream,
+    AudioStream, Chapter, Collection, MediaId, MediaItem, MediaKind, MediaSource, SeriesEpisode,
+    SourceError, VideoStream,
 };
 
 /// One cached item and the file path the source reported for it. The path is
@@ -27,24 +27,29 @@ pub struct LibraryEntry {
     pub path: Option<String>,
 }
 
+/// The columns of `library_items` that [`read_entry`] reads, in its order.
+const ITEM_COLUMNS: &str =
+    "id, title, kind, runtime_ms, path, series_id, series_name, season, episode";
+
 impl Store {
     /// In one transaction, replaces the whole library cache with `entries` and
     /// `collections`. Items and collections are read back in the order given.
-    /// Every collection member must be one of `entries`, and ids must not
-    /// repeat; otherwise nothing changes and an error comes back.
+    /// Every collection member must be the id of one of `entries` or the series
+    /// id of one of them, and item ids must not repeat; otherwise nothing
+    /// changes and an error comes back.
     pub fn replace_library(
         &mut self,
         entries: &[LibraryEntry],
         collections: &[Collection],
         synced_at_ms: i64,
     ) -> Result<(), StoreError> {
-        validate(entries)?;
+        validate(entries, collections)?;
         let action = "replacing the library cache";
         let tx = self
             .conn
             .transaction()
             .map_err(StoreError::database(action))?;
-        // Chapters, streams and collection members go with their parents.
+        // Chapters, streams, labels and collection members go with their parents.
         tx.execute_batch("DELETE FROM library_collections; DELETE FROM library_items;")
             .map_err(StoreError::database(action))?;
         for (position, entry) in entries.iter().enumerate() {
@@ -61,9 +66,9 @@ impl Store {
         let action = "reading the library cache";
         let mut statement = self
             .conn
-            .prepare_cached(
-                "SELECT id, title, kind, runtime_ms, path FROM library_items ORDER BY position",
-            )
+            .prepare_cached(&format!(
+                "SELECT {ITEM_COLUMNS} FROM library_items ORDER BY position"
+            ))
             .map_err(StoreError::database(action))?;
         let rows = statement
             .query_map([], read_entry)
@@ -121,6 +126,30 @@ impl Store {
                 }
             }
         }
+        drop(streams);
+
+        let mut labels = self
+            .conn
+            .prepare_cached(
+                "SELECT item_id, kind, name FROM library_item_labels
+                 ORDER BY item_id, kind, position",
+            )
+            .map_err(StoreError::database(action))?;
+        let rows = labels
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(StoreError::database(action))?;
+        for row in rows {
+            let (id, kind, name) = row.map_err(StoreError::database(action))?;
+            if let Some(&i) = index.get(&id) {
+                push_label(&mut entries[i].item, &kind, name)?;
+            }
+        }
         Ok(entries)
     }
 
@@ -129,9 +158,9 @@ impl Store {
         let action = "reading a cached item";
         let mut statement = self
             .conn
-            .prepare_cached(
-                "SELECT id, title, kind, runtime_ms, path FROM library_items WHERE id = ?1",
-            )
+            .prepare_cached(&format!(
+                "SELECT {ITEM_COLUMNS} FROM library_items WHERE id = ?1"
+            ))
             .map_err(StoreError::database(action))?;
         let mut rows = statement
             .query_map([id.as_str()], read_entry)
@@ -179,6 +208,24 @@ impl Store {
                 Stream::Audio(a) => entry.item.audio.push(a),
             }
         }
+        drop(streams);
+
+        let mut labels = self
+            .conn
+            .prepare_cached(
+                "SELECT kind, name FROM library_item_labels
+                 WHERE item_id = ?1 ORDER BY kind, position",
+            )
+            .map_err(StoreError::database(action))?;
+        let rows = labels
+            .query_map([id.as_str()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(StoreError::database(action))?;
+        for row in rows {
+            let (kind, name) = row.map_err(StoreError::database(action))?;
+            push_label(&mut entry.item, &kind, name)?;
+        }
         Ok(Some(entry))
     }
 
@@ -209,7 +256,7 @@ impl Store {
         let mut members = self
             .conn
             .prepare_cached(
-                "SELECT collection_position, item_id FROM library_collection_members
+                "SELECT collection_position, member_id FROM library_collection_members
                  ORDER BY collection_position, position",
             )
             .map_err(StoreError::database(action))?;
@@ -266,9 +313,10 @@ enum Stream {
     Audio(AudioStream),
 }
 
-fn validate(entries: &[LibraryEntry]) -> Result<(), StoreError> {
+fn validate(entries: &[LibraryEntry], collections: &[Collection]) -> Result<(), StoreError> {
     let invalid = |reason: String| Err(StoreError::InvalidLibrary(reason));
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = HashSet::new();
+    let mut series = HashSet::new();
     for entry in entries {
         let item = &entry.item;
         if !seen.insert(item.id.as_str()) {
@@ -283,6 +331,20 @@ fn validate(entries: &[LibraryEntry]) -> Result<(), StoreError> {
             .any(|c| i64::try_from(c.start_ms).is_err())
         {
             return invalid(format!("a chapter of {} starts too late to store", item.id));
+        }
+        if let Some(episode) = &item.series {
+            series.insert(episode.series_id.as_str());
+        }
+    }
+    for collection in collections {
+        for id in &collection.members {
+            if !seen.contains(id.as_str()) && !series.contains(id.as_str()) {
+                return invalid(format!(
+                    "collection {:?} lists {id}, which is neither a cached item \
+                     nor the series of one",
+                    collection.name
+                ));
+            }
         }
     }
     Ok(())
@@ -303,10 +365,12 @@ fn insert_entry(
 ) -> Result<(), StoreError> {
     let action = "inserting a library item";
     let item = &entry.item;
+    let series = item.series.as_ref();
     // `validate` has checked that the runtime and chapter starts fit an i64.
     tx.prepare_cached(
-        "INSERT INTO library_items (id, position, title, kind, runtime_ms, path, synced_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO library_items (id, position, title, kind, runtime_ms, path, synced_at_ms,
+                                    series_id, series_name, season, episode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
     )
     .and_then(|mut s| {
         s.execute(params![
@@ -317,6 +381,10 @@ fn insert_entry(
             item.runtime_ms as i64,
             entry.path,
             synced_at_ms,
+            series.map(|s| s.series_id.as_str()),
+            series.map(|s| s.series_name.as_str()),
+            series.and_then(|s| s.season),
+            series.and_then(|s| s.number),
         ])
     })
     .map_err(StoreError::database(action))?;
@@ -375,6 +443,24 @@ fn insert_entry(
             ])
             .map_err(StoreError::database(action))?;
     }
+
+    let mut label = tx
+        .prepare_cached(
+            "INSERT INTO library_item_labels (item_id, kind, position, name)
+             VALUES (?1, ?2, ?3, ?4)",
+        )
+        .map_err(StoreError::database(action))?;
+    for (kind, names) in [
+        ("library", &item.libraries),
+        ("tag", &item.tags),
+        ("genre", &item.genres),
+    ] {
+        for (i, name) in names.iter().enumerate() {
+            label
+                .execute(params![item.id.as_str(), kind, i as i64, name])
+                .map_err(StoreError::database(action))?;
+        }
+    }
     Ok(())
 }
 
@@ -391,38 +477,37 @@ fn insert_collection(
     .map_err(StoreError::database(action))?;
     let mut member = tx
         .prepare_cached(
-            "INSERT INTO library_collection_members (collection_position, position, item_id)
+            "INSERT INTO library_collection_members (collection_position, position, member_id)
              VALUES (?1, ?2, ?3)",
         )
         .map_err(StoreError::database(action))?;
     for (i, id) in collection.members.iter().enumerate() {
         member
             .execute(params![position as i64, i as i64, id.as_str()])
-            .map_err(|source| match source {
-                rusqlite::Error::SqliteFailure(e, _)
-                    if e.code == rusqlite::ErrorCode::ConstraintViolation =>
-                {
-                    StoreError::InvalidLibrary(format!(
-                        "collection {:?} lists {id}, which is not a cached item, \
-                         or lists it twice",
-                        collection.name
-                    ))
-                }
-                other => StoreError::database(action)(other),
-            })?;
+            .map_err(StoreError::database(action))?;
     }
     Ok(())
 }
 
-/// Reads an item row without its chapters and streams. The inner `Result`
-/// carries values SQLite returned that do not fit the Rust type.
+/// Reads an item row ([`ITEM_COLUMNS`]) without its chapters, streams and
+/// labels. The inner `Result` carries values SQLite returned that do not fit
+/// the Rust type.
 fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<LibraryEntry, StoreError>> {
     let id: String = row.get(0)?;
     let title: String = row.get(1)?;
     let kind: String = row.get(2)?;
     let runtime_ms: i64 = row.get(3)?;
     let path: Option<String> = row.get(4)?;
-    Ok(build_entry(id, title, &kind, runtime_ms, path))
+    let series_id: Option<String> = row.get(5)?;
+    let series_name: Option<String> = row.get(6)?;
+    let season: Option<i64> = row.get(7)?;
+    let episode: Option<i64> = row.get(8)?;
+    Ok(
+        build_entry(id, title, &kind, runtime_ms, path).and_then(|mut entry| {
+            entry.item.series = build_series(series_id, series_name, season, episode)?;
+            Ok(entry)
+        }),
+    )
 }
 
 fn build_entry(
@@ -443,6 +528,41 @@ fn build_entry(
         item: MediaItem::new(id, title, kind, runtime_ms),
         path,
     })
+}
+
+/// An episode's series, or `None` when the row has no series id. A missing
+/// name is read as the id.
+fn build_series(
+    series_id: Option<String>,
+    series_name: Option<String>,
+    season: Option<i64>,
+    episode: Option<i64>,
+) -> Result<Option<SeriesEpisode>, StoreError> {
+    let Some(series_id) = series_id else {
+        return Ok(None);
+    };
+    let number = |value: Option<i64>| {
+        value
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| StoreError::Corrupt(format!("bad episode number in {series_id}")))
+    };
+    Ok(Some(SeriesEpisode {
+        season: number(season)?,
+        number: number(episode)?,
+        series_name: series_name.unwrap_or_else(|| series_id.clone()),
+        series_id: MediaId::new(series_id),
+    }))
+}
+
+fn push_label(item: &mut MediaItem, kind: &str, name: String) -> Result<(), StoreError> {
+    match kind {
+        "library" => item.libraries.push(name),
+        "tag" => item.tags.push(name),
+        "genre" => item.genres.push(name),
+        other => return Err(StoreError::Corrupt(format!("unknown label kind {other:?}"))),
+    }
+    Ok(())
 }
 
 fn read_chapter(start_ms: i64, name: Option<String>) -> Result<Chapter, StoreError> {
@@ -516,6 +636,21 @@ mod tests {
         }
     }
 
+    /// An episode of series `series` with libraries, tags and genres.
+    fn labelled_episode(id: &str, series: &str) -> LibraryEntry {
+        let mut entry = entry(id, MediaKind::Episode);
+        entry.item.libraries = vec!["TV".into(), "Kids".into()];
+        entry.item.tags = vec!["Saturday".into(), "Retro".into()];
+        entry.item.genres = vec!["Animation".into()];
+        entry.item.series = Some(SeriesEpisode {
+            series_id: MediaId::new(series),
+            series_name: format!("Series {series}"),
+            season: Some(0),
+            number: Some(12),
+        });
+        entry
+    }
+
     fn collection(name: &str, members: &[&str]) -> Collection {
         Collection {
             name: name.to_string(),
@@ -550,6 +685,27 @@ mod tests {
     }
 
     #[test]
+    fn libraries_tags_genres_and_series_round_trip_in_order() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut unnamed = labelled_episode("b", "s2");
+        unnamed.item.series.as_mut().unwrap().season = None;
+        unnamed.item.series.as_mut().unwrap().number = None;
+        let entries = vec![
+            labelled_episode("a", "s1"),
+            unnamed,
+            entry("m", MediaKind::Movie),
+        ];
+
+        store.replace_library(&entries, &[], 1).unwrap();
+
+        assert_eq!(store.library_items().unwrap(), entries);
+        assert_eq!(
+            store.library_item(&MediaId::new("a")).unwrap(),
+            Some(entries[0].clone())
+        );
+    }
+
+    #[test]
     fn a_missing_path_and_optional_fields_round_trip() {
         let mut store = Store::open_in_memory().unwrap();
         let bare = LibraryEntry {
@@ -576,11 +732,25 @@ mod tests {
     }
 
     #[test]
+    fn a_collection_may_list_a_series_of_a_cached_episode() {
+        let mut store = Store::open_in_memory().unwrap();
+        let entries = vec![
+            labelled_episode("e", "cheers"),
+            entry("m", MediaKind::Movie),
+        ];
+        let collections = vec![collection("Mixed", &["cheers", "m"])];
+
+        store.replace_library(&entries, &collections, 1).unwrap();
+
+        assert_eq!(store.library_collections().unwrap(), collections);
+    }
+
+    #[test]
     fn a_second_replace_removes_what_the_first_wrote() {
         let mut store = Store::open_in_memory().unwrap();
         store
             .replace_library(
-                &[entry("a", MediaKind::Movie), entry("b", MediaKind::Movie)],
+                &[labelled_episode("a", "s"), entry("b", MediaKind::Movie)],
                 &[collection("Old", &["a", "b"])],
                 1,
             )
@@ -602,15 +772,17 @@ mod tests {
             .conn
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM library_chapters)
-                      + (SELECT COUNT(*) FROM library_streams)",
+                      + (SELECT COUNT(*) FROM library_streams)
+                      + (SELECT COUNT(*) FROM library_item_labels)
+                      + (SELECT COUNT(*) FROM library_collection_members)",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
         assert_eq!(
             leftovers,
-            2 + 3,
-            "only the second item's chapters and streams remain"
+            2 + 3 + 1,
+            "only the second item's chapters and streams and the new member remain"
         );
     }
 
@@ -627,7 +799,7 @@ mod tests {
     }
 
     #[test]
-    fn a_collection_member_that_is_not_an_item_fails_and_changes_nothing() {
+    fn a_collection_member_that_is_not_an_item_or_series_fails_and_changes_nothing() {
         let mut store = Store::open_in_memory().unwrap();
         let before = vec![entry("a", MediaKind::Movie)];
         store
@@ -643,6 +815,7 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, StoreError::InvalidLibrary(_)), "{err}");
+        assert!(err.to_string().contains("ghost"), "{err}");
         assert_eq!(store.library_items().unwrap(), before);
         assert_eq!(
             store.library_collections().unwrap(),
@@ -684,8 +857,8 @@ mod tests {
     fn the_library_survives_reopening_the_database() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("surfcult.db");
-        let entries = vec![entry("a", MediaKind::Movie)];
-        let collections = vec![collection("C", &["a"])];
+        let entries = vec![entry("a", MediaKind::Movie), labelled_episode("e", "s")];
+        let collections = vec![collection("C", &["a", "s"])];
         {
             let mut store = Store::open(&path).unwrap();
             store.replace_library(&entries, &collections, 9).unwrap();

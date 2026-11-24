@@ -11,13 +11,17 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::library::{MediaId, MediaKind, MediaSource, SourceError};
+use crate::library::{MediaId, MediaKind, MediaSource, SeriesEpisode, SourceError};
 use crate::store::Store;
 
 const ITEMS: &str = include_str!("../../tests/fixtures/jellyfin/items-page.json");
 const BOXSETS: &str = include_str!("../../tests/fixtures/jellyfin/boxsets-page.json");
 const CHILDREN: &str =
     include_str!("../../tests/fixtures/jellyfin/boxset-children-by-parent-id.json");
+const SERIES: &str = include_str!("../../tests/fixtures/jellyfin/series-page.json");
+const MEDIA_FOLDERS: &str = include_str!("../../tests/fixtures/jellyfin/media-folders.json");
+const LIBRARY_CHILDREN: &str =
+    include_str!("../../tests/fixtures/jellyfin/library-children-by-parent-id.json");
 
 /// A value that stands for the API key. Tests look for it everywhere it must not be.
 const SENTINEL: &str = "SENTINEL-KEY-0123456789abcdef";
@@ -150,17 +154,27 @@ fn serve_fixtures(path: &str, cap: usize, items: &str) -> Result<String, HttpErr
             .clone()
     };
     if let Some(parent) = param(path, "ParentId") {
-        let children: Value = serde_json::from_str(CHILDREN).unwrap();
+        // Libraries are listed recursively, collections are not.
+        let fixture = if param(path, "Recursive").is_some() {
+            LIBRARY_CHILDREN
+        } else {
+            CHILDREN
+        };
+        let children: Value = serde_json::from_str(fixture).unwrap();
         let all = children[parent]["Items"]
             .as_array()
             .cloned()
             .unwrap_or_default();
         return Ok(page(&all, path, cap));
     }
-    if param(path, "IncludeItemTypes") == Some("BoxSet") {
-        return Ok(page(&list(BOXSETS), path, cap));
+    if path.starts_with("/Library/MediaFolders?") {
+        return Ok(page(&list(MEDIA_FOLDERS), path, cap));
     }
-    Ok(page(&list(items), path, cap))
+    match param(path, "IncludeItemTypes") {
+        Some("BoxSet") => Ok(page(&list(BOXSETS), path, cap)),
+        Some("Series") => Ok(page(&list(SERIES), path, cap)),
+        _ => Ok(page(&list(items), path, cap)),
+    }
 }
 
 /// When the tests say a sync happened, in Unix epoch milliseconds.
@@ -183,6 +197,7 @@ const MOVIE_1: &str = "1e0ff4a8-a553-6961-2793-0e218769b7b7";
 const EPISODE_2: &str = "010f6f59-58ca-cbc6-0c2f-14f3bde31d24";
 const MOVIE_3: &str = "3282307a-d805-60f8-3e46-a3022f90087e";
 const MOVIE_4: &str = "a57a957c-1ae6-5318-4137-e200281aa5af";
+const SERIES_ID: &str = "5e1e5000-0000-4000-8000-000000000001";
 
 // ---- sync and the cache -------------------------------------------------
 
@@ -268,7 +283,11 @@ fn collections_list_their_members_in_jellyfins_order() {
         [MediaId::new(MOVIE_1), MediaId::new(MOVIE_3)]
     );
     assert_eq!(collections[1].name, "Fixture Collection B");
-    assert_eq!(collections[1].members, [MediaId::new(MOVIE_4)]);
+    assert_eq!(
+        collections[1].members,
+        [MediaId::new(MOVIE_4), MediaId::new(SERIES_ID)],
+        "a series is kept by its id"
+    );
 }
 
 #[test]
@@ -295,6 +314,125 @@ fn collection_children_that_are_not_cached_items_are_left_out() {
     let members = &store.list_collections().unwrap()[0].members;
 
     assert_eq!(members, &[MediaId::new(MOVIE_1), MediaId::new(MOVIE_3)]);
+}
+
+#[test]
+fn a_sync_reads_series_tags_genres_and_libraries() {
+    let http = FakeHttp::fixtures(500);
+    let (client, mut store) = client_and_store(&http);
+    sync(&client, &mut store, SYNCED_AT).unwrap();
+
+    let episode = store.resolve(&MediaId::new(EPISODE_2)).unwrap();
+    assert_eq!(
+        episode.series,
+        Some(SeriesEpisode {
+            series_id: MediaId::new(SERIES_ID),
+            series_name: "Fixture Series".into(),
+            season: Some(1),
+            number: Some(2),
+        })
+    );
+    assert_eq!(episode.tags, ["Saturday Morning"], "from the series");
+    assert_eq!(episode.genres, ["Animation", "Comedy"], "from the series");
+    assert_eq!(episode.libraries, ["Fixture Shows"]);
+
+    let movie = store.resolve(&MediaId::new(MOVIE_1)).unwrap();
+    assert_eq!(movie.series, None);
+    assert_eq!(movie.tags, ["Fixture Tag"]);
+    assert_eq!(movie.genres, ["Drama", "Comedy"]);
+    assert_eq!(movie.libraries, ["Fixture Movies"]);
+
+    let paths = http.paths();
+    assert!(paths.iter().any(|p| {
+        p.starts_with("/Items?Recursive=true&IncludeItemTypes=Movie,Episode")
+            && p.contains("Fields=MediaStreams,Chapters,Path,MediaSources,Tags,Genres")
+    }));
+    assert!(paths.iter().any(|p| {
+        p.starts_with("/Items?Recursive=true&IncludeItemTypes=Series&Fields=Tags,Genres")
+    }));
+    assert!(
+        paths
+            .iter()
+            .any(|p| p.starts_with("/Library/MediaFolders?IsHidden=false"))
+    );
+    let library_pages: Vec<_> = paths
+        .iter()
+        .filter(|p| param(p, "ParentId").is_some() && param(p, "Recursive").is_some())
+        .collect();
+    assert!(!library_pages.is_empty());
+    assert!(
+        library_pages
+            .iter()
+            .all(|p| param(p, "SortBy") == Some("SortName")),
+        "library pages are sorted so paging is stable: {library_pages:?}"
+    );
+}
+
+#[test]
+fn an_episodes_own_labels_come_first_and_series_labels_are_not_repeated() {
+    let items = json!({
+        "Items": [{
+            "Id": "e", "Type": "Episode", "RunTimeTicks": 10_000_000i64,
+            "SeriesId": SERIES_ID.replace('-', ""), "SeriesName": "Fixture Series",
+            "Tags": ["Own", "Saturday Morning", ""], "Genres": null,
+            "MediaStreams": [{ "Type": "Video", "Codec": "h264", "Width": 1, "Height": 1 }]
+        }],
+        "TotalRecordCount": 1
+    })
+    .to_string();
+    let http = FakeHttp::new(move |path| serve_fixtures(path, 500, &items));
+    let (client, mut store) = client_and_store(&http);
+    sync(&client, &mut store, SYNCED_AT).unwrap();
+
+    let episode = store.resolve(&MediaId::new("e")).unwrap();
+
+    assert_eq!(episode.tags, ["Own", "Saturday Morning"]);
+    assert_eq!(episode.genres, ["Animation", "Comedy"]);
+    let series = episode.series.unwrap();
+    assert_eq!(series.series_id.as_str(), SERIES_ID.replace('-', ""));
+    assert_eq!((series.season, series.number), (None, None));
+}
+
+#[test]
+fn every_source_kind_resolves_from_a_synced_cache() {
+    use crate::config::Source;
+    use crate::library::{PoolErrorReason, resolve_pool};
+
+    let (client, mut store) = client_and_store(&FakeHttp::fixtures(500));
+    sync(&client, &mut store, SYNCED_AT).unwrap();
+    let resolve = |source: Source| resolve_pool(7, &source, &store);
+    let pool = |source: Source| ids(&resolve(source).unwrap()).join(" ");
+
+    // Collection B lists movie 4 and the series, which becomes its episode.
+    assert_eq!(
+        pool(Source::JellyfinCollection("Fixture Collection B".into())),
+        [MOVIE_4, EPISODE_2].join(" ")
+    );
+    assert_eq!(
+        pool(Source::JellyfinLibrary("Fixture Movies".into())),
+        [MOVIE_1, MOVIE_3, MOVIE_4].join(" ")
+    );
+    // Movie 4's tag is "fixture tag"; names match exactly.
+    assert_eq!(pool(Source::JellyfinTag("Fixture Tag".into())), MOVIE_1);
+    assert_eq!(
+        pool(Source::JellyfinTag("Saturday Morning".into())),
+        EPISODE_2
+    );
+    assert_eq!(
+        pool(Source::JellyfinGenre("Comedy".into())),
+        [MOVIE_1, EPISODE_2, MOVIE_3].join(" ")
+    );
+    assert_eq!(
+        pool(Source::JellyfinSeries("Fixture Series".into())),
+        EPISODE_2
+    );
+
+    let err = resolve(Source::JellyfinGenre("Western".into())).unwrap_err();
+    assert_eq!(err.reason, PoolErrorReason::NotFound);
+    assert_eq!(
+        err.to_string(),
+        "channel 7: jellyfin_genre \"Western\" matches nothing in the library"
+    );
 }
 
 #[test]
@@ -388,8 +526,8 @@ fn a_response_without_a_count_stops_at_a_short_page() {
     assert_eq!((report.items, report.collections), (0, 0));
     assert_eq!(
         http.paths().len(),
-        2,
-        "one request for items, one for collections"
+        4,
+        "one request each for items, series, libraries and collections"
     );
 }
 
@@ -576,6 +714,30 @@ fn a_failure_after_the_items_were_fetched_still_leaves_the_cache_untouched() {
             }
         },
         |err| *err == JellyfinError::Status(500),
+    );
+}
+
+#[test]
+fn a_failure_while_listing_series_or_libraries_leaves_the_cache_untouched() {
+    assert_failed_sync_keeps_cache(
+        |path| {
+            if param(path, "IncludeItemTypes") == Some("Series") {
+                Err(HttpError::Status(500))
+            } else {
+                serve_fixtures(path, 500, ITEMS)
+            }
+        },
+        |err| *err == JellyfinError::Status(500),
+    );
+    assert_failed_sync_keeps_cache(
+        |path| {
+            if param(path, "ParentId").is_some() && param(path, "Recursive").is_some() {
+                Err(HttpError::Status(502))
+            } else {
+                serve_fixtures(path, 500, ITEMS)
+            }
+        },
+        |err| *err == JellyfinError::Status(502),
     );
 }
 
@@ -1443,6 +1605,7 @@ fn wait_for_fetches(fetches: &AtomicUsize, n: usize) {
 /// True for the request that starts a fetch: the first page of the item list.
 fn starts_a_fetch(path: &str) -> bool {
     param(path, "Recursive") == Some("true")
+        && param(path, "ParentId").is_none()
         && param(path, "IncludeItemTypes") == Some("Movie,Episode")
         && param(path, "StartIndex") == Some("0")
 }
