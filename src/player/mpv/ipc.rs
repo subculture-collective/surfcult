@@ -237,7 +237,10 @@ impl Session {
         self.leave_standby()?;
         self.command(json!(["set_property", "http-header-fields", fields]))?;
         let start = start_ms.saturating_sub(stream.stream_offset_ms);
-        let options = json!({ "start": seconds(start) });
+        // `sid` off: a program never shows the subtitle track MPV would pick
+        // from the file (the device profile offers every subtitle format only
+        // so that Jellyfin does not transcode for them).
+        let options = json!({ "start": seconds(start), "sid": "no" });
         let id = self.loadfile(&stream.url, "append", options)?;
         self.entries.insert(
             id,

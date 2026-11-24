@@ -10,7 +10,7 @@ The `Player` trait in `src/player/` is the screen as the tuner sees it: show sta
 | --- | --- | --- |
 | `binary` | `mpv` | The executable, found on `PATH`. |
 | `runtime_dir` | (required) | A directory only this user can open, mode 700. It holds `mpv.sock`, the overlay bitmaps, the CRT shader and the stand-by card's subtitle files. It is created if missing. An existing directory that others can open is refused. |
-| `output_args` | `PI_OUTPUT_ARGS` | `--profile=fast --vo=gpu --gpu-context=drm --drm-mode=1920x1080@60 --hwdec=drm,v4l2m2m --force-window=yes` (ADR 0001, decision 2). Tests use `--vo=null --ao=null`. |
+| `output_args` | `PI_OUTPUT_ARGS` | `--profile=fast --vo=gpu --gpu-context=drm --drm-mode=1920x1080@60 --hwdec=drm,v4l2m2m --fbo-format=rgba8 --force-window=yes` (ADR 0001, decision 2, and the Pi check of 2026-11-24 for `--fbo-format`). Tests use `--vo=null --ao=null`. |
 | `static_source` | `STATIC_SOURCE` | What static plays: grey noise generated live by FFmpeg's `lavfi` at 320x180 and 25 fps, scaled up by MPV. The generator never ends, so no file loops. |
 | `standby_source` | `STANDBY_SOURCE` | The stand-by card's picture: colour bars matched to the owner's design, a `lavfi` `color` source with one `drawbox` per colour region (`assets/standby/bars.lavfi`), generated live at 640x360 and 30 frames a second and scaled up by MPV on the GPU. The frames give the CRT shader something to move on. No audio. |
 | `standby_text` | `STANDBY_TEXT` | The stand-by card's message, `PLEASE STANDBY`. That text, in any case and with surrounding spaces ignored, is drawn from Oswald outlines; any other text is set in DejaVu Sans Bold (see [the stand-by card](#the-stand-by-card)). It is drawn in capitals whatever its case. |
@@ -33,7 +33,7 @@ Hardware decoding: `--hwdec=drm,v4l2m2m` asks for the Pi's H.265 decoder, then i
 | `show_static` | `loadfile <static_source> replace` with `loop-file=inf` |
 | `show_standby` | writes `standby.ass` to the runtime directory, `set_property glsl-shaders [...]` with the card's shaders if MPV has others, then `loadfile <standby_source> replace` with `loop-file=inf`, `sub-files-append=<runtime_dir>/standby.ass`, `blend-subtitles=yes` and `secondary-sub-ass-override=no` |
 | `play_clip(path)` | `loadfile <absolute path> replace` |
-| `queue_program(media, start_ms)` | `set_property http-header-fields [...]`, then `loadfile <url> append` with `start=<seconds>` |
+| `queue_program(media, start_ms)` | `set_property http-header-fields [...]`, then `loadfile <url> append` with `start=<seconds>` and `sid=no`, so a program never shows a subtitle track from its file |
 | `seek(position_ms)` | `seek <seconds> absolute` |
 | `stop` | `stop` |
 | `show_overlay(id, overlay)` | writes the BGRA pixels to `overlay-<id>.bgra` in the runtime directory, then `overlay-add <id> <x> <y> <file> 0 bgra <w> <h> <w*4>` |
@@ -106,13 +106,12 @@ The glitch acts only while the card is up. It stops when anything replaces the c
 
 ### GPU cost on the Pi
 
-Not measured yet; this is the part of issue #72 left to check on the Pi. The shader is one cheap pass at 1920x1080, but the Pi's V3D GPU is small, and ADR 0001 found that MPV's default video settings drop frames there without `--profile=fast`. Check:
+Measured on the Pi 4B on 2026-11-24 (details in `docs/research/2026-11-24-pi-hardware-checks.md`; rerun with the `tests/pi.rs` checks, see `docs/runbooks/raspberry-pi.md`). The card is a 30 frames a second source on a 60 Hz output.
 
-1. The card with the default filters: `mpv --profile=fast --vo=gpu --gpu-context=drm --drm-mode=1920x1080@60 --glsl-shaders=crt.glsl --blend-subtitles=yes --sub-file=standby.ass "$(cat assets/standby/bars.lavfi)"`, with `standby.ass` copied from the runtime directory while the card shows. Read `frame-drop-count` and `vo-delayed-frame-count` over IPC, and the CPU in `top`.
-2. A program with `crt` as a global filter: the same flags plus `--hwdec=drm,v4l2m2m`, on a 1080p H.265 file and a 1080p H.264 file. Check that `hwdec-current` still says `drm` or `v4l2m2m` and that no frames are dropped. To apply a shader, MPV must draw the hardware-decoded frames through the GPU rather than hand them straight to the display. If it cannot import them, it decodes in software or needs a copy path (`--hwdec=drm-copy`), and both cost CPU.
-3. How the card, the scanlines, the curvature and the glitch look on the TV.
-
-If the global shader costs too much, keep it on the card only, which is the default.
+- **The card with the default filters is smooth enough.** MPV uses about 0.5 cores whatever the filters, and the player's own loop (polling every 20 ms for the glitch) about 0.006. With `--fbo-format=rgba8` (now in `PI_OUTPUT_ARGS`) the CRT card drops 7 to 20% of its frames (45 of 600 in 20 s with the `mpv` command line; 56 to 123 with the player and its default filters, the runs varying); with MPV's default 16-bit intermediate format it dropped 20 to 40%, and even an empty user shader dropped 22 to 29%.
+- **A global `crt` is not usable on the Pi.** Any user shader makes MPV draw hardware-decoded video through a full-screen GPU pass, and the V3D cannot keep up at 1080p. On a 24 frames a second file it dropped 13% of frames with `rgba8` (37% without) and on 60 frames a second test files 50 to 70%. Hardware decoding stays on (`hwdec-current` is still `drm` or `v4l2m2m`); the drops are the GPU pass. Keep `crt` out of `filters`; it is the default on the card only.
+- **`vo=gpu-next` does not help.** It handles the shader better on the card, but with `--hwdec=drm` MPV 0.40 leaks dmabuf file descriptors ("Failed to duplicate dmabuf fd: Too many open files") and stops after a few seconds of video. Do not use it for programs.
+- **The look on the TV is the owner's check.** The screenshots the check saves show what MPV drew, not the TV.
 
 ### What was checked on the laptop
 

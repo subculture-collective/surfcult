@@ -5,6 +5,9 @@ use std::fs;
 pub const KEY_ENV: &str = "SURFCULT_JELLYFIN_API_KEY";
 /// The environment variable that holds the path of a file containing the key.
 pub const KEY_FILE_ENV: &str = "SURFCULT_JELLYFIN_API_KEY_FILE";
+/// The environment variable that names the Jellyfin user playback is asked
+/// for, by id. Without it surfcult asks for the first enabled user.
+pub const USER_ENV: &str = "SURFCULT_JELLYFIN_USER_ID";
 
 /// A Jellyfin API key. The value never appears in `Debug` output or in an
 /// error message, and the type has no `Display`. The only way to read it back
@@ -109,4 +112,19 @@ pub struct JellyfinConfig {
     /// slash is ignored.
     pub base_url: String,
     pub key: ApiKey,
+    /// The Jellyfin user id `PlaybackInfo` is requested for. An API key has
+    /// no user of its own, and Jellyfin 12 answers `400` to a request that
+    /// carries a device profile but no user. `None` asks for the first
+    /// enabled user; [`USER_ENV`] is the usual way to set it.
+    pub user_id: Option<String>,
+}
+
+impl JellyfinConfig {
+    /// The user id in [`USER_ENV`], if it is set and not empty.
+    pub fn user_id_from_env() -> Option<String> {
+        std::env::var(USER_ENV)
+            .ok()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+    }
 }

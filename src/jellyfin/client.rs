@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::Mutex;
 
 use serde_json::Value;
 
@@ -74,13 +75,26 @@ pub(super) struct FetchedLibrary {
 pub struct JellyfinClient {
     http: Box<dyn JellyfinHttp>,
     key: ApiKey,
+    /// The user `PlaybackInfo` is requested for; looked up once if not given.
+    user_id: Mutex<Option<String>>,
 }
 
 impl JellyfinClient {
     /// A client that talks to `config.base_url` over HTTP(S).
     pub fn new(config: JellyfinConfig) -> Self {
         let http = UreqHttp::new(&config.base_url);
-        Self::with_transport(config.key, http)
+        let client = Self::with_transport(config.key, http);
+        match config.user_id {
+            Some(id) => client.with_user_id(id),
+            None => client,
+        }
+    }
+
+    /// This client with playback requested for the user `id`, instead of the
+    /// first enabled user.
+    pub fn with_user_id(self, id: impl Into<String>) -> Self {
+        *self.user_id.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.into());
+        self
     }
 
     /// A client that sends its requests through `http`. Tests use this with
@@ -89,7 +103,30 @@ impl JellyfinClient {
         Self {
             http: Box::new(http),
             key,
+            user_id: Mutex::new(None),
         }
+    }
+
+    /// The user playback is requested for: the one given in the config, or
+    /// else the first enabled user Jellyfin lists, found once and kept.
+    pub(super) fn user_id(&self) -> Result<String, JellyfinError> {
+        let mut cached = self.user_id.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(id) = cached.as_ref() {
+            return Ok(id.clone());
+        }
+        let body = self.get("/Users")?;
+        let users: Vec<Value> = serde_json::from_str(&body)
+            .map_err(|source| JellyfinError::BadResponse(self.scrub(&source.to_string())))?;
+        let id = users
+            .iter()
+            .find(|user| user["Policy"]["IsDisabled"] != true)
+            .and_then(|user| user["Id"].as_str())
+            .ok_or_else(|| {
+                JellyfinError::NoPlayback("Jellyfin lists no enabled user to play as".into())
+            })?
+            .to_string();
+        *cached = Some(id.clone());
+        Ok(id)
     }
 
     fn get(&self, path_and_query: &str) -> Result<String, JellyfinError> {

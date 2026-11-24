@@ -41,7 +41,7 @@ mod wire;
 mod worker;
 
 pub use client::{JellyfinClient, JellyfinError};
-pub use config::{ApiKey, JellyfinConfig, KEY_ENV, KEY_FILE_ENV, KeyError};
+pub use config::{ApiKey, JellyfinConfig, KEY_ENV, KEY_FILE_ENV, KeyError, USER_ENV};
 pub use http::{HttpError, JellyfinHttp, UreqHttp};
 pub use playback::{DEVICE_ID, Playback, TranscodeSession};
 pub use sync::{SyncReport, sync};
