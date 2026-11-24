@@ -259,7 +259,8 @@ fn commands_become_mpv_commands() {
                 ["Authorization: MediaBrowser Token=\"KEY\""]
             ]),
             json!(["loadfile", "http://jellyfin/Videos/abc/stream?static=true", "append", -1, {
-                "start": "125.250"
+                "start": "125.250",
+                "sid": "no"
             }]),
             json!(["seek", 130.0, "absolute"]),
             json!([
@@ -412,7 +413,7 @@ fn a_stream_that_begins_at_an_offset_starts_and_seeks_relative_to_it() {
         commands[1],
         json!(["set_property", "http-header-fields", []])
     );
-    assert_eq!(commands[2][4], json!({ "start": "0.000" }));
+    assert_eq!(commands[2][4], json!({ "start": "0.000", "sid": "no" }));
     assert_eq!(commands.last().unwrap(), &json!(["seek", 10.0, "absolute"]));
 }
 
@@ -654,6 +655,7 @@ fn the_arguments_hold_the_socket_and_outputs_but_no_header() {
         .collect();
     assert!(args.contains(&"--input-ipc-server=/run/user/1000/surfcult/mpv.sock".into()));
     assert!(args.contains(&"--hwdec=drm,v4l2m2m".into()));
+    assert!(args.contains(&"--fbo-format=rgba8".into()), "8-bit frames");
     assert!(args.contains(&"--profile=fast".into()));
     assert!(args.contains(&"--input-terminal=no".into()));
     assert!(args.contains(&"--idle=yes".into()));

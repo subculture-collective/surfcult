@@ -139,6 +139,40 @@ ssh surfcult 'hostname; ip -br a; mpv --version | head -1; vcgencmd get_throttle
 
 Expected: hostname `surfcult`, `eth0` on `10.0.0.53/24`, MPV 0.40, `throttled=0x0`, and a CEC adapter at `/dev/cec0`.
 
+## Run the hardware checks
+
+`tests/pi.rs` holds the checks that need the Pi, its TV and the owner's Jellyfin: the watchdog (kill and hang MPV), both Jellyfin URL kinds playing, and the stand-by card's cost. They are `#[ignore]`d. Build the test binary on another machine (the Pi does not build Rust) and run it on the Pi. From a Linux x86_64 machine with `zig` and the Rust target:
+
+```bash
+rustup target add aarch64-unknown-linux-gnu
+```
+
+Make a linker wrapper, `zig-cc.sh`, that runs `zig cc` for the Pi and drops the two flags it does not take:
+
+```sh
+#!/bin/sh
+args=""
+for a in "$@"; do
+  case "$a" in
+    --target=*|-Wl,--fix-cortex-a53-843419) ;;
+    *) args="$args '$(printf %s "$a" | sed "s/'/'\\\\''/g")'" ;;
+  esac
+done
+eval exec zig cc -target aarch64-linux-gnu.2.36 $args
+```
+
+Then build, copy and run:
+
+```bash
+chmod +x zig-cc.sh
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=$PWD/zig-cc.sh CC_aarch64_unknown_linux_gnu=$PWD/zig-cc.sh AR_aarch64_unknown_linux_gnu="zig ar"
+cargo test --release --test pi --no-run --target aarch64-unknown-linux-gnu   # prints the executable path
+scp PATH-FROM-ABOVE surfcult:/tmp/pi-test
+ssh surfcult 'cd /tmp && SURFCULT_JELLYFIN_URL=http://10.0.0.200:8096 SURFCULT_JELLYFIN_API_KEY_FILE=$HOME/spike/.jf-key ./pi-test --ignored --nocapture --test-threads=1'
+```
+
+Run them one at a time (`--test-threads=1`): they share the TV. The Jellyfin check reads the key from the file and asserts that it never reaches MPV's command line. `SURFCULT_JELLYFIN_USER_ID` picks the Jellyfin user playback is asked for; without it the first enabled user is used. Results of the first run are in `docs/research/2026-11-24-pi-hardware-checks.md`.
+
 ## Roll back
 
 - Packages: `sudo apt-get remove mpv ffmpeg git cec-utils socat jq`, then `sudo apt-get autoremove`.

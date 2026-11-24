@@ -105,12 +105,19 @@ use glitch::{Flicker, Glitch, Step};
 use ipc::{IpcError, Session};
 
 /// MPV's output flags for the Pi 4B on its TV (ADR 0001, decision 2).
-pub const PI_OUTPUT_ARGS: [&str; 6] = [
+///
+/// `--fbo-format=rgba8` keeps MPV's intermediate frames at 8 bits per
+/// channel. With the default 16-bit format the V3D GPU dropped 29% of the
+/// stand-by card's frames even for an empty shader, and 8 bits made that 0%
+/// (Pi check of 2026-11-24, `docs/research/2026-11-24-pi-hardware-checks.md`).
+/// The pictures are SDR, so nothing is lost.
+pub const PI_OUTPUT_ARGS: [&str; 7] = [
     "--profile=fast",
     "--vo=gpu",
     "--gpu-context=drm",
     "--drm-mode=1920x1080@60",
     "--hwdec=drm,v4l2m2m",
+    "--fbo-format=rgba8",
     "--force-window=yes",
 ];
 

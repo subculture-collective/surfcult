@@ -13,6 +13,7 @@
 - `reference/tuner.md`: the tune-in sequence, clip choice, break stand-in, late-start seek, the stand-by card and how the tuner is driven
 - `runbooks/raspberry-pi.md`: reaching and operating the Pi 4B TV box
 - `research/2026-11-22-pi-playback-spike.md`: Phase 0 results: decode, Jellyfin tune time, overlay cost
+- `research/2026-11-24-pi-hardware-checks.md`: the hardware checks of #21, #22 and #72 on the Pi: playback URLs, the MPV watchdog, the stand-by card and CRT cost
 - `../tools/pi-spike/`: the scripts behind those measurements
 - `../tools/standby/`: the generator of the stand-by card's colour bars and Oswald-derived lettering, with its fit data and the Oswald licence
 - `adr/`: architecture decision records; [0001](adr/0001-pi-and-library-findings.md) records what the Pi 4B and the library showed in Phase 0

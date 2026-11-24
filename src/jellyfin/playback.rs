@@ -115,6 +115,7 @@ impl JellyfinClient {
     pub fn playback(&self, id: &MediaId, start_ms: u64) -> Result<Playback, JellyfinError> {
         let start_ticks = start_ms.saturating_mul(TICKS_PER_MS as u64);
         let request = json!({
+            "UserId": self.user_id()?,
             "DeviceProfile": device_profile(),
             "MaxStreamingBitrate": MAX_STREAMING_BITRATE,
             "StartTimeTicks": start_ticks,
@@ -248,8 +249,29 @@ pub(super) fn device_profile() -> Value {
         }],
         "CodecProfiles": codec_profiles,
         "ContainerProfiles": [],
-        "SubtitleProfiles": [],
+        "SubtitleProfiles": subtitle_profiles(),
     })
+}
+
+/// Every subtitle format Jellyfin knows, each offered as `External`.
+///
+/// surfcult never shows subtitles. The profile still has to list them: on
+/// Jellyfin 12.4.0 an empty `SubtitleProfiles` makes an item that has any
+/// subtitle stream transcode, however well its video and audio fit, and
+/// reports every reason (video, audio and subtitle codec) at once. `Drop` and
+/// `Embed` were also refused. Checked against the owner's server on
+/// 2026-11-24: with this list HEVC and H.264 items direct-play and AV1,
+/// H.264 10-bit and 4K HDR items still transcode.
+const SUBTITLE_FORMATS: [&str; 14] = [
+    "srt", "subrip", "ass", "ssa", "pgssub", "pgs", "dvdsub", "dvbsub", "vtt", "webvtt", "sub",
+    "idx", "smi", "microdvd",
+];
+
+fn subtitle_profiles() -> Vec<Value> {
+    SUBTITLE_FORMATS
+        .iter()
+        .map(|format| json!({ "Format": format, "Method": "External" }))
+        .collect()
 }
 
 /// The item id in a transcode path, `/videos/{id}/stream.ts?...`.

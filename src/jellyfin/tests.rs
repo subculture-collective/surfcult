@@ -68,7 +68,15 @@ impl FakeHttp {
         post: impl Fn(&str, &str) -> Result<String, HttpError> + Send + Sync + 'static,
     ) -> Arc<Self> {
         Arc::new(Self {
-            handler: Box::new(|_| Ok(String::new())),
+            handler: Box::new(|path| {
+                Ok(match path {
+                    "/Users" => json!([
+                        { "Id": USER_ID, "Name": "owner", "Policy": { "IsDisabled": false } }
+                    ])
+                    .to_string(),
+                    _ => String::new(),
+                })
+            }),
             post: Some(Box::new(post)),
             calls: Mutex::new(Vec::new()),
         })
@@ -179,6 +187,8 @@ fn serve_fixtures(path: &str, cap: usize, items: &str) -> Result<String, HttpErr
 
 /// When the tests say a sync happened, in Unix epoch milliseconds.
 const SYNCED_AT: i64 = 1_767_225_600_000;
+/// The id of the one user the fake Jellyfin lists.
+const USER_ID: &str = "07a5e934d9c04bc5b9c4c2a7e0c2a8f1";
 
 fn client(http: &Arc<FakeHttp>) -> JellyfinClient {
     JellyfinClient::with_transport(key(), http.clone())
@@ -806,6 +816,7 @@ fn the_key_is_not_in_debug_output_or_error_text() {
     let config = JellyfinConfig {
         base_url: "http://jellyfin.example:8096".into(),
         key: key(),
+        user_id: None,
     };
     let mut store = Store::open_in_memory().unwrap();
     sync(&client, &mut store, SYNCED_AT).unwrap();
@@ -1004,6 +1015,11 @@ fn fake_jellyfin() -> Arc<FakeHttp> {
             .and_then(|rest| rest.strip_suffix("/PlaybackInfo"))
             .unwrap_or_else(|| panic!("unexpected POST {path}"));
         let request: Value = serde_json::from_str(body).unwrap();
+        // Jellyfin 12.4.0 answers 400 to a device profile without a user
+        // (found on the Pi, 2026-11-24).
+        if !request["DeviceProfile"].is_null() && request["UserId"].as_str() != Some(USER_ID) {
+            return Err(HttpError::Status(400));
+        }
         let items: Value = serde_json::from_str(ITEMS).unwrap();
         let item = items["Items"]
             .as_array()
@@ -1028,11 +1044,17 @@ fn fake_jellyfin() -> Arc<FakeHttp> {
             range: video["VideoRangeType"].as_str().unwrap(),
             audio: audio["Codec"].as_str().unwrap(),
         };
-        let info = if jellyfin_direct_plays(&request["DeviceProfile"], &streams) {
-            DIRECT_INFO
-        } else {
-            TRANSCODE_INFO
-        };
+        // Jellyfin 12.4.0 transcodes an item with subtitles when the profile
+        // offers no subtitle format, whatever its video and audio are.
+        let subtitles_offered = request["DeviceProfile"]["SubtitleProfiles"]
+            .as_array()
+            .is_some_and(|formats| !formats.is_empty());
+        let info =
+            if subtitles_offered && jellyfin_direct_plays(&request["DeviceProfile"], &streams) {
+                DIRECT_INFO
+            } else {
+                TRANSCODE_INFO
+            };
         Ok(for_item(info, id))
     })
 }
@@ -1169,10 +1191,12 @@ fn the_playback_request_carries_the_profile_and_start_position() {
         .unwrap();
 
     let calls = http.calls();
-    assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].method, "POST");
-    assert_eq!(calls[0].path, format!("/Items/{MOVIE_1}/PlaybackInfo"));
-    let body: Value = serde_json::from_str(calls[0].body.as_deref().unwrap()).unwrap();
+    assert_eq!(calls.len(), 2, "the user lookup, then the request");
+    assert_eq!((calls[0].method, calls[0].path.as_str()), ("GET", "/Users"));
+    assert_eq!(calls[1].method, "POST");
+    assert_eq!(calls[1].path, format!("/Items/{MOVIE_1}/PlaybackInfo"));
+    let body: Value = serde_json::from_str(calls[1].body.as_deref().unwrap()).unwrap();
+    assert_eq!(body["UserId"], USER_ID);
     assert_eq!(body["DeviceProfile"], super::playback::device_profile());
     assert_eq!(body["StartTimeTicks"], 15_000_000);
     assert_eq!(body["SubtitleStreamIndex"], -1, "subtitles off");
@@ -1729,4 +1753,78 @@ fn a_newer_failure_is_reported_but_the_newest_snapshot_is_still_written() {
     assert_eq!(err, JellyfinError::Status(500));
     assert_eq!(store.list_items().unwrap().len(), 4);
     assert_eq!(store.library_synced_at_ms().unwrap(), Some(SYNCED_AT));
+}
+
+#[test]
+fn playback_is_requested_for_the_first_enabled_user_and_the_lookup_is_kept() {
+    let http = fake_jellyfin();
+    let client = client(&http);
+
+    client.playback(&MediaId::new(MOVIE_1), 0).unwrap();
+    client.playback(&MediaId::new(MOVIE_1), 60_000).unwrap();
+
+    let paths = http.paths();
+    assert_eq!(
+        paths.iter().filter(|path| *path == "/Users").count(),
+        1,
+        "{paths:?}"
+    );
+    let bodies: Vec<Value> = http
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|call| call.body.as_deref())
+        .map(|body| serde_json::from_str(body).unwrap())
+        .collect();
+    assert_eq!(bodies.len(), 2);
+    assert!(bodies.iter().all(|body| body["UserId"] == USER_ID));
+}
+
+#[test]
+fn a_configured_user_id_is_used_without_listing_users() {
+    let http = fake_jellyfin();
+    let client = JellyfinClient::with_transport(key(), http.clone()).with_user_id(USER_ID);
+
+    client.playback(&MediaId::new(MOVIE_1), 0).unwrap();
+
+    assert!(!http.paths().iter().any(|path| path == "/Users"));
+}
+
+#[test]
+fn disabled_users_are_skipped_and_no_enabled_user_is_an_error() {
+    let users = |body: Value| {
+        let http = FakeHttp::new(move |path| {
+            assert_eq!(path, "/Users");
+            Ok(body.to_string())
+        });
+        client(&http).user_id()
+    };
+
+    let id = users(json!([
+        { "Id": "aaaa", "Policy": { "IsDisabled": true } },
+        { "Id": "bbbb", "Policy": { "IsDisabled": false } },
+    ]))
+    .unwrap();
+    assert_eq!(id, "bbbb");
+
+    let err = users(json!([{ "Id": "aaaa", "Policy": { "IsDisabled": true } }])).unwrap_err();
+    assert!(matches!(err, JellyfinError::NoPlayback(_)), "{err:?}");
+    let err = users(json!([])).unwrap_err();
+    assert!(matches!(err, JellyfinError::NoPlayback(_)), "{err:?}");
+}
+
+#[test]
+fn the_profile_offers_every_subtitle_format_as_external() {
+    // Without them Jellyfin 12.4.0 transcodes any item that has subtitles.
+    let profile = super::playback::device_profile();
+    let formats = profile["SubtitleProfiles"].as_array().unwrap();
+    assert!(formats.len() >= 10, "{formats:?}");
+    assert!(formats.iter().all(|format| format["Method"] == "External"));
+    for needed in ["srt", "ass", "pgssub"] {
+        assert!(
+            formats.iter().any(|format| format["Format"] == needed),
+            "{needed}"
+        );
+    }
 }

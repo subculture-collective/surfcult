@@ -78,7 +78,8 @@ mode = "weighted"
 # Filters: crt (a CRT look: scanlines, curvature, colour fringing, flicker,
 # a rolling band; on the card it covers the band and text too) and glitch
 # (thin slices of the card's band shift for a moment now and then). An empty
-# list turns its filters off.
+# list turns its filters off. Leave crt out of `filters` on a Raspberry Pi 4:
+# a global shader makes video drop frames there (docs/reference/player.md).
 # [display]
 # filters = []
 # standby_filters = ["crt", "glitch"]
