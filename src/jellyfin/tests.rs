@@ -4,7 +4,9 @@
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -793,4 +795,158 @@ fn the_real_transport_reports_an_unreachable_server() {
         .unwrap_err();
 
     assert!(matches!(err, HttpError::Unreachable(_)), "{err:?}");
+}
+
+// ---- the background worker ---------------------------------------------
+
+/// Calls `apply` until it returns a result, failing the test after a few seconds.
+fn apply_soon(worker: &SyncWorker, store: &mut Store) -> Result<SyncReport, JellyfinError> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(result) = worker.apply(store, SYNCED_AT) {
+            return result;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the worker sent nothing"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Waits until `fetches` has counted at least `n`, failing after a few seconds.
+fn wait_for_fetches(fetches: &AtomicUsize, n: usize) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while fetches.load(Ordering::SeqCst) < n {
+        assert!(std::time::Instant::now() < deadline, "the worker stalled");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// True for the request that starts a fetch: the first page of the item list.
+fn starts_a_fetch(path: &str) -> bool {
+    param(path, "Recursive") == Some("true")
+        && param(path, "IncludeItemTypes") == Some("Movie,Episode")
+        && param(path, "StartIndex") == Some("0")
+}
+
+const HOUR: Duration = Duration::from_secs(3600);
+
+#[test]
+fn the_worker_fetches_at_once_and_apply_writes_what_sync_would() {
+    let (client, mut expected_store) = client_and_store(&FakeHttp::fixtures(500));
+    let expected = sync(&client, &mut expected_store, SYNCED_AT).unwrap();
+    let worker = SyncWorker::spawn(client_and_store(&FakeHttp::fixtures(500)).0, HOUR).unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+
+    let report = apply_soon(&worker, &mut store).unwrap();
+
+    assert_eq!(report, expected);
+    assert_eq!(snapshot(&store), snapshot(&expected_store));
+    assert_eq!(store.library_synced_at_ms().unwrap(), Some(SYNCED_AT));
+}
+
+#[test]
+fn a_failed_fetch_is_reported_by_apply_and_leaves_the_cache_untouched() {
+    let mut store = Store::open_in_memory().unwrap();
+    sync(&client(&FakeHttp::fixtures(500)), &mut store, SYNCED_AT - 1).unwrap();
+    let before = snapshot(&store);
+    let failing = FakeHttp::new(|_| Err(HttpError::Status(503)));
+    let worker = SyncWorker::spawn(client(&failing), HOUR).unwrap();
+
+    let err = apply_soon(&worker, &mut store).unwrap_err();
+
+    assert_eq!(err, JellyfinError::Status(503));
+    assert_eq!(snapshot(&store), before);
+    assert_eq!(store.library_synced_at_ms().unwrap(), Some(SYNCED_AT - 1));
+}
+
+#[test]
+fn apply_with_nothing_pending_returns_none_and_writes_nothing() {
+    // The fetch waits until the test drops `release`.
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let gate = Mutex::new(gate);
+    let http = FakeHttp::new(move |path| {
+        let _ = gate.lock().unwrap().recv();
+        serve_fixtures(path, 500, ITEMS)
+    });
+    let worker = SyncWorker::spawn(client(&http), HOUR).unwrap();
+    // Declared after `worker`, so a failed assertion drops it first and the
+    // fetch can finish before the worker's drop joins the thread.
+    let release = release;
+    let mut store = Store::open_in_memory().unwrap();
+
+    assert!(worker.apply(&mut store, SYNCED_AT).is_none());
+    assert!(store.list_items().unwrap().is_empty());
+    assert_eq!(store.library_synced_at_ms().unwrap(), None);
+
+    drop(release);
+    assert_eq!(apply_soon(&worker, &mut store).unwrap().items, 4);
+}
+
+#[test]
+fn dropping_a_worker_does_not_wait_for_the_next_interval() {
+    let worker = SyncWorker::spawn(client(&FakeHttp::fixtures(500)), HOUR).unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    apply_soon(&worker, &mut store).unwrap();
+
+    let started = std::time::Instant::now();
+    drop(worker);
+
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "drop took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn of_several_pending_snapshots_only_the_newest_is_written() {
+    let only_movie_3 = {
+        let all: Value = serde_json::from_str(ITEMS).unwrap();
+        json!({ "Items": [all["Items"][2].clone()], "TotalRecordCount": 1 }).to_string()
+    };
+    // The first fetch sees the whole library; every later one sees only movie 3.
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let counter = fetches.clone();
+    let http = FakeHttp::new(move |path| {
+        let n = if starts_a_fetch(path) {
+            counter.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            counter.load(Ordering::SeqCst)
+        };
+        let items = if n == 1 { ITEMS } else { &only_movie_3 };
+        serve_fixtures(path, 500, items)
+    });
+    let worker = SyncWorker::spawn(client(&http), Duration::from_millis(1)).unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    // The third fetch starts only after the second was sent.
+    wait_for_fetches(&fetches, 3);
+
+    let report = apply_soon(&worker, &mut store).unwrap();
+
+    assert_eq!(report.items, 1);
+    assert_eq!(ids(&store.list_items().unwrap()), [MOVIE_3]);
+}
+
+#[test]
+fn a_newer_failure_is_reported_but_the_newest_snapshot_is_still_written() {
+    // The first fetch succeeds; every later one fails.
+    let fetches = Arc::new(AtomicUsize::new(0));
+    let counter = fetches.clone();
+    let http = FakeHttp::new(move |path| {
+        if starts_a_fetch(path) && counter.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Err(HttpError::Status(500));
+        }
+        serve_fixtures(path, 500, ITEMS)
+    });
+    let worker = SyncWorker::spawn(client(&http), Duration::from_millis(1)).unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    wait_for_fetches(&fetches, 3);
+
+    let err = apply_soon(&worker, &mut store).unwrap_err();
+
+    assert_eq!(err, JellyfinError::Status(500));
+    assert_eq!(store.list_items().unwrap().len(), 4);
+    assert_eq!(store.library_synced_at_ms().unwrap(), Some(SYNCED_AT));
 }

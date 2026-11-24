@@ -9,6 +9,7 @@ The words surfcult's code and documentation use, and the code item each one name
 - **Media source**: the interface that lists and resolves media items without saying where they come from, `library::MediaSource`. Its two adapters are the library cache in the `Store` and `library::FakeMediaSource` for tests.
 - **Library cache**: the `library_*` tables in the store, a copy of the Jellyfin library. Everything except the sync step reads the library from here, so it keeps working while Jellyfin is down.
 - **Sync**: `jellyfin::sync`, which fetches the library from Jellyfin and replaces the library cache in one transaction. The caller passes the sync time; a failed sync leaves the cache as it was.
+- **Sync worker**: `jellyfin::SyncWorker`, which fetches the library on its own thread at a fixed interval and sends each result back. The store's owner writes the newest snapshot with `SyncWorker::apply`; the worker never touches the store.
 - **Program pool**: the ordered items a channel draws its programs from, built from its source by `library::resolve_pool`. Until #30 only collections resolve; every other source returns `PoolError::Unsupported` instead of the whole library.
 
 ## Clips
