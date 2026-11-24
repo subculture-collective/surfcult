@@ -46,6 +46,8 @@ The program depends on the clip length and the clip depends on the program, so t
 
 If a break, filler or ident event is on when the clip ends, the clip stands in for the break and no second clip plays. The tuner queues the first program event after the break (a break can be several events in a row) at the offset where that event starts. `timeline::program_from` holds this rule. That program starts when the clip ends, so it is early by at most the time left in the break. The tuner does not correct that. The next event boundary puts the screen back on the schedule.
 
+A filler stretch can be much longer than a break: a blocks channel with no default plays its filler pool through the time no block covers ([schedule.md](schedule.md), "What plays"). So the tuner queues the program after the run only if it starts at most 10 minutes after the clip ends (`Timing::max_early_ms`). Otherwise it leaves static up with `NoProgramSoon { next_program_ms }`; it cannot play the filler clips itself yet. A stretch that runs past the hour of schedule the tuner reads has no program in view and ends on `Gap` with no next start. A break longer than 10 minutes is treated the same way.
+
 ## A late start
 
 When the player reports the program started, the tuner looks up the live position for that moment. If the program is behind it by more than 500 ms (`Timing::late_tolerance_ms`), it seeks to the live position once. It does not seek twice, does not seek backwards, and does not seek when the live event is no longer that program.
@@ -61,6 +63,7 @@ The tuner leaves static on screen and sets `State::Failed` with a `Reason` when:
 - the tune-in pool has no clip (`NoTuneInClip`);
 - the channel has no events from now to an hour after the clip ends (`NoEvents`);
 - nothing is scheduled when the clip ends, or nothing follows the break (`Gap`);
+- a break, filler or ident run is on when the clip ends and the next program starts more than `Timing::max_early_ms` later (`NoProgramSoon`);
 - the schedule or the media source fails (`Schedule`, `Media`);
 - the player rejects a command (`Player`).
 

@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use chrono::{TimeZone, Utc};
 
+use super::blocks::{Span, spans};
 use super::breaks::cut_points;
 use super::*;
 use crate::clips::{Clip, Pool as ClipPool};
-use crate::config::{Breaks, Channel, Mode, Plan, Source};
+use crate::config::{Block, Breaks, Channel, Day, Lineup, Mode, Plan, Source, Tz, Weights};
 use crate::library::{Chapter, FakeMediaSource, MediaId, MediaItem, MediaKind, resolve_pool};
 use crate::store::Store;
 use crate::timeline::{Event, EventKind};
@@ -33,6 +34,7 @@ fn channel(number: u32, mode: Mode) -> Channel {
         plan: Plan::Fixed {
             source: Source::JellyfinLibrary("All".into()),
             mode,
+            weights: Weights::new(),
         },
         grid: None,
         breaks: None,
@@ -40,10 +42,13 @@ fn channel(number: u32, mode: Mode) -> Channel {
     }
 }
 
+static NO_WEIGHTS: Weights = Weights::new();
+
 fn params(mode: Mode) -> Params<'static> {
     Params {
         channel: 3,
         mode,
+        weights: &NO_WEIGHTS,
         breaks: None,
     }
 }
@@ -221,21 +226,6 @@ fn a_duplicate_id_in_the_pool_is_used_once() {
     assert_eq!(out.events[0].media_duration_ms, 20 * 60_000);
 }
 
-#[test]
-fn weighted_is_not_generated_yet() {
-    let result = generate(
-        &params(Mode::Weighted),
-        &pool(&["a"]),
-        &Resume::default(),
-        0,
-        1,
-    );
-    assert!(matches!(
-        result,
-        Err(ScheduleError::UnsupportedMode(Mode::Weighted))
-    ));
-}
-
 /// `n` items of 30 minutes each, named `i0`, `i1`, ...
 fn uniform(n: usize) -> Vec<MediaItem> {
     (0..n).map(|i| item(&format!("i{i}"), 30)).collect()
@@ -295,6 +285,7 @@ fn a_shuffle_differs_by_channel() {
         let params = Params {
             channel,
             mode: Mode::Shuffle,
+            weights: &NO_WEIGHTS,
             breaks: None,
         };
         let out = generate(&params, &items, &Resume::default(), start, start + DAY).unwrap();
@@ -427,13 +418,39 @@ fn setup() -> Store {
     Store::open_in_memory().unwrap()
 }
 
+/// `extend` for a channel with one source, whose pool is `items`, in UTC.
+fn extend_fixed(
+    store: &mut Store,
+    channel: &Channel,
+    items: &[MediaItem],
+    clips: &[ClipPool],
+    now_ms: i64,
+    clock_trusted: bool,
+) -> Result<Extended, ScheduleError> {
+    let pools: Vec<(Source, Vec<MediaItem>)> = channel
+        .plan
+        .sources()
+        .into_iter()
+        .map(|source| (source.clone(), items.to_vec()))
+        .collect();
+    extend(
+        store,
+        channel,
+        &pools,
+        clips,
+        Tz::UTC,
+        now_ms,
+        clock_trusted,
+    )
+}
+
 #[test]
 fn nothing_is_generated_while_the_clock_is_not_trusted() {
     let items = pool(&["a", "b"]);
     let mut store = setup();
     let channel = channel(3, Mode::Sequential);
 
-    let result = extend(
+    let result = extend_fixed(
         &mut store,
         &channel,
         &items,
@@ -460,7 +477,7 @@ fn an_extend_stores_seven_days_with_no_gaps_and_ends_on_the_last_program() {
     let channel = channel(3, Mode::Sequential);
     let now = at(2026, 6, 1, 12, 0);
 
-    let result = extend(&mut store, &channel, &items, &[], now, true).unwrap();
+    let result = extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
 
     let Extended::Generated {
         from_ms,
@@ -511,7 +528,7 @@ fn a_sequential_extend_continues_after_the_last_stored_program() {
         )
         .unwrap();
 
-    extend(
+    extend_fixed(
         &mut store,
         &channel(3, Mode::Sequential),
         &items,
@@ -545,7 +562,7 @@ fn the_resume_point_ignores_a_break_after_the_last_program() {
         )
         .unwrap();
 
-    extend(
+    extend_fixed(
         &mut store,
         &channel(3, Mode::Sequential),
         &items,
@@ -565,11 +582,11 @@ fn a_sequential_channel_resumes_where_it_stopped_after_a_long_gap() {
     let mut store = setup();
     let channel = channel(3, Mode::Sequential);
     let then = at(2026, 6, 1, 12, 0);
-    extend(&mut store, &channel, &items, &[], then, true).unwrap();
+    extend_fixed(&mut store, &channel, &items, &[], then, true).unwrap();
     let last_old = store.last_program_before(3, i64::MAX).unwrap().unwrap();
     let now = then + 30 * DAY;
 
-    extend(&mut store, &channel, &items, &[], now, true).unwrap();
+    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
 
     let first_new = &store.events_between(3, now, now + HORIZON_MS).unwrap()[0];
     let after = items.iter().position(|i| i.id == last_old).unwrap();
@@ -586,10 +603,10 @@ fn a_reopened_store_continues_where_it_stopped() {
     let later = now + 3 * DAY + 37 * MINUTE;
 
     let mut store = Store::open(&path).unwrap();
-    extend(&mut store, &channel, &items, &[], now, true).unwrap();
+    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
     drop(store);
     let mut store = Store::open(&path).unwrap();
-    extend(&mut store, &channel, &items, &[], later, true).unwrap();
+    extend_fixed(&mut store, &channel, &items, &[], later, true).unwrap();
 
     let stored = store.events_between(3, now, later + HORIZON_MS).unwrap();
     assert_covers(&stored, now, later + HORIZON_MS);
@@ -608,13 +625,13 @@ fn later_extends_continue_the_schedule_without_a_gap_or_a_repeat() {
         let channel = channel(3, mode);
         let now = at(2026, 6, 1, 12, 0);
 
-        extend(&mut store, &channel, &items, &[], now, true).unwrap();
+        extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
         // Up to date: the same moment again has nothing to add.
-        let again = extend(&mut store, &channel, &items, &[], now, true).unwrap();
+        let again = extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
         assert!(matches!(again, Extended::UpToDate { .. }), "{mode:?}");
         // Three days on, the next run fills the gap at the far end.
         let later = now + 3 * DAY + 37 * MINUTE;
-        extend(&mut store, &channel, &items, &[], later, true).unwrap();
+        extend_fixed(&mut store, &channel, &items, &[], later, true).unwrap();
 
         let stored = store.events_between(3, now, later + HORIZON_MS).unwrap();
         assert_covers(&stored, now, later + HORIZON_MS);
@@ -639,8 +656,8 @@ fn a_shuffle_extended_twice_matches_one_unbroken_run() {
     let now = at(2026, 6, 1, 12, 0);
     let later = now + 2 * DAY + 11 * MINUTE;
 
-    extend(&mut store, &channel, &items, &[], now, true).unwrap();
-    extend(&mut store, &channel, &items, &[], later, true).unwrap();
+    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
+    extend_fixed(&mut store, &channel, &items, &[], later, true).unwrap();
 
     let whole = shuffle(&items, &[], now, later + HORIZON_MS);
     let stored = store.events_between(3, now, later + HORIZON_MS).unwrap();
@@ -670,14 +687,14 @@ fn a_shuffle_extend_reads_back_past_ids_no_longer_in_the_pool() {
         .collect();
     store.write_events(3, &old).unwrap();
 
-    extend(&mut store, &channel, &items, &[], now, true).unwrap();
+    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
     let first_end = store
         .events_between(3, now, i64::MAX)
         .unwrap()
         .last()
         .unwrap()
         .end_ms;
-    extend(
+    extend_fixed(
         &mut store,
         &channel,
         &items,
@@ -703,10 +720,10 @@ fn an_extend_after_a_long_gap_starts_at_now() {
     let mut store = setup();
     let channel = channel(3, Mode::Sequential);
     let then = at(2026, 6, 1, 12, 0);
-    extend(&mut store, &channel, &items, &[], then, true).unwrap();
+    extend_fixed(&mut store, &channel, &items, &[], then, true).unwrap();
     let now = then + 30 * DAY;
 
-    extend(&mut store, &channel, &items, &[], now, true).unwrap();
+    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
 
     let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
     assert_covers(&stored, now, now + HORIZON_MS);
@@ -718,7 +735,7 @@ fn an_unplayable_library_writes_nothing_and_reports_it() {
     let mut store = setup();
     let now = at(2026, 6, 1, 12, 0);
 
-    let result = extend(
+    let result = extend_fixed(
         &mut store,
         &channel(3, Mode::Shuffle),
         &items,
@@ -747,17 +764,6 @@ fn an_unplayable_library_writes_nothing_and_reports_it() {
 }
 
 #[test]
-fn a_blocks_channel_is_refused() {
-    let mut store = setup();
-    let mut channel = channel(3, Mode::Sequential);
-    channel.plan = Plan::Blocks(Vec::new());
-
-    let result = extend(&mut store, &channel, &pool(&["a"]), &[], 0, true);
-
-    assert!(matches!(result, Err(ScheduleError::UnsupportedPlan)));
-}
-
-#[test]
 fn a_resolved_collection_pool_schedules_only_its_items() {
     let media = pool(&["a", "b", "c", "d"])
         .into_iter()
@@ -767,6 +773,7 @@ fn a_resolved_collection_pool_schedules_only_its_items() {
     channel.plan = Plan::Fixed {
         source: Source::JellyfinCollection("Cartoons".into()),
         mode: Mode::Sequential,
+        weights: Weights::new(),
     };
     let Plan::Fixed { source, .. } = &channel.plan else {
         unreachable!()
@@ -775,7 +782,7 @@ fn a_resolved_collection_pool_schedules_only_its_items() {
     let mut store = setup();
     let now = at(2026, 6, 1, 12, 0);
 
-    extend(&mut store, &channel, &items, &[], now, true).unwrap();
+    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
 
     let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
     assert_eq!(ids(&stored[..4]), ["d", "b", "d", "b"]);
@@ -810,6 +817,7 @@ fn with_breaks(mode: Mode, breaks: BreakPlan<'_>) -> Params<'_> {
     Params {
         channel: 3,
         mode,
+        weights: &NO_WEIGHTS,
         breaks: Some(breaks),
     }
 }
@@ -1218,8 +1226,8 @@ fn an_extend_with_breaks_twice_matches_one_unbroken_run() {
         let mut store = setup();
         let channel = channel_with_breaks(mode);
 
-        extend(&mut store, &channel, &items, &pools, now, true).unwrap();
-        extend(&mut store, &channel, &items, &pools, later, true).unwrap();
+        extend_fixed(&mut store, &channel, &items, &pools, now, true).unwrap();
+        extend_fixed(&mut store, &channel, &items, &pools, later, true).unwrap();
 
         let params = with_breaks(mode, plan(11, 120, pools[0].clips(), pools[1].clips()));
         let end = later + HORIZON_MS;
@@ -1241,7 +1249,7 @@ fn an_extend_without_its_clip_pools_reports_short_breaks() {
     let channel = channel_with_breaks(Mode::Sequential);
     let now = at(2026, 6, 1, 12, 0);
 
-    let result = extend(&mut store, &channel, &items, &[], now, true).unwrap();
+    let result = extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
 
     let Extended::Generated { notes, .. } = result else {
         panic!("expected events, got {result:?}");
@@ -1249,4 +1257,589 @@ fn an_extend_without_its_clip_pools_reports_short_breaks() {
     assert!(matches!(notes[..], [Note::ShortBreaks { .. }]), "{notes:?}");
     let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
     assert!(stored.iter().all(|e| e.kind == EventKind::Program));
+}
+
+// Weighted.
+
+fn weighted_params(weights: &Weights) -> Params<'_> {
+    Params {
+        channel: 3,
+        mode: Mode::Weighted,
+        weights,
+        breaks: None,
+    }
+}
+
+/// How often `id` plays, as a share of all events.
+fn share(events: &[Event], id: &str) -> f64 {
+    let count = events.iter().filter(|e| e.media_id.as_str() == id).count();
+    count as f64 / events.len() as f64
+}
+
+#[test]
+fn weighted_picks_approach_the_weights_and_repeat_for_a_fixed_seed() {
+    // One-minute items, so a 20,000-minute window holds 20,000 picks.
+    let items: Vec<MediaItem> = ["a", "b", "c"].iter().map(|id| item(id, 1)).collect();
+    let weights = Weights::from([("b".into(), 3), ("c".into(), 6)]);
+    let start = at(2026, 6, 1, 0, 0);
+    let end = start + 20_000 * MINUTE;
+    let run = |channel| {
+        let params = Params {
+            channel,
+            ..weighted_params(&weights)
+        };
+        generate(&params, &items, &Resume::default(), start, end).unwrap()
+    };
+
+    let out = run(3);
+    assert_eq!(out.events.len(), 20_000);
+    for (id, expected) in [("a", 0.1), ("b", 0.3), ("c", 0.6)] {
+        let share = share(&out.events, id);
+        assert!((share - expected).abs() < 0.015, "{id}: {share}");
+    }
+    assert_eq!(out, run(3));
+    assert_ne!(out.events, run(4).events);
+}
+
+#[test]
+fn weighted_without_weights_is_uniform_and_skips_zero_runtimes() {
+    let mut items: Vec<MediaItem> = ["a", "b"].iter().map(|id| item(id, 1)).collect();
+    items.push(item("zero", 0));
+    let start = at(2026, 6, 1, 0, 0);
+    let out = generate(
+        &weighted_params(&NO_WEIGHTS),
+        &items,
+        &Resume::default(),
+        start,
+        start + 10_000 * MINUTE,
+    )
+    .unwrap();
+    assert!((share(&out.events, "a") - 0.5).abs() < 0.02);
+    assert_eq!(share(&out.events, "zero"), 0.0);
+    assert_eq!(out.notes, [Note::SkippedZeroRuntime { count: 1 }]);
+}
+
+#[test]
+fn a_weight_for_a_title_not_in_the_pool_is_noted() {
+    let weights = Weights::from([("a".into(), 2), ("Gone".into(), 5)]);
+    let out = generate(
+        &weighted_params(&weights),
+        &pool(&["a", "b"]),
+        &Resume::default(),
+        0,
+        DAY,
+    )
+    .unwrap();
+    assert_eq!(
+        out.notes,
+        [Note::WeightNotInPool {
+            title: "Gone".into()
+        }]
+    );
+}
+
+#[test]
+fn a_weighted_extend_resumed_later_matches_one_unbroken_run() {
+    let items = pool(&["a", "b", "c", "d"]);
+    let weights = Weights::from([("a".into(), 5)]);
+    let mut channel = channel(3, Mode::Weighted);
+    channel.plan = Plan::Fixed {
+        source: Source::JellyfinLibrary("All".into()),
+        mode: Mode::Weighted,
+        weights: weights.clone(),
+    };
+    let now = at(2026, 6, 1, 12, 0);
+    let later = now + 3 * DAY;
+    let mut store = setup();
+
+    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
+    extend_fixed(&mut store, &channel, &items, &[], later, true).unwrap();
+
+    let whole = generate(
+        &weighted_params(&weights),
+        &items,
+        &Resume::default(),
+        now,
+        later + HORIZON_MS,
+    )
+    .unwrap();
+    assert_eq!(
+        store.events_between(3, now, i64::MAX).unwrap(),
+        whole.events
+    );
+}
+
+// Blocks.
+
+const CHICAGO: Tz = Tz::America__Chicago;
+
+/// A block on `days`, or every day when `days` is empty, as in the config.
+fn block(days: &[Day], start: (u16, u16), end: (u16, u16), tag: &str, mode: Mode) -> Block {
+    let every = [
+        Day::Mon,
+        Day::Tue,
+        Day::Wed,
+        Day::Thu,
+        Day::Fri,
+        Day::Sat,
+        Day::Sun,
+    ];
+    Block {
+        days: if days.is_empty() { &every } else { days }.to_vec(),
+        start_minute: start.0 * 60 + start.1,
+        end_minute: end.0 * 60 + end.1,
+        source: Source::JellyfinTag(tag.into()),
+        mode,
+        weights: Weights::new(),
+    }
+}
+
+/// Items named `{prefix}0`, `{prefix}1`, ... of `minutes` each.
+fn named(prefix: &str, n: usize, minutes: u64) -> Vec<MediaItem> {
+    (0..n)
+        .map(|i| item(&format!("{prefix}{i}"), minutes))
+        .collect()
+}
+
+fn lane<'a>(block: &'a Block, pool: &'a [MediaItem]) -> Lane<'a> {
+    Lane {
+        mode: block.mode,
+        weights: &block.weights,
+        pool,
+    }
+}
+
+fn layout<'a>(
+    blocks: &[Block],
+    lanes: Vec<Lane<'a>>,
+    default: Option<usize>,
+    filler: &'a [Clip],
+    start: i64,
+    end: i64,
+) -> Layout<'a> {
+    Layout {
+        channel: 3,
+        breaks: None,
+        spans: spans(blocks, CHICAGO, start, end).unwrap(),
+        lanes,
+        default,
+        filler,
+    }
+}
+
+/// The spans of block `i` that start in `[from, to)`.
+fn block_spans(spans: &[Span], i: usize, from: i64, to: i64) -> Vec<(i64, i64)> {
+    spans
+        .iter()
+        .filter(|s| s.block == Some(i) && s.start_ms >= from && s.start_ms < to)
+        .map(|s| (s.start_ms, s.end_ms))
+        .collect()
+}
+
+#[test]
+fn a_block_starts_and_ends_at_local_times_on_ordinary_and_dst_days() {
+    let year = (at(2026, 1, 1, 0, 0), at(2027, 1, 1, 0, 0));
+    // Chicago in 2026: CST (UTC-6) until 02:00 on Sunday March 8, the 23-hour
+    // day, then CDT (UTC-5) until 02:00 on Sunday November 1, the 25-hour day.
+    let morning = [block(&[Day::Sun], (6, 0), (12, 0), "m", Mode::Sequential)];
+    let found = spans(&morning, CHICAGO, year.0, year.1).unwrap();
+    for ((y, m, d), (from, to)) in [
+        ((2026, 3, 1), (12, 18)),
+        ((2026, 3, 8), (11, 17)),
+        ((2026, 6, 7), (11, 17)),
+        ((2026, 10, 25), (11, 17)),
+        ((2026, 11, 1), (12, 18)),
+    ] {
+        let midnight = at(y, m, d, 0, 0);
+        assert_eq!(
+            block_spans(&found, 0, midnight, midnight + DAY),
+            [(at(y, m, d, from, 0), at(y, m, d, to, 0))],
+            "{y}-{m}-{d}"
+        );
+    }
+
+    let all_day = [block(&[Day::Sun], (0, 0), (24, 0), "s", Mode::Sequential)];
+    let found = spans(&all_day, CHICAGO, year.0, year.1).unwrap();
+    let hours = |y, m, d| {
+        let midnight = at(y, m, d, 0, 0);
+        let [(start, end)] = block_spans(&found, 0, midnight, midnight + DAY)[..] else {
+            panic!("one span on {y}-{m}-{d}");
+        };
+        (end - start) / (60 * MINUTE)
+    };
+    assert_eq!(hours(2026, 6, 7), 24);
+    assert_eq!(hours(2026, 3, 8), 23);
+    assert_eq!(hours(2026, 11, 1), 25);
+
+    let small_hours = [block(&[Day::Sun], (1, 30), (3, 0), "n", Mode::Sequential)];
+    let found = spans(&small_hours, CHICAGO, year.0, year.1).unwrap();
+    let on = |y, m, d| {
+        let midnight = at(y, m, d, 0, 0);
+        block_spans(&found, 0, midnight, midnight + DAY)
+    };
+    // 01:30 happens twice on November 1; the block starts at the first, CDT,
+    // and ends at 03:00 CST.
+    assert_eq!(
+        on(2026, 11, 1),
+        [(at(2026, 11, 1, 6, 30), at(2026, 11, 1, 9, 0))]
+    );
+    // 02:00 to 03:00 does not happen on March 8: 01:30 CST to 03:00 CDT is
+    // half an hour.
+    assert_eq!(
+        on(2026, 3, 8),
+        [(at(2026, 3, 8, 7, 30), at(2026, 3, 8, 8, 0))]
+    );
+}
+
+#[test]
+fn a_block_time_that_does_not_occur_starts_when_the_clocks_jump() {
+    let blocks = [block(&[Day::Sun], (2, 30), (4, 0), "x", Mode::Sequential)];
+    let from = at(2026, 3, 7, 0, 0);
+    let found = spans(&blocks, CHICAGO, from, from + 2 * DAY).unwrap();
+    // 02:30 on March 8 does not exist; the block starts at 03:00 CDT.
+    assert_eq!(
+        block_spans(&found, 0, from, from + 2 * DAY),
+        [(at(2026, 3, 8, 8, 0), at(2026, 3, 8, 9, 0))]
+    );
+}
+
+#[test]
+fn spans_cover_the_window_without_gaps() {
+    let blocks = [
+        block(&[Day::Sat, Day::Sun], (6, 0), (12, 0), "a", Mode::Shuffle),
+        block(&[], (12, 0), (24, 0), "b", Mode::Sequential),
+    ];
+    let start = at(2026, 10, 30, 5, 0);
+    let end = start + HORIZON_MS;
+    let found = spans(&blocks, CHICAGO, start, end).unwrap();
+    assert!(found[0].start_ms <= start);
+    assert!(found.last().unwrap().end_ms >= end);
+    for pair in found.windows(2) {
+        assert_eq!(pair[0].end_ms, pair[1].start_ms);
+        assert!(pair[0].start_ms < pair[0].end_ms);
+    }
+    assert!(spans(&blocks, CHICAGO, end, start).unwrap().is_empty());
+}
+
+#[test]
+fn programs_start_at_a_block_start_and_are_cut_at_its_end() {
+    // Saturday 06:00 to 12:00 is cartoons; the rest of the week the default.
+    let blocks = [block(&[Day::Sat], (6, 0), (12, 0), "c", Mode::Sequential)];
+    let cartoons = named("c", 3, 25);
+    let movies = named("m", 4, 95);
+    let lanes = vec![
+        lane(&blocks[0], &cartoons),
+        Lane {
+            mode: Mode::Shuffle,
+            weights: &NO_WEIGHTS,
+            pool: &movies,
+        },
+    ];
+    // A week that holds the 25-hour day, Sunday November 1.
+    let start = at(2026, 10, 30, 5, 0);
+    let end = start + HORIZON_MS;
+    let layout = layout(&blocks, lanes, Some(1), &[], start, end);
+
+    let out = generate_blocks(&layout, &Resume::default(), start, end).unwrap();
+
+    assert_covers(&out.events, start, end);
+    // Saturday October 31 is CDT: 06:00 is 11:00 UTC and 12:00 is 17:00 UTC.
+    let (from, to) = (at(2026, 10, 31, 11, 0), at(2026, 10, 31, 17, 0));
+    let first = out.events.iter().position(|e| e.start_ms == from).unwrap();
+    let last = out.events.iter().position(|e| e.end_ms == to).unwrap();
+    assert!(
+        out.events[first..=last]
+            .iter()
+            .all(|e| e.media_id.as_str().starts_with('c'))
+    );
+    assert_eq!(ids(&out.events[first..first + 4]), ["c0", "c1", "c2", "c0"]);
+    // Six hours do not divide into 25-minute cartoons, so the last is cut.
+    let cut = &out.events[last];
+    assert!(cut.end_ms - cut.start_ms < 25 * MINUTE);
+    assert_eq!(cut.media_duration_ms, 25 * 60_000);
+    let others = out.events[..first].iter().chain(&out.events[last + 1..]);
+    assert!(others.clone().all(|e| e.media_id.as_str().starts_with('m')));
+    assert!(out.notes.is_empty(), "{:?}", out.notes);
+}
+
+#[test]
+fn a_sequential_block_continues_where_it_stopped_the_day_before() {
+    let blocks = [
+        block(&[Day::Mon, Day::Tue], (6, 0), (7, 0), "a", Mode::Sequential),
+        block(&[Day::Mon, Day::Tue], (7, 0), (8, 0), "b", Mode::Sequential),
+    ];
+    let a = named("a", 5, 20);
+    let b = named("b", 2, 30);
+    let lanes = vec![lane(&blocks[0], &a), lane(&blocks[1], &b)];
+    let start = at(2026, 6, 1, 0, 0); // a Monday
+    let end = start + 2 * DAY;
+    let layout = layout(&blocks, lanes, None, &[], start, end);
+
+    let out = generate_blocks(&layout, &Resume::default(), start, end).unwrap();
+
+    assert_eq!(
+        ids(&out.events),
+        ["a0", "a1", "a2", "b0", "b1", "a3", "a4", "a0", "b0", "b1"]
+    );
+}
+
+#[test]
+fn time_without_a_block_or_default_plays_filler_clips() {
+    let blocks = [block(&[Day::Mon], (6, 0), (7, 0), "a", Mode::Sequential)];
+    let a = named("a", 1, 20);
+    let clips = [clip("ident", 40), clip("slate", 50)];
+    let six = at(2026, 6, 1, 11, 0); // 06:00 CDT
+    let (start, end) = (six - 10 * MINUTE, six + 62 * MINUTE);
+    let lanes = vec![lane(&blocks[0], &a)];
+    let layout = layout(&blocks, lanes, None, &clips, start, end);
+
+    let out = generate_blocks(&layout, &Resume::default(), start, end).unwrap();
+
+    assert_covers(&out.events, start, end);
+    let (before, rest): (Vec<&Event>, Vec<&Event>) =
+        out.events.iter().partition(|e| e.start_ms < six);
+    assert!(before.iter().all(|e| e.kind == EventKind::Filler));
+    assert_eq!(before.last().unwrap().end_ms, six);
+    assert!(rest[..3].iter().all(|e| e.kind == EventKind::Program));
+    assert_eq!(rest[2].end_ms, six + 60 * MINUTE);
+    // From 07:00 the clips play from the first again.
+    let after = rest[3];
+    assert_eq!(after.kind, EventKind::Filler);
+    assert_eq!(
+        (after.media_id.as_str(), after.media_offset_ms),
+        (clip_id("ident").as_str(), 0)
+    );
+    assert!(out.notes.is_empty(), "{:?}", out.notes);
+}
+
+#[test]
+fn filler_resumed_mid_gap_continues_the_same_cycle() {
+    let blocks = [block(&[Day::Mon], (6, 0), (7, 0), "a", Mode::Sequential)];
+    let a = named("a", 1, 20);
+    let clips = [clip("ident", 40), clip("slate", 50)];
+    let start = at(2026, 6, 1, 12, 0);
+    let end = start + 3 * 60 * MINUTE;
+    let run = |from| {
+        let lanes = vec![lane(&blocks[0], &a)];
+        let layout = layout(&blocks, lanes, None, &clips, from, end);
+        generate_blocks(&layout, &Resume::default(), from, end).unwrap()
+    };
+
+    let whole = run(start);
+    for cut in [7, 30, 101] {
+        let rest = run(whole.events[cut].start_ms);
+        assert_eq!(rest.events, whole.events[cut..], "resumed at {cut}");
+    }
+}
+
+#[test]
+fn time_with_nothing_to_play_is_dead_air_and_noted() {
+    let blocks = [block(&[Day::Mon], (6, 0), (7, 0), "a", Mode::Sequential)];
+    let a = named("a", 1, 20);
+    let six = at(2026, 6, 1, 11, 0); // 06:00 CDT
+    let (start, end) = (six - 60 * MINUTE, six + 120 * MINUTE);
+    let layout = layout(&blocks, vec![lane(&blocks[0], &a)], None, &[], start, end);
+
+    let out = generate_blocks(&layout, &Resume::default(), start, end).unwrap();
+
+    assert_eq!(out.events.len(), 3);
+    assert_eq!(out.events[0].start_ms, six);
+    assert_eq!(out.events[2].end_ms, six + 60 * MINUTE);
+    assert_eq!(
+        out.notes,
+        [Note::DeadAir {
+            ms: 2 * 60 * 60_000
+        }]
+    );
+}
+
+#[test]
+fn a_block_with_nothing_playable_falls_back_to_the_default() {
+    let blocks = [block(&[Day::Mon], (6, 0), (7, 0), "a", Mode::Sequential)];
+    let default = named("d", 2, 30);
+    let lanes = vec![
+        lane(&blocks[0], &[]),
+        Lane {
+            mode: Mode::Sequential,
+            weights: &NO_WEIGHTS,
+            pool: &default,
+        },
+    ];
+    let six = at(2026, 6, 1, 11, 0);
+    let layout = layout(&blocks, lanes, Some(1), &[], six, six + 60 * MINUTE);
+
+    let out = generate_blocks(&layout, &Resume::default(), six, six + 60 * MINUTE).unwrap();
+
+    assert_eq!(ids(&out.events), ["d0", "d1"]);
+    assert_eq!(out.notes, [Note::NoPlayableItems]);
+}
+
+fn blocks_channel_with_breaks() -> Channel {
+    let mut channel = channel_with_breaks(Mode::Sequential);
+    channel.plan = Plan::Blocks {
+        blocks: vec![
+            block(
+                &[Day::Sat, Day::Sun],
+                (6, 0),
+                (12, 0),
+                "cartoons",
+                Mode::Shuffle,
+            ),
+            block(
+                &[Day::Mon, Day::Wed, Day::Fri],
+                (18, 30),
+                (23, 0),
+                "drama",
+                Mode::Sequential,
+            ),
+        ],
+        default: Some(Lineup {
+            source: Source::JellyfinTag("movies".into()),
+            mode: Mode::Weighted,
+            weights: Weights::from([("m1".into(), 4)]),
+        }),
+    };
+    channel
+}
+
+fn blocks_pools() -> Vec<(Source, Vec<MediaItem>)> {
+    vec![
+        (Source::JellyfinTag("cartoons".into()), named("c", 6, 22)),
+        (Source::JellyfinTag("drama".into()), named("d", 5, 44)),
+        (Source::JellyfinTag("movies".into()), named("m", 4, 97)),
+    ]
+}
+
+#[test]
+fn a_blocks_extend_twice_matches_one_unbroken_run_across_dst() {
+    let channel = blocks_channel_with_breaks();
+    let pools = blocks_pools();
+    let clips = clip_pools();
+    // Through the 25-hour day, Sunday November 1.
+    let now = at(2026, 10, 28, 12, 0);
+    let later = now + 2 * DAY + 11 * MINUTE;
+    let mut store = setup();
+
+    extend(&mut store, &channel, &pools, &clips, CHICAGO, now, true).unwrap();
+    extend(&mut store, &channel, &pools, &clips, CHICAGO, later, true).unwrap();
+
+    let Plan::Blocks { blocks, default } = &channel.plan else {
+        unreachable!()
+    };
+    let default = default.as_ref().unwrap();
+    let lanes = vec![
+        lane(&blocks[0], &pools[0].1),
+        lane(&blocks[1], &pools[1].1),
+        Lane {
+            mode: default.mode,
+            weights: &default.weights,
+            pool: &pools[2].1,
+        },
+    ];
+    let end = later + HORIZON_MS;
+    let layout = Layout {
+        channel: 3,
+        breaks: Some(plan(11, 120, clips[0].clips(), clips[1].clips())),
+        spans: spans(blocks, CHICAGO, now, end).unwrap(),
+        lanes,
+        default: Some(2),
+        filler: clips[1].clips(),
+    };
+    let whole = generate_blocks(&layout, &Resume::default(), now, end).unwrap();
+
+    let stored = store.events_between(3, now, i64::MAX).unwrap();
+    assert_eq!(stored, whole.events);
+    assert!(stored.iter().any(|e| e.kind == EventKind::Break));
+    // Saturday's cartoons start at 06:00 CDT and Sunday's at 06:00 CST, and
+    // both run six hours.
+    for start in [at(2026, 10, 31, 11, 0), at(2026, 11, 1, 12, 0)] {
+        let first = stored.iter().find(|e| e.start_ms == start).unwrap();
+        assert!(first.media_id.as_str().starts_with('c'), "{first:?}");
+        assert!(stored.iter().any(|e| e.end_ms == start + 6 * 60 * MINUTE));
+    }
+}
+
+#[test]
+fn a_blocks_extend_reads_back_to_each_sequential_block() {
+    let channel = blocks_channel_with_breaks();
+    let pools = blocks_pools();
+    let now = at(2026, 6, 1, 12, 0); // a Monday
+    let mut store = setup();
+
+    extend(&mut store, &channel, &pools, &[], CHICAGO, now, true).unwrap();
+    // A week later the drama block continues after its last episode, though
+    // many movies and cartoons played since.
+    extend(
+        &mut store,
+        &channel,
+        &pools,
+        &[],
+        CHICAGO,
+        now + 7 * DAY,
+        true,
+    )
+    .unwrap();
+
+    let stored = store.events_between(3, now, i64::MAX).unwrap();
+    let drama: Vec<&str> = programs(&stored)
+        .into_iter()
+        .filter(|id| id.starts_with('d'))
+        .collect();
+    let expected: Vec<String> = (0..drama.len()).map(|i| format!("d{}", i % 5)).collect();
+    assert_eq!(drama, expected);
+    assert!(drama.len() > 20);
+}
+
+#[test]
+fn break_clips_cut_off_at_a_block_end_play_in_the_next_break() {
+    // Each day the block ends one minute into the break, so only its first
+    // clip plays; the next day's break starts with the clip that did not.
+    let blocks = [block(
+        &[Day::Mon, Day::Tue],
+        (6, 0),
+        (6, 11),
+        "p",
+        Mode::Sequential,
+    )];
+    let show = [item("p", 20)];
+    let clips = [clip("a", 60), clip("b", 60)];
+    let start = at(2026, 6, 1, 0, 0); // a Monday
+    let end = start + 2 * DAY;
+    let mut layout = layout(
+        &blocks,
+        vec![lane(&blocks[0], &show)],
+        None,
+        &[],
+        start,
+        end,
+    );
+    layout.breaks = Some(plan(10, 120, &clips, &[]));
+
+    let out = generate_blocks(&layout, &Resume::default(), start, end).unwrap();
+
+    let breaks: Vec<&str> = out
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::Break)
+        .map(|e| e.media_id.as_str())
+        .collect();
+    assert_eq!(breaks, [clip_id("a"), clip_id("b")]);
+}
+
+#[test]
+fn breaks_after_a_block_end_are_not_counted_as_short() {
+    // `p` runs 60 minutes with a cut every 10 minutes, but the block ends at
+    // 06:15. Without filler each break is short; only the one at 06:10 plays.
+    let blocks = [block(&[Day::Mon], (6, 0), (6, 15), "p", Mode::Sequential)];
+    let show = [item("p", 60)];
+    let ads = [clip("a", 60)];
+    let six = at(2026, 6, 1, 11, 0); // 06:00 CDT
+    let end = six + 15 * MINUTE;
+    let mut layout = layout(&blocks, vec![lane(&blocks[0], &show)], None, &[], six, end);
+    layout.breaks = Some(plan(10, 120, &ads, &[]));
+
+    let out = generate_blocks(&layout, &Resume::default(), six, end).unwrap();
+
+    assert_eq!(out.events.last().unwrap().end_ms, end);
+    assert_eq!(out.notes, [Note::ShortBreaks { count: 1 }]);
 }

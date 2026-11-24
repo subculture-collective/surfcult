@@ -3,7 +3,7 @@
 //! Values that can be wrong in ways worth naming (modes, durations, times, the
 //! time zone) stay strings here so each problem is reported against its key.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -11,7 +11,8 @@ use serde::Deserialize;
 
 use super::duration::{parse_duration, parse_minute_of_day};
 use super::{
-    Block, Breaks, Channel, Config, Day, InterstitialPool, Mode, Plan, Problem, Source, Tz,
+    Block, Breaks, Channel, Config, Day, InterstitialPool, Lineup, Mode, Plan, Problem, Source, Tz,
+    Weights,
 };
 
 #[derive(Deserialize)]
@@ -35,6 +36,9 @@ struct RawChannel {
     breaks: Option<RawBreaks>,
     filler: Option<String>,
     #[serde(default)]
+    weights: BTreeMap<String, i64>,
+    default: Option<RawLineup>,
+    #[serde(default)]
     block: Vec<RawBlock>,
 }
 
@@ -55,6 +59,17 @@ struct RawBlock {
     end: String,
     source: Source,
     mode: String,
+    #[serde(default)]
+    weights: BTreeMap<String, i64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawLineup {
+    source: Source,
+    mode: String,
+    #[serde(default)]
+    weights: BTreeMap<String, i64>,
 }
 
 #[derive(Deserialize)]
@@ -222,18 +237,39 @@ impl RawChannel {
                 );
                 return None;
             }
+            if !self.weights.is_empty() {
+                problems.add(
+                    at("weights"),
+                    "not allowed with mode \"blocks\"; set weights on a block or on default",
+                );
+            }
+            let default = self.default.as_ref().and_then(|raw| {
+                let at = |key: &str| format!("channel[{i}].default.{key}");
+                let mode = block_mode(&raw.mode, &at("mode"), problems);
+                let weights = check_weights(&raw.weights, mode, &at("weights"), problems);
+                Some(Lineup {
+                    source: raw.source.clone(),
+                    mode: mode?,
+                    weights,
+                })
+            });
             let blocks = check_blocks(&self.block, i, problems)?;
-            return Some(Plan::Blocks(blocks));
+            return Some(Plan::Blocks { blocks, default });
         }
 
         if !self.block.is_empty() {
             problems.add(at("block"), "blocks need mode = \"blocks\"");
         }
+        if self.default.is_some() {
+            problems.add(at("default"), "a default needs mode = \"blocks\"");
+        }
         let mode = parse_mode(&self.mode, &at("mode"), problems);
+        let weights = check_weights(&self.weights, mode, &at("weights"), problems);
         match (&self.source, mode) {
             (Some(source), Some(mode)) => Some(Plan::Fixed {
                 source: source.clone(),
                 mode,
+                weights,
             }),
             (None, _) => {
                 problems.add(at("source"), "missing; a channel needs a source");
@@ -257,6 +293,45 @@ fn parse_mode(text: &str, field: &str, problems: &mut Problems) -> Option<Mode> 
             None
         }
     }
+}
+
+/// A block's or a default's mode, which cannot itself be `blocks`.
+fn block_mode(text: &str, field: &str, problems: &mut Problems) -> Option<Mode> {
+    if text == "blocks" {
+        problems.add(field, "cannot itself use mode \"blocks\"");
+        return None;
+    }
+    parse_mode(text, field, problems)
+}
+
+/// Checks `weights` for a lineup in `mode`. Weights are only allowed with
+/// `weighted` and must be whole numbers from 1 to 4294967295. `mode` is `None`
+/// when it was already reported as wrong; then only the values are checked.
+fn check_weights(
+    raw: &BTreeMap<String, i64>,
+    mode: Option<Mode>,
+    field: &str,
+    problems: &mut Problems,
+) -> Weights {
+    if raw.is_empty() {
+        return Weights::new();
+    }
+    if mode.is_some_and(|mode| mode != Mode::Weighted) {
+        problems.add(field, "only used with mode \"weighted\"");
+    }
+    let mut weights = Weights::new();
+    for (title, &weight) in raw {
+        match u32::try_from(weight) {
+            Ok(weight) if weight >= 1 => {
+                weights.insert(title.clone(), weight);
+            }
+            _ => problems.add(
+                format!("{field}.{title:?}"),
+                format!("{weight} is not a weight; use a whole number of at least 1"),
+            ),
+        }
+    }
+    weights
 }
 
 fn positive_duration(text: &str, field: &str, problems: &mut Problems) -> Option<Duration> {
@@ -334,13 +409,8 @@ fn check_blocks(raw: &[RawBlock], channel: usize, problems: &mut Problems) -> Op
             );
         }
 
-        let mode = match block.mode.as_str() {
-            "blocks" => {
-                problems.add(at("mode"), "a block cannot itself use mode \"blocks\"");
-                None
-            }
-            text => parse_mode(text, &at("mode"), problems),
-        };
+        let mode = block_mode(&block.mode, &at("mode"), problems);
+        let weights = check_weights(&block.weights, mode, &at("weights"), problems);
 
         if let (Some(start), Some(end), Some(mode)) = (start, end, mode)
             && end > start
@@ -351,6 +421,7 @@ fn check_blocks(raw: &[RawBlock], channel: usize, problems: &mut Problems) -> Op
                 end_minute: end,
                 source: block.source.clone(),
                 mode,
+                weights,
             };
             if let Some(earlier) = blocks.iter().position(|other| overlaps(other, &candidate)) {
                 problems.add(

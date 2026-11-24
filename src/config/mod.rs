@@ -7,6 +7,7 @@
 mod duration;
 mod raw;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -29,8 +30,9 @@ pub struct Channel {
     /// Programs start on this grid and gaps are filled.
     pub grid: Option<Duration>,
     pub breaks: Option<Breaks>,
-    /// Pool used to fill grid gaps and to pad commercial breaks the break
-    /// pool leaves short.
+    /// Pool used to pad commercial breaks the break pool leaves short, fill
+    /// grid gaps and play the time a blocks channel has no block or default
+    /// for.
     pub filler: Option<String>,
 }
 
@@ -38,8 +40,53 @@ pub struct Channel {
 /// each have their own.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
-    Fixed { source: Source, mode: Mode },
-    Blocks(Vec<Block>),
+    Fixed {
+        source: Source,
+        mode: Mode,
+        weights: Weights,
+    },
+    /// Time-of-day blocks. Time no block covers plays `default` when there is
+    /// one, and otherwise the channel's `filler` pool.
+    Blocks {
+        blocks: Vec<Block>,
+        default: Option<Lineup>,
+    },
+}
+
+impl Plan {
+    /// The distinct sources the plan plays, in config order: the ones the
+    /// caller resolves into program pools.
+    pub fn sources(&self) -> Vec<&Source> {
+        let all: Vec<&Source> = match self {
+            Self::Fixed { source, .. } => vec![source],
+            Self::Blocks { blocks, default } => blocks
+                .iter()
+                .map(|block| &block.source)
+                .chain(default.iter().map(|lineup| &lineup.source))
+                .collect(),
+        };
+        let mut distinct: Vec<&Source> = Vec::new();
+        for source in all {
+            if !distinct.contains(&source) {
+                distinct.push(source);
+            }
+        }
+        distinct
+    }
+}
+
+/// Relative weights for `mode = "weighted"`, keyed by item title. Every pool
+/// item whose title equals a key has that weight; any other item weighs 1.
+/// Weights are whole numbers of at least 1.
+pub type Weights = BTreeMap<String, u32>;
+
+/// A source played in a mode, with weights when the mode is `weighted`: a
+/// blocks channel's `default`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lineup {
+    pub source: Source,
+    pub mode: Mode,
+    pub weights: Weights,
 }
 
 /// Where a channel's items come from in Jellyfin.
@@ -75,7 +122,8 @@ pub enum Day {
 /// A time-of-day window with its own source and mode.
 ///
 /// Times are minutes after midnight in the config time zone. `end_minute` may be
-/// 1440 (24:00); a block does not wrap past midnight.
+/// 1440 (24:00); a block does not wrap past midnight. `days` are the local
+/// days the block starts on.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Block {
     pub days: Vec<Day>,
@@ -83,6 +131,7 @@ pub struct Block {
     pub end_minute: u16,
     pub source: Source,
     pub mode: Mode,
+    pub weights: Weights,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -420,6 +420,42 @@ fn filler_counts_as_a_break() {
 }
 
 #[test]
+fn a_long_filler_stretch_does_not_queue_the_next_program_early() {
+    // Time no block covers on a blocks channel is filler for as long as it
+    // lasts. The clip ends at T + 1.7 s; `next` starts 40 minutes later.
+    let events = vec![
+        event(T - 100_000, T + 1_000, "show", 0, EventKind::Program),
+        event(T + 1_000, T + 2_400_000, "fill", 0, EventKind::Filler),
+        event(T + 2_400_000, T + 4_000_000, "next", 0, EventKind::Program),
+    ];
+    let mut rig = Rig::new(events, vec![direct("next")], tune_in_clips());
+    rig.tune(CHANNEL, T);
+    rig.at(T + 500);
+    assert_eq!(
+        rig.failed_with(),
+        Some(&Reason::NoProgramSoon {
+            next_program_ms: T + 2_400_000
+        })
+    );
+    assert_eq!(rig.commands(), [Command::ShowStatic]);
+}
+
+#[test]
+fn a_program_up_to_the_limit_after_the_clip_is_still_queued() {
+    // `next` starts exactly `max_early_ms` after the clip ends at T + 1.7 s.
+    let starts = T + 1_700 + 600_000;
+    let events = vec![
+        event(T - 100_000, T + 1_000, "show", 0, EventKind::Program),
+        event(T + 1_000, starts, "fill", 0, EventKind::Filler),
+        event(starts, starts + 900_000, "next", 0, EventKind::Program),
+    ];
+    let mut rig = Rig::new(events, vec![direct("next")], tune_in_clips());
+    rig.tune(CHANNEL, T);
+    rig.at(T + 500);
+    assert_eq!(rig.commands()[2], queue("next", 0));
+}
+
+#[test]
 fn a_break_that_ends_before_the_clip_does_not_stand_in() {
     // The break is over at T + 1.2 s, before the clip ends at T + 1.7 s.
     let events = vec![

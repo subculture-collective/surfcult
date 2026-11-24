@@ -2,11 +2,14 @@
 //!
 //! [`extend`] keeps a channel's week filled in the
 //! [`Store`](crate::store::Store). Inside it, `generate` is a pure function. It
-//! takes a channel's number, mode and break plan (with the clips it may use),
-//! the items to play, the programs and last break clip before the window and a
-//! time window, and it returns
+//! takes a channel's number, mode, weights and break plan (with the clips it
+//! may use), the items to play, the programs and last break clip before the
+//! window and a time window, and it returns
 //! [`Event`](crate::timeline::Event)s and the new cursor. It reads no clock and
 //! does no I/O, so the same inputs always give the same events.
+//! `generate_blocks` is its counterpart for a blocks channel: it takes one
+//! lane (pool, mode and weights) per block and for the default, the spans the
+//! blocks cover in epoch time, and the filler clips.
 //!
 //! Times are Unix epoch milliseconds (`i64`), as in [`crate::timeline`].
 //!
@@ -19,8 +22,8 @@
 //! may run past the end, and a program cut by breaks is always written whole,
 //! so a run ends on a program's last segment. Items with a runtime of 0 are
 //! skipped, and an item id that appears twice in the pool is used once (the
-//! first). Grids, weighted picks, time blocks and regeneration are later work;
-//! a channel's `grid` setting is ignored for now.
+//! first). Grids and regeneration are later work; a channel's `grid` setting
+//! is ignored for now. A blocks channel differs: see "Blocks".
 //!
 //! # Breaks
 //!
@@ -111,22 +114,74 @@
 //!   distinct pool items or the history ends. A program cut into several
 //!   events counts once in the walk.
 //!
+//! # Weighted
+//!
+//! Each program slot picks one playable item with probability proportional to
+//! its weight. `weights` in `channels.toml` maps an item title to a whole
+//! number of at least 1; every pool item with that title has that weight and
+//! every other item weighs 1. Over many picks each item's share approaches its
+//! weight divided by the total.
+//!
+//! - **Seed.** The pick draws a number below the total weight from SplitMix64
+//!   seeded with the channel number and the slot's `start_ms`, as the shuffle
+//!   does, and takes the item whose running total first exceeds it, in pool
+//!   order. It reads no history, so a resumed run matches an unbroken one.
+//! - **Limits.** There is no cooldown: an item can play twice in a row, and a
+//!   heavy item often will. A weight whose title matches no playable item is
+//!   reported with [`Note::WeightNotInPool`].
+//!
+//! # Blocks
+//!
+//! A blocks channel's time is cut into spans (`blocks.rs`). Each block covers
+//! `[start, end)` in local wall-clock time on each of its days, in the config's
+//! time zone, and the spans hold the real instants, so a block that runs
+//! 00:00 to 24:00 lasts 23 hours on the day the clocks go forward and 25 on the
+//! day they go back.
+//!
+//! - **Clock changes.** A local time that occurs twice is its first
+//!   occurrence. A local time that does not occur is the moment the clocks
+//!   jump, the first local time after it; a block that lies wholly in the
+//!   skipped hour has no span that day.
+//! - **Programs.** A block plays its own pool in its own mode. The first
+//!   program starts at the block's start, and a program, break or clip still
+//!   on at the block's end is cut there; its event keeps the item's
+//!   `media_duration_ms`. Break clips cut off this way never play, so the
+//!   break rotation continues after the last one that did.
+//! - **Fallback.** Time no block covers plays the channel's `default` lineup
+//!   when it has one. Otherwise it plays the channel's `filler` pool: its clips
+//!   in pool order, whole, over and over, counted from the start of the
+//!   uncovered stretch so a resumed run picks up mid-cycle, with the last clip
+//!   cut at the stretch's end. With neither, the time has no events (dead air)
+//!   and [`Note::DeadAir`] says how long. A block whose pool has nothing
+//!   playable falls back the same way.
+//! - **Resuming.** Each lane keeps its own place across the run and across
+//!   runs. A sequential block continues after the newest program, in the
+//!   channel's history, that is in its pool, so Saturday's cartoons continue
+//!   from last Saturday. A shuffle block's cooldown counts only programs from
+//!   its pool. Every program counts for every lane whose pool holds it, so two
+//!   blocks that share items share their place. A run that resumes at an event
+//!   boundary gives the events an unbroken run would.
+//!
 //! # Persisting
 //!
 //! [`extend`] does nothing unless the caller says the clock is trusted (see
 //! "Clock" in the design). It generates from the later of `now` and the end of
 //! the channel's last stored event up to `now` plus seven days. The caller
-//! supplies the pool: it takes `source` from the channel's `Plan::Fixed`,
-//! resolves it with [`library::resolve_pool`](crate::library::resolve_pool) and
-//! passes the result to `extend`. `resolve_pool` handles every source kind.
+//! supplies the pools: it resolves each source of `Plan::sources` with
+//! [`library::resolve_pool`](crate::library::resolve_pool) and passes the pairs
+//! to `extend`, with the config's time zone. `resolve_pool` handles every
+//! source kind.
 //! The caller also passes the scanned clip pools
 //! ([`ClipLibrary::pools`](crate::clips::ClipLibrary::pools)); `extend` looks
 //! up the channel's break and filler pools there by name, and a pool that is
 //! missing counts as empty. A channel with breaks also reads its last stored
 //! break clip, where the rotation continues.
 //! `extend` reads the schedule end and where to resume, then writes the new
-//! events in one transaction. A sequential channel reads only its last stored
-//! program. A shuffle channel reads its recent programs back to the N - k
+//! events in one transaction. A sequential or weighted channel reads only its
+//! last stored program. A blocks channel reads its recent programs until each
+//! sequential block has found one program from its pool and each shuffle
+//! block its N - k items, or the history ends. A shuffle channel reads its
+//! recent programs back to the N - k
 //! distinct pool items cooling down. Usually that is one page of twice the
 //! pool's length; it reads further back when the recent programs are mostly
 //! ids no longer in the pool, and reads the whole history when that holds
@@ -136,6 +191,7 @@
 //! the last program it keeps. `extend` never reads the system clock; the
 //! caller passes `now_ms`.
 
+mod blocks;
 mod breaks;
 mod extend;
 mod generate;
@@ -146,7 +202,6 @@ mod tests;
 use std::error::Error;
 use std::fmt;
 
-use crate::config::Mode;
 use crate::library::MediaId;
 use crate::store::StoreError;
 use crate::timeline::Event;
@@ -154,7 +209,9 @@ use crate::timeline::Event;
 pub(crate) use breaks::BreakPlan;
 pub use breaks::{ROTATION_MEMORY_MS, SNAP_MS, clip_media_id};
 pub use extend::{Extended, HORIZON_MS, extend};
-pub(crate) use generate::{Params, Resume, cooling_target, generate};
+pub(crate) use generate::{
+    Lane, Layout, Params, Resume, cooling_target, generate, generate_blocks,
+};
 
 /// The most events one run will produce. A run over seven days that reaches
 /// this has items only seconds long, which means the library data is wrong.
@@ -185,14 +242,16 @@ pub enum Note {
     /// out, because the break pool's clips did not fill them and the channel
     /// has no filler clip to pad the rest.
     ShortBreaks { count: usize },
+    /// A weighted lane has a weight for this title and no playable item has
+    /// it, so the weight does nothing.
+    WeightNotInPool { title: String },
+    /// A blocks channel had this many milliseconds with nothing to play: no
+    /// block, no playable default and no filler clip. That time has no events.
+    DeadAir { ms: u64 },
 }
 
 #[derive(Debug)]
 pub enum ScheduleError {
-    /// The mode is not generated yet (`weighted`).
-    UnsupportedMode(Mode),
-    /// The channel uses time-of-day blocks, which are not generated yet.
-    UnsupportedPlan,
     /// A time or runtime is too large to add up as epoch milliseconds, or is
     /// outside the dates the calendar supports.
     TimeOutOfRange,
@@ -204,8 +263,6 @@ pub enum ScheduleError {
 impl fmt::Display for ScheduleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedMode(mode) => write!(f, "mode {mode:?} is not generated yet"),
-            Self::UnsupportedPlan => f.write_str("blocks channels are not generated yet"),
             Self::TimeOutOfRange => f.write_str("a time or runtime is out of range"),
             Self::TooManyEvents => write!(f, "more than {MAX_EVENTS} events in one run"),
             Self::Store(error) => write!(f, "schedule store: {error}"),

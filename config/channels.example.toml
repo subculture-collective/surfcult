@@ -27,11 +27,13 @@ mode = "sequential"
 # mode = "blocks": time-of-day windows, each with its own source and mode.
 # Times are HH:MM in the time zone above and do not cross midnight (use
 # "24:00" for the end of the day). Omit `days` for every day. Blocks on the
-# same channel must not overlap.
+# same channel must not overlap. Time no block covers plays `default` if it is
+# set, and otherwise the channel's `filler` pool.
 [[channel]]
 number = 5
 name = "ALL DAY CARTOONS"
 mode = "blocks"
+default = { source = { jellyfin_collection = "Cartoons" }, mode = "sequential" }
 
 [[channel.block]]
 days = ["sat", "sun"]
@@ -45,6 +47,9 @@ start = "12:00"
 end = "24:00"
 source = { jellyfin_genre = "Comedy" }
 mode = "weighted"
+# mode = "weighted": items whose title is a key play that many times as often
+# as the rest, which weigh 1. Weights are whole numbers of at least 1.
+weights = { "Groundhog Day" = 3 }
 
 # Pools of short local clips.
 [[interstitial_pool]]

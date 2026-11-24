@@ -174,6 +174,8 @@ Select media randomly from an assigned collection.
 
 Assign different probabilities to individual media items or collections.
 
+As built in issue #32, weights are whole numbers of at least 1, keyed by item title, in the `weights` table of a weighted channel, block or default; other items weigh 1. Weights on collections and on commercials (`frequency_weight` below) are not built. See [the schedule reference](reference/schedule.md#weighted).
+
 ### Scheduled Blocks
 
 Create programming blocks that run at specified times.
@@ -451,7 +453,7 @@ SQLite is the authoritative data store.
 - channel_id: UUID
 - media_id: UUID
 - position: optional integer
-- weight: optional float
+- weight: optional float (as built: a whole number per item title; see Weighted Random)
 - enabled: boolean
 
 ### Schedule
@@ -480,7 +482,7 @@ SQLite is the authoritative data store.
 - category: string
 - duration_ms: integer
 - enabled: boolean
-- frequency_weight: float
+- frequency_weight: float (not built; see Weighted Random)
 
 ### BroadcastEvent
 

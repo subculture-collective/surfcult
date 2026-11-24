@@ -56,7 +56,7 @@ fn clip_ms(duration: Duration) -> u64 {
 /// without a valid id or with no length are left out, and so is a clip whose
 /// id an earlier clip already has (one file reached through two links): the
 /// first in pool order stays.
-fn usable(clips: &[Clip]) -> Vec<(MediaId, u64)> {
+pub(super) fn usable(clips: &[Clip]) -> Vec<(MediaId, u64)> {
     let mut seen = HashSet::new();
     clips
         .iter()
@@ -116,17 +116,23 @@ impl Rotation {
     /// before this run; the rotation continues after it. An id no longer in
     /// the pool starts the rotation at the first clip.
     pub(super) fn new(plan: &BreakPlan<'_>, last: Option<&(i64, MediaId)>) -> Self {
-        let clips = usable(plan.clips);
-        let last = last.and_then(|(start_ms, id)| {
-            let i = clips.iter().position(|(clip, _)| clip == id)?;
+        let mut rotation = Self {
+            length_ms: plan.length_ms,
+            clips: usable(plan.clips),
+            pad: usable(plan.pad),
+            last: None,
+        };
+        rotation.continue_after(last);
+        rotation
+    }
+
+    /// Moves the rotation back so it continues after `last`, the start time
+    /// and media id of the newest break clip that was kept, as `new` does.
+    pub(super) fn continue_after(&mut self, last: Option<&(i64, MediaId)>) {
+        self.last = last.and_then(|(start_ms, id)| {
+            let i = self.clips.iter().position(|(clip, _)| clip == id)?;
             Some((i, *start_ms))
         });
-        Self {
-            length_ms: plan.length_ms,
-            clips,
-            pad: usable(plan.pad),
-            last,
-        }
     }
 
     /// The pieces of a break that starts at `start_ms`, and whether it came
