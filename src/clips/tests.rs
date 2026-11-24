@@ -62,6 +62,8 @@ fn pool(name: &str, dir: &Path) -> InterstitialPool {
     InterstitialPool {
         name: name.to_string(),
         path: dir.to_path_buf(),
+        rotation: Default::default(),
+        repeat_after: None,
     }
 }
 

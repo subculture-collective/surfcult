@@ -5,8 +5,8 @@ use std::collections::HashSet;
 
 use super::blocks::spans;
 use super::{
-    BreakPlan, Generated, Lane, Layout, Note, Params, ROTATION_MEMORY_MS, Resume, ScheduleError,
-    cooling_target, generate, generate_blocks,
+    BreakPlan, Generated, Lane, Layout, Note, Params, Resume, ScheduleError, cooling_target,
+    generate, generate_blocks,
 };
 use crate::clips::Pool;
 use crate::config::{Channel, Mode, Plan, Source, Tz};
@@ -42,9 +42,9 @@ pub enum Extended {
 ///
 /// `clips` are the scanned clip pools, usually
 /// [`ClipLibrary::pools`](crate::clips::ClipLibrary::pools). The channel's
-/// break pool and its `filler` pool are looked up there by name; a pool that
-/// is not there counts as empty. A channel without breaks or blocks ignores
-/// `clips`.
+/// break pool, its `breaks.pad` pool and its `filler` pool are looked up there
+/// by name; a pool that is not there counts as empty. A channel without
+/// breaks or blocks ignores `clips`.
 ///
 /// Does nothing unless `clock_trusted` is true: a Pi whose clock has not
 /// synchronized must not store a wrong week. Starts at the later of `now_ms`
@@ -92,7 +92,7 @@ pub fn extend(
 }
 
 /// Generates `channel`'s events for `[from_ms, horizon_ms)`, resuming from the
-/// stored history before `from_ms`: its programs and its last break clip.
+/// stored history before `from_ms`: its programs and its recent break clips.
 /// Writes nothing. [`extend`] and [`regenerate`](super::regenerate) differ
 /// only in where they start and how they write the result.
 pub(super) fn fill(
@@ -121,20 +121,26 @@ pub(super) fn fill(
         every_ms: millis(breaks.every),
         length_ms: millis(breaks.length),
         clips: clips_of(&breaks.pool),
-        pad: channel.filler.as_deref().map_or(&[][..], clips_of),
+        rotation: breaks.rotation,
+        repeat_after_ms: breaks
+            .repeat_after
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
+        idents: breaks.pad.as_deref().map_or(&[][..], clips_of),
+        filler: channel.filler.as_deref().map_or(&[][..], clips_of),
     });
-    // The rotation continues after the last break clip already stored. A clip
-    // that started more than ROTATION_MEMORY_MS before `from_ms` cannot affect
-    // the result: every new break starts at or after `from_ms`, so the
-    // rotation starts again at the first clip either way. Reading only that
-    // window keeps a channel that never stored a break from walking its whole
-    // history.
-    let last_break = match breaks {
-        Some(_) => {
-            store.last_break_before(n, from_ms.saturating_sub(ROTATION_MEMORY_MS), from_ms)?
-        }
-        None => None,
+    // The rotation continues after the last break clip already stored, and
+    // the repeat limit counts from each clip's last airing. A clip that
+    // started more than `memory_ms` (ROTATION_MEMORY_MS or the pool's
+    // repeat_after, whichever is longer) before `from_ms` cannot affect the
+    // result: every new break starts at or after `from_ms`, so the rotation
+    // starts again at the first clip and the limit has passed either way.
+    // Reading only that window keeps a channel that never stored a break from
+    // walking its whole history.
+    let aired = match &breaks {
+        Some(plan) => store.breaks_between(n, from_ms.saturating_sub(plan.memory_ms()), from_ms)?,
+        None => Vec::new(),
     };
+    let last_break = aired.first().cloned();
 
     let generated = match &channel.plan {
         Plan::Fixed {
@@ -162,7 +168,11 @@ pub(super) fn fill(
                 weights,
                 breaks,
             };
-            let resume = Resume { recent, last_break };
+            let resume = Resume {
+                recent,
+                last_break,
+                aired,
+            };
             generate(&params, pool, &resume, from_ms, horizon_ms)?
         }
         Plan::Blocks { blocks, default } => {
@@ -191,7 +201,11 @@ pub(super) fn fill(
                 default,
                 filler: channel.filler.as_deref().map_or(&[][..], clips_of),
             };
-            let resume = Resume { recent, last_break };
+            let resume = Resume {
+                recent,
+                last_break,
+                aired,
+            };
             generate_blocks(&layout, &resume, from_ms, horizon_ms)?
         }
     };

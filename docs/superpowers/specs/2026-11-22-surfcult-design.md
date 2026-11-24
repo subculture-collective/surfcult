@@ -134,7 +134,7 @@ t=0.5+L program starts at the live position
 
 ### Breaks and interstitials
 
-Breaks are filled from pools of local clips (ads, station idents, bumpers, previews, emergency slates). The generator fills a break up to its target length with whole clips, then pads with an ident or slate. It never cuts a clip. Rotation and frequency limits apply per pool. Clips live on the Pi's own storage, so they play instantly and do not depend on the network.
+Breaks are filled from pools of local clips (ads, station idents, bumpers, previews, emergency slates). The generator fills a break up to its target length with whole clips, then pads with an ident or slate from the channel's `breaks.pad` pool, or its filler pool. It never cuts a clip. Rotation and frequency limits apply per pool: `rotation` (`order` or `shuffle`) and `repeat_after` on each `[[interstitial_pool]]`. Clips live on the Pi's own storage, so they play instantly and do not depend on the network.
 
 ### Media source: Jellyfin
 

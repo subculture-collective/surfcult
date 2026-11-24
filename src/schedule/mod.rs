@@ -40,37 +40,49 @@
 //!   share the item's `media_id` and `media_duration_ms`; each starts at the
 //!   previous cut's `media_offset_ms`.
 //! - **Fill.** A break is filled from the break pool with whole clips: it
-//!   walks the pool once, in pool order, starting after the last clip placed,
-//!   and places each clip that fits in the time left. A clip is never cut and
+//!   walks the pool once, in the order its `rotation` gives, and places each
+//!   clip that fits in the time left and that `repeat_after` does not hold
+//!   back. A clip is never cut and
 //!   never plays twice in one break. A clip too long for the time left waits
 //!   for a later break. Each placed clip is one `EventKind::Break` event as
 //!   long as the clip (rounded up to a whole millisecond).
-//! - **Padding.** Time the clips leave is one `EventKind::Filler` event from
-//!   the channel's `filler` pool, exactly as long as the shortfall: the
-//!   shortest filler clip at least that long, or the longest one if none is.
-//!   The pad is the one piece that may stop before its clip ends, so the
-//!   filler pool should hold idents and slates. Without a filler clip the break
-//!   is shorter than `breaks.length`; a break with nothing at all to show is
+//! - **Padding.** Time the clips leave is one pad event exactly as long as
+//!   the shortfall: an `EventKind::Ident` from the `breaks.pad` pool when it
+//!   has a clip, else an `EventKind::Filler` from the channel's `filler` pool.
+//!   It plays the pool's shortest clip at least that long, or its longest one
+//!   if none is. The pad is the one piece that may stop before its clip ends,
+//!   so both pools should hold idents and slates. Without a pad or filler
+//!   clip the break is shorter than `breaks.length`; a break with nothing at all to show is
 //!   left out and the program runs on. Both are counted in
 //!   [`Note::ShortBreaks`].
-//! - **Rotation and limits.** `channels.toml` has no rotation or frequency
-//!   settings, so these are the rules: clips rotate in pool order across
-//!   breaks, and a clip plays at most once per break. The rotation continues
-//!   after the channel's last stored break clip (`Store::last_break_before`);
-//!   an id no longer in the pool restarts it at the first clip. The rotation
-//!   remembers its place for [`ROTATION_MEMORY_MS`] (24 hours): a break that
-//!   starts later than that after the last break clip started begins at the
-//!   first clip, in an unbroken run as in a resumed one, so `extend` reads only
-//!   the last day of events. Clips that share a media id (one file reached
-//!   through two links) count once, at the first one's place in the pool.
+//! - **Rotation and limits.** The break pool's `rotation` and `repeat_after`
+//!   keys set them; a clip plays at most once per break either way. With
+//!   `rotation = "order"` (the default) clips rotate in pool order across
+//!   breaks, continuing after the channel's last stored break clip; an id no
+//!   longer in the pool restarts it at the first clip. The rotation remembers
+//!   its place for [`ROTATION_MEMORY_MS`] (24 hours): a break that starts
+//!   later than that after the last break clip started begins at the first
+//!   clip, in an unbroken run as in a resumed one. With `rotation = "shuffle"`
+//!   each break walks the pool in an order drawn from SplitMix64 seeded with
+//!   the channel and the break's start. With `repeat_after`, a clip does not
+//!   play again until that long after its last airing started on the channel;
+//!   a clip still cooling down is skipped, and a break no clip can fill is
+//!   padded. `extend` reads the stored break clips
+//!   (`Store::breaks_between`) back to the longer of `ROTATION_MEMORY_MS` and
+//!   the break pool's `repeat_after`. Clips that share a media id (one file
+//!   reached through two links) count once, at the first one's place in the
+//!   pool. `rotation` and `repeat_after` apply only to a break pool; config
+//!   validation refuses them on a pool no channel uses as `breaks.pool`.
 //! - **Clip ids.** A clip's `media_id` is its canonical path as text
 //!   ([`clip_media_id`]); a path that is not UTF-8 is left out. The event kind
 //!   says whether the id is a clip or a Jellyfin item. The tuner already joins
 //!   at the program after a break (`timeline::program_from`), and the
 //!   shuffle's cooldown counts a cut program once.
-//! - **Determinism.** Cuts, fill and padding use no randomness; they depend
-//!   only on the item, the pools and the last stored break clip, so a run
-//!   resumed at a program boundary matches an unbroken one.
+//! - **Determinism.** Cuts, padding and an `order` rotation use no
+//!   randomness, and a `shuffle` rotation's seed is only the channel and the
+//!   break's start. The result depends only on the item, the pools and the
+//!   stored break clips, so a run resumed at a program boundary matches an
+//!   unbroken one.
 //!
 //! # Sequential
 //!
@@ -173,9 +185,10 @@
 //! source kind.
 //! The caller also passes the scanned clip pools
 //! ([`ClipLibrary::pools`](crate::clips::ClipLibrary::pools)); `extend` looks
-//! up the channel's break and filler pools there by name, and a pool that is
-//! missing counts as empty. A channel with breaks also reads its last stored
-//! break clip, where the rotation continues.
+//! up the channel's break, pad and filler pools there by name, and a pool
+//! that is missing counts as empty. A channel with breaks also reads its
+//! recent stored break clips, where the rotation continues and the repeat
+//! limit counts from.
 //! `extend` reads the schedule end and where to resume, then writes the new
 //! events in one transaction. A sequential or weighted channel reads only its
 //! last stored program. A blocks channel reads its recent programs until each

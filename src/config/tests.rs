@@ -61,6 +61,9 @@ fn the_example_file_loads_into_typed_config() {
             every: Duration::from_secs(11 * 60),
             length: Duration::from_secs(2 * 60),
             pool: "ads-90s".into(),
+            rotation: Rotation::Order,
+            repeat_after: None,
+            pad: None,
         })
     );
     assert_eq!(cartoons.filler.as_deref(), Some("filler"));
@@ -259,6 +262,128 @@ fn rejects_duplicate_pool_names() {
         with_channel(PLAIN)
     );
     assert_eq!(fields(&text), vec!["interstitial_pool[1].name"]);
+}
+
+/// `with_channel` with `pool_keys` added to the `ads` pool and `breaks`
+/// set from the inline table body `breaks`, plus an `idents` pool.
+fn with_break_settings(pool_keys: &str, breaks: &str) -> String {
+    let text = with_channel(&format!("{PLAIN}\nbreaks = {{ {breaks} }}")).replace(
+        "path = \"/clips/ads\"",
+        &format!("path = \"/clips/ads\"\n{pool_keys}"),
+    );
+    format!("{text}\n[[interstitial_pool]]\nname = \"idents\"\npath = \"/clips/idents\"\n")
+}
+
+const BREAKS: &str = "every = \"10m\", length = \"2m\", pool = \"ads\"";
+
+#[test]
+fn break_settings_load_into_the_pool_and_the_channel_breaks() {
+    let text = with_break_settings(
+        "rotation = \"shuffle\"\nrepeat_after = \"2h\"",
+        &format!("{BREAKS}, pad = \"idents\""),
+    );
+    let config = Config::parse(&text).unwrap();
+
+    let ads = &config.pools[0];
+    assert_eq!(ads.rotation, Rotation::Shuffle);
+    assert_eq!(ads.repeat_after, Some(Duration::from_secs(2 * 3600)));
+    assert_eq!(
+        config.channels[0].breaks,
+        Some(Breaks {
+            every: Duration::from_secs(10 * 60),
+            length: Duration::from_secs(2 * 60),
+            pool: "ads".into(),
+            rotation: Rotation::Shuffle,
+            repeat_after: Some(Duration::from_secs(2 * 3600)),
+            pad: Some("idents".into()),
+        })
+    );
+
+    // The defaults: pool order, no repeat limit, no pad pool.
+    let config = Config::parse(&with_break_settings("rotation = \"order\"", BREAKS)).unwrap();
+    let breaks = config.channels[0].breaks.as_ref().unwrap();
+    assert_eq!(
+        (breaks.rotation, breaks.repeat_after, breaks.pad.as_deref()),
+        (Rotation::Order, None, None)
+    );
+    let config = Config::parse(&with_break_settings("", BREAKS)).unwrap();
+    assert_eq!(config.pools[1].rotation, Rotation::Order);
+    assert_eq!(config.pools[1].repeat_after, None);
+}
+
+#[test]
+fn rejects_bad_break_settings_naming_each_field() {
+    for (keys, field, needle) in [
+        (
+            "rotation = \"random\"",
+            "interstitial_pool[0].rotation",
+            "\"random\"",
+        ),
+        (
+            "repeat_after = \"2 hours\"",
+            "interstitial_pool[0].repeat_after",
+            "unit",
+        ),
+        (
+            "repeat_after = \"0m\"",
+            "interstitial_pool[0].repeat_after",
+            "zero",
+        ),
+        (
+            "repeat_after = \"-5m\"",
+            "interstitial_pool[0].repeat_after",
+            "-5m",
+        ),
+    ] {
+        let found = problems(&with_break_settings(keys, BREAKS));
+        assert_eq!(found.len(), 1, "{keys}: {found:?}");
+        assert_eq!(found[0].field, field, "{keys}");
+        assert!(
+            found[0].message.contains(needle),
+            "{keys}: {}",
+            found[0].message
+        );
+    }
+
+    let found = problems(&with_break_settings(
+        "",
+        &format!("{BREAKS}, pad = \"bumpers\""),
+    ));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].field, "channel[0].breaks.pad");
+    assert!(found[0].message.contains("\"bumpers\""));
+}
+
+#[test]
+fn rotation_and_repeat_after_are_refused_on_a_pool_that_is_never_a_break_pool() {
+    let text = with_break_settings("", &format!("{BREAKS}, pad = \"idents\"")).replace(
+        "path = \"/clips/idents\"",
+        "path = \"/clips/idents\"\nrotation = \"shuffle\"\nrepeat_after = \"1h\"",
+    );
+    let found = problems(&text);
+    let fields: Vec<_> = found.iter().map(|p| p.field.as_str()).collect();
+    assert_eq!(
+        fields,
+        vec![
+            "interstitial_pool[1].rotation",
+            "interstitial_pool[1].repeat_after"
+        ]
+    );
+    assert!(found[0].message.contains("\"idents\""));
+}
+
+#[test]
+fn unknown_break_and_pool_keys_are_parse_errors() {
+    for text in [
+        with_break_settings("repeat = \"2h\"", BREAKS),
+        with_break_settings("", &format!("{BREAKS}, pad_pool = \"idents\"")),
+        with_break_settings("rotation = 1", BREAKS),
+    ] {
+        assert!(
+            matches!(Config::parse(&text), Err(ConfigError::Parse(_))),
+            "{text}"
+        );
+    }
 }
 
 #[test]

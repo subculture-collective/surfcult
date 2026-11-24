@@ -30,7 +30,8 @@ pub struct Channel {
     /// Programs start on this grid and gaps are filled.
     pub grid: Option<Duration>,
     pub breaks: Option<Breaks>,
-    /// Pool used to pad commercial breaks the break pool leaves short, fill
+    /// Pool used to pad commercial breaks the break pool leaves short when
+    /// the `breaks.pad` pool has no clip, fill
     /// grid gaps and play the time a blocks channel has no block or default
     /// for.
     pub filler: Option<String>,
@@ -139,6 +140,25 @@ pub struct Breaks {
     pub every: Duration,
     pub length: Duration,
     pub pool: String,
+    /// The break pool's `rotation`, copied from its `[[interstitial_pool]]`.
+    pub rotation: Rotation,
+    /// The break pool's `repeat_after`, copied from its `[[interstitial_pool]]`.
+    pub repeat_after: Option<Duration>,
+    /// The pool of idents and slates that pads a break's shortfall before the
+    /// channel's `filler` pool does.
+    pub pad: Option<String>,
+}
+
+/// The order a pool's clips are drawn in when it fills breaks, its
+/// `rotation` key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Rotation {
+    /// Pool order, continuing after the channel's last break clip.
+    #[default]
+    Order,
+    /// A new random order for each break, seeded from the channel and the
+    /// break's start.
+    Shuffle,
 }
 
 /// A named directory of short local clips.
@@ -146,6 +166,12 @@ pub struct Breaks {
 pub struct InterstitialPool {
     pub name: String,
     pub path: PathBuf,
+    /// The order the clips are drawn in when the pool fills breaks.
+    pub rotation: Rotation,
+    /// On one channel, a clip from this pool does not play in a break again
+    /// until this long after its last airing started. `None` sets no limit
+    /// beyond once per break.
+    pub repeat_after: Option<Duration>,
 }
 
 /// One thing wrong with the file, located by its TOML key.

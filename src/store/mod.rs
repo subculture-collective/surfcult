@@ -57,11 +57,10 @@ const RECENT_PROGRAMS_BEFORE: &str = "SELECT start_ms, media_id FROM events
      ORDER BY start_ms DESC
      LIMIT ?3";
 
-/// The query behind [`Store::last_break_before`]; a test checks its plan.
-const LAST_BREAK_BEFORE: &str = "SELECT start_ms, media_id FROM events
+/// The query behind [`Store::breaks_between`]; a test checks its plan.
+const BREAKS_BETWEEN: &str = "SELECT start_ms, media_id FROM events
      WHERE channel = ?1 AND kind = 'break' AND start_ms >= ?2 AND start_ms < ?3
-     ORDER BY start_ms DESC
-     LIMIT 1";
+     ORDER BY start_ms DESC";
 
 /// How long a call waits for another connection's lock before failing.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -252,28 +251,30 @@ impl Store {
             .map_err(StoreError::database("reading the last program"))
     }
 
-    /// The start time and media id of the channel's last break event that
-    /// starts in `[since_ms, before_ms)`, or `None` if it has none: the clip a
-    /// break pool's rotation continues after. Walks back from `before_ms` on
-    /// the primary key and stops at the first break it meets or at `since_ms`,
-    /// so a channel that stores no breaks costs one window of events, not its
+    /// The start time and media id of each of the channel's break events
+    /// that start in `[since_ms, before_ms)`, newest first: the clips a break
+    /// pool's rotation continues after and its repeat limit counts from.
+    /// Walks back from `before_ms` on the primary key and stops at
+    /// `since_ms`, so the cost is one window of events, not the channel's
     /// whole history.
-    pub fn last_break_before(
+    pub fn breaks_between(
         &self,
         channel: u32,
         since_ms: i64,
         before_ms: i64,
-    ) -> Result<Option<(i64, MediaId)>, StoreError> {
-        self.conn
-            .prepare_cached(LAST_BREAK_BEFORE)
-            .and_then(|mut statement| {
-                statement
-                    .query_row(params![channel, since_ms, before_ms], |row| {
-                        Ok((row.get(0)?, MediaId::new(row.get::<_, String>(1)?)))
-                    })
-                    .optional()
+    ) -> Result<Vec<(i64, MediaId)>, StoreError> {
+        let action = "reading recent breaks";
+        let mut statement = self
+            .conn
+            .prepare_cached(BREAKS_BETWEEN)
+            .map_err(StoreError::database(action))?;
+        let rows = statement
+            .query_map(params![channel, since_ms, before_ms], |row| {
+                Ok((row.get(0)?, MediaId::new(row.get::<_, String>(1)?)))
             })
-            .map_err(StoreError::database("reading the last break"))
+            .map_err(StoreError::database(action))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(StoreError::database(action))
     }
 
     /// When the channel's last stored event ends, or `None` if it has none.
