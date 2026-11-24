@@ -1,6 +1,6 @@
 # surfcult
 
-A self-hosted, offline-first television channel simulator for Raspberry Pi and Linux. It plays your own media as continuously broadcasting channels with schedules, commercials and a program guide. The planned design is in [`docs/idea.md`](docs/idea.md), which uses the codename BROADCAST. The library parts exist: config parsing, a Jellyfin sync into a SQLite cache, schedule generation, and the tuner's tune-in sequence, tested against a fake player. There is no real MPV player yet and nothing wires the parts together on the Pi, so the binary only checks a config file.
+A self-hosted, offline-first television channel simulator for Raspberry Pi and Linux. It plays your own media as continuously broadcasting channels with schedules, commercials and a program guide. The planned design is in [`docs/idea.md`](docs/idea.md), which uses the codename BROADCAST. The library parts exist: config parsing, a Jellyfin sync into a SQLite cache, schedule generation, and the tuner's tune-in sequence, and MPV control over its IPC socket. Nothing wires the parts together on the Pi, so the binary only checks a config file.
 
 ## What it contains
 
