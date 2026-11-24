@@ -113,7 +113,7 @@ Programs and breaks:
 - The schedule never slips. At an event boundary the scheduled end wins: if a file ends early, the rest of the event is filled from the filler pool; if it runs long, it is cut at the scheduled end. Every such mismatch is recorded, and the next library sync corrects the stored duration so later events are generated from the right length.
 - Events starting within the next 30 minutes are frozen. Anything later may be regenerated, for example when Tdarr changes a file's duration or when the owner edits a channel. The show on screen and the next few guide rows never change under the viewer.
 - A file that disappears from Jellyfin is replaced by valid content and the substitution is recorded.
-- Items do not repeat within the same day unless the pool is too small to avoid it.
+- A shuffle channel uses a cooldown counted in plays, not in time. With N playable items in its pool, the N - k most recently played distinct items (k = max(1, ceil(N / 4))) cannot be picked; each slot picks at random from the rest. An item therefore never airs again until at least N - k others have aired since, and waits about N plays on average. With four items or fewer this settles into a fixed rotation. Sequential channels play the pool in order, and weighted channels have no cooldown.
 
 ### Tuning
 
