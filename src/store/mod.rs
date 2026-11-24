@@ -277,6 +277,32 @@ impl Store {
             .map_err(StoreError::database(action))
     }
 
+    /// The channel's last event that starts before `before_ms`, or `None` if
+    /// it has none. Reads one row, walking back on the primary key.
+    pub fn last_event_before(
+        &self,
+        channel: u32,
+        before_ms: i64,
+    ) -> Result<Option<Event>, StoreError> {
+        let action = "reading the last event";
+        let event = self
+            .conn
+            .prepare_cached(
+                "SELECT start_ms, end_ms, media_id, media_offset_ms, media_duration_ms, kind
+                 FROM events
+                 WHERE channel = ?1 AND start_ms < ?2
+                 ORDER BY start_ms DESC
+                 LIMIT 1",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_row(params![channel, before_ms], read_event)
+                    .optional()
+            })
+            .map_err(StoreError::database(action))?;
+        event.transpose()
+    }
+
     /// When the channel's last stored event ends, or `None` if it has none.
     /// Events do not overlap, so this is the end of the event that starts
     /// last; reading it walks one row of the primary key.

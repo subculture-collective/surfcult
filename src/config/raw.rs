@@ -12,7 +12,7 @@ use serde::Deserialize;
 use super::duration::{parse_duration, parse_minute_of_day};
 use super::{
     Block, Breaks, Channel, Config, Day, InterstitialPool, Lineup, Mode, Plan, Problem, Rotation,
-    Source, Tz, Weights,
+    SignOff, Source, Tz, Weights,
 };
 
 #[derive(Deserialize)]
@@ -40,6 +40,16 @@ struct RawChannel {
     default: Option<RawLineup>,
     #[serde(default)]
     block: Vec<RawBlock>,
+    sign_off: Option<RawSignOff>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSignOff {
+    at: String,
+    pool: String,
+    clip: Option<String>,
+    until: String,
 }
 
 #[derive(Deserialize)]
@@ -270,6 +280,11 @@ impl RawChannel {
             );
         }
 
+        let sign_off = self
+            .sign_off
+            .as_ref()
+            .and_then(|raw| check_sign_off(raw, i, pools, problems));
+
         if problems.0.len() > before {
             return None;
         }
@@ -280,6 +295,7 @@ impl RawChannel {
             grid,
             breaks,
             filler: self.filler.clone(),
+            sign_off,
         })
     }
 
@@ -340,6 +356,51 @@ impl RawChannel {
             _ => None,
         }
     }
+}
+
+fn check_sign_off(
+    raw: &RawSignOff,
+    channel: usize,
+    pools: &HashMap<&str, usize>,
+    problems: &mut Problems,
+) -> Option<SignOff> {
+    let at = |key: &str| format!("channel[{channel}].sign_off.{key}");
+    let time = |text: &str, key: &str, problems: &mut Problems| match parse_minute_of_day(text) {
+        Ok(minute) if minute < 24 * 60 => Some(minute),
+        Ok(_) => {
+            problems.add(at(key), "use 00:00 for midnight");
+            None
+        }
+        Err(message) => {
+            problems.add(at(key), message);
+            None
+        }
+    };
+    let at_minute = time(&raw.at, "at", problems);
+    let until_minute = time(&raw.until, "until", problems);
+    if at_minute.is_some() && at_minute == until_minute {
+        problems.add(at("until"), "must differ from at");
+    }
+    if !pools.contains_key(raw.pool.as_str()) {
+        problems.add(
+            at("pool"),
+            format!("no interstitial_pool named {:?}", raw.pool),
+        );
+    }
+    if let Some(clip) = &raw.clip
+        && (clip.is_empty() || clip == "." || clip == ".." || clip.contains(['/', '\\']))
+    {
+        problems.add(
+            at("clip"),
+            format!("{clip:?} is not a file name; name one file in the pool, with no path"),
+        );
+    }
+    Some(SignOff {
+        at_minute: at_minute?,
+        until_minute: until_minute?,
+        pool: raw.pool.clone(),
+        clip: raw.clip.clone(),
+    })
 }
 
 fn parse_mode(text: &str, field: &str, problems: &mut Problems) -> Option<Mode> {

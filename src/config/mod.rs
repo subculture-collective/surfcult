@@ -35,6 +35,25 @@ pub struct Channel {
     /// grid gaps and play the time a blocks channel has no block or default
     /// for.
     pub filler: Option<String>,
+    /// The broadcast that ends each night and the time off the air after it.
+    pub sign_off: Option<SignOff>,
+}
+
+/// A channel's nightly sign-off: one clip that starts at `at_minute`, after
+/// which the channel is off the air until `until_minute`.
+///
+/// Times are minutes after midnight (0 to 1439) in the config time zone. The
+/// channel comes back on the air the next morning when `until_minute` is not
+/// after `at_minute`, and the same day otherwise. The two are never equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignOff {
+    pub at_minute: u16,
+    pub until_minute: u16,
+    /// The interstitial pool the clip comes from.
+    pub pool: String,
+    /// A plain file name in `pool`. Without one, or when the pool has no
+    /// such clip, the pool's first clip plays.
+    pub clip: Option<String>,
 }
 
 /// What a channel plays: one source in one mode, or time-of-day blocks that

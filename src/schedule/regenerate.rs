@@ -2,6 +2,7 @@
 //! changed, keeping what is about to air.
 
 use super::extend::fill;
+use super::sign_off::nights;
 use super::{Extended, HORIZON_MS, ScheduleError};
 use crate::clips::Pool;
 use crate::config::{Channel, Source, Tz};
@@ -25,7 +26,10 @@ pub const FREEZE_MS: i64 = 30 * 60 * 1000;
 /// - the start of a program (its first event, with `media_offset_ms` 0);
 /// - a filler event that follows another filler event, which is a blocks
 ///   channel's uncovered time and not the padding of a break;
-/// - time with no events (a blocks channel's dead air): its start, or the
+/// - an ident event that starts when a night off the air starts, which is the
+///   sign-off clip;
+/// - time with no events (a blocks channel's dead air, the gap before a
+///   sign-off without filler, or the time off the air): its start, or the
 ///   freeze point if that falls inside it.
 ///
 /// Every event before the boundary is kept as it is, including a program and
@@ -68,7 +72,14 @@ pub fn regenerate(
     let n = channel.number;
 
     let stored = store.events_between(n, now_ms, i64::MAX)?;
-    let from_ms = boundary(&stored, now_ms, freeze_ms).unwrap_or_else(|| {
+    let sign_offs: Vec<i64> = match &channel.sign_off {
+        Some(sign_off) => nights(sign_off, timezone, now_ms, horizon_ms)?
+            .iter()
+            .map(|night| night.start_ms)
+            .collect(),
+        None => Vec::new(),
+    };
+    let from_ms = boundary(&stored, &sign_offs, now_ms, freeze_ms).unwrap_or_else(|| {
         stored
             .last()
             .map_or(now_ms, |event| event.end_ms.max(now_ms))
@@ -96,8 +107,9 @@ pub fn regenerate(
 
 /// The first place at or after `freeze_ms` in `stored`, the channel's events
 /// that end after `now_ms`, where a regeneration can start. See
-/// [`regenerate`]. `None` when the events end before one.
-fn boundary(stored: &[Event], now_ms: i64, freeze_ms: i64) -> Option<i64> {
+/// [`regenerate`]. `sign_offs` are the times the channel's nights off the air
+/// start. `None` when the events end before one.
+fn boundary(stored: &[Event], sign_offs: &[i64], now_ms: i64, freeze_ms: i64) -> Option<i64> {
     let mut previous: Option<&Event> = None;
     for event in stored {
         // Time with no events before `event` that reaches past the freeze point.
@@ -108,7 +120,8 @@ fn boundary(stored: &[Event], now_ms: i64, freeze_ms: i64) -> Option<i64> {
         // A break's padding follows a break clip or a program, never filler.
         let uncovered = event.kind == EventKind::Filler
             && previous.is_some_and(|p| p.kind == EventKind::Filler);
-        if event.start_ms >= freeze_ms && (starts_program(event) || uncovered) {
+        let signs_off = event.kind == EventKind::Ident && sign_offs.contains(&event.start_ms);
+        if event.start_ms >= freeze_ms && (starts_program(event) || uncovered || signs_off) {
             return Some(event.start_ms);
         }
         previous = Some(event);
