@@ -732,6 +732,34 @@ fn a_late_tick_plans_from_the_time_the_clip_actually_starts() {
 }
 
 #[test]
+fn a_store_that_cannot_be_read_leaves_static_up_with_the_store_error() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("schedule.db");
+    let mut rig = Rig::new(Vec::new(), vec![direct("show")], tune_in_clips());
+    rig.store = Store::open(&path).unwrap();
+    rig.store.write_events(CHANNEL, &long_program()).unwrap();
+    // Another connection breaks the schema under the open store.
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute_batch("DROP TABLE events")
+        .unwrap();
+
+    rig.tune(CHANNEL, T);
+    rig.at(T + 500);
+
+    assert!(
+        matches!(
+            rig.failed_with(),
+            Some(Reason::Schedule(StoreError::Database { .. }))
+        ),
+        "{:?}",
+        rig.failed_with()
+    );
+    assert_eq!(rig.commands(), [Command::ShowStatic]);
+    assert_eq!(rig.tuner.next_wakeup(), None);
+}
+
+#[test]
 fn a_schedule_failure_keeps_the_store_error() {
     let reason = Reason::Schedule(StoreError::Corrupt("bad row".to_owned()));
     assert_eq!(
