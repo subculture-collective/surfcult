@@ -27,9 +27,9 @@ The words surfcult's code and documentation use, and the code item each one name
 - **Extend**: one `schedule::extend` call. It starts at the later of now and the end of the last stored event, generates up to the horizon, and writes the new events in one transaction.
 - **Trusted clock**: the caller's statement, through the `clock_trusted` argument, that the system clock is synchronized. `extend` does nothing without it, so a Pi with a wrong clock never stores a wrong week.
 - **Sequential**: a mode, `config::Mode::Sequential`. Items play in program pool order, continuing after the resume point and wrapping from the last item to the first.
-- **Shuffle** and **pass**: in shuffle mode (`config::Mode::Shuffle`) items play in a seeded random order. One trip through the whole program pool is a pass, and no item repeats inside a pass.
+- **Shuffle** and **cooldown**: in shuffle mode (`config::Mode::Shuffle`) each program slot picks at random, seeded from the channel and the slot's start, from the items not cooling down. With N playable items and k = max(1, ceil(N / 4)), the N - k most recently played distinct items are cooling down.
 - **Resume point** (cursor): the media id of the channel's last stored program event, which says where the next extend continues. It has no table of its own; `extend` derives it from the events, so it cannot disagree with them.
-- **Played history**: the media ids of the channel's stored program events before the new window, oldest first, read with `Store::programs_before`. Only shuffle reads it; a sequential channel reads just its last program (`Store::last_program_before`). Shuffle replays it to find where the current pass stands. It is not the `playback_history` table, which records what the tuner started.
+- **Recent history**: the media ids of the channel's most recent stored program events before the new window, newest first, read with `Store::recent_programs_before` and passed as `Resume::recent`. Only shuffle reads more than one row, to find the items cooling down; a sequential channel reads just its last program (`Store::last_program_before`). It is not the `playback_history` table, which records what the tuner started.
 
 ## Running
 

@@ -1,14 +1,13 @@
 use chrono::{TimeZone, Utc};
 
 use super::*;
-use crate::config::{Channel, Mode, Plan, Source, Tz};
+use crate::config::{Channel, Mode, Plan, Source};
 use crate::library::{FakeMediaSource, MediaId, MediaItem, MediaKind, resolve_pool};
 use crate::store::Store;
 use crate::timeline::{Event, EventKind};
 
 const MINUTE: i64 = 60_000;
 const DAY: i64 = 24 * 60 * MINUTE;
-const CHICAGO: Tz = chrono_tz::America::Chicago;
 
 fn item(id: &str, minutes: u64) -> MediaItem {
     MediaItem::new(id, id, MediaKind::Episode, minutes * 60_000)
@@ -37,11 +36,7 @@ fn channel(number: u32, mode: Mode) -> Channel {
 }
 
 fn params(mode: Mode) -> Params {
-    Params {
-        channel: 3,
-        mode,
-        tz: CHICAGO,
-    }
+    Params { channel: 3, mode }
 }
 
 fn at(year: i32, month: u32, day: u32, hour: u32, minute: u32) -> i64 {
@@ -56,8 +51,7 @@ fn ids(events: &[Event]) -> Vec<&str> {
 
 fn resume(cursor: &str) -> Resume {
     Resume {
-        cursor: Some(MediaId::new(cursor)),
-        played: Vec::new(),
+        recent: vec![MediaId::new(cursor)],
     }
 }
 
@@ -104,28 +98,6 @@ fn the_same_inputs_give_the_same_events() {
         let run = || generate(&params(mode), &items, &resume("b"), start, start + 7 * DAY).unwrap();
         assert_eq!(run(), run(), "{mode:?}");
     }
-}
-
-#[test]
-fn a_shuffle_differs_by_channel_and_by_local_date() {
-    let items = pool(&["a", "b", "c", "d", "e", "f", "g", "h"]);
-    let start = at(2026, 6, 1, 12, 0);
-    let window = 8 * 60 * MINUTE;
-    let order = |channel: u32, start: i64| {
-        let params = Params {
-            channel,
-            ..params(Mode::Shuffle)
-        };
-        let out = generate(&params, &items, &Resume::default(), start, start + window).unwrap();
-        out.events
-            .iter()
-            .take(8)
-            .map(|e| e.media_id.clone())
-            .collect::<Vec<_>>()
-    };
-
-    assert_ne!(order(3, start), order(4, start));
-    assert_ne!(order(3, start), order(3, start + DAY));
 }
 
 #[test]
@@ -254,119 +226,151 @@ fn weighted_is_not_generated_yet() {
     ));
 }
 
-#[test]
-fn a_shuffle_does_not_repeat_an_item_until_the_pool_is_used_up() {
-    let items = pool(&["a", "b", "c", "d", "e", "f"]);
-    let start = at(2026, 6, 1, 12, 0);
-
-    let out = generate(
-        &params(Mode::Shuffle),
-        &items,
-        &Resume::default(),
-        start,
-        start + 7 * DAY,
-    )
-    .unwrap();
-
-    assert_passes_are_permutations(&ids(&out.events), 6);
+/// `n` items of 30 minutes each, named `i0`, `i1`, ...
+fn uniform(n: usize) -> Vec<MediaItem> {
+    (0..n).map(|i| item(&format!("i{i}"), 30)).collect()
 }
 
-/// Each run of `n` programs from the start of the list uses an item at most
-/// once, and a pass never opens with the item that closed the one before.
-fn assert_passes_are_permutations(played: &[&str], n: usize) {
-    for (i, pass) in played.chunks(n).enumerate() {
-        let mut unique = pass.to_vec();
+fn shuffle(items: &[MediaItem], recent: &[&str], start: i64, end: i64) -> Generated {
+    let resume = Resume {
+        recent: recent.iter().map(|id| MediaId::new(*id)).collect(),
+    };
+    generate(&params(Mode::Shuffle), items, &resume, start, end).unwrap()
+}
+
+/// With `n` playable items, N - k of them are cooling down at each pick, so
+/// every run of N - k + 1 consecutive programs has no repeat.
+fn assert_cooldown_holds(played: &[&str], n: usize) {
+    let window = n - n.div_ceil(4).max(1) + 1;
+    for (i, run) in played.windows(window.min(played.len())).enumerate() {
+        let mut unique = run.to_vec();
         unique.sort_unstable();
         unique.dedup();
-        assert_eq!(
-            unique.len(),
-            pass.len(),
-            "pass {i} repeats an item: {pass:?}"
-        );
-    }
-    // The first item of a pass differs from the last of the one before.
-    for pair in played.chunks(n).collect::<Vec<_>>().windows(2) {
-        assert_ne!(pair[0].last(), pair[1].first());
+        assert_eq!(unique.len(), run.len(), "repeat at {i}: {run:?}");
     }
 }
 
 #[test]
-fn a_shuffle_resumes_inside_its_pass_without_a_repeat() {
-    let items = pool(&["a", "b", "c", "d", "e", "f"]);
+fn a_shuffle_never_repeats_an_item_inside_its_cooldown() {
     let start = at(2026, 6, 1, 12, 0);
-    let first = generate(
-        &params(Mode::Shuffle),
-        &items,
-        &Resume::default(),
-        start,
-        start + 70 * MINUTE,
-    )
-    .unwrap();
-    // Cut so the run ends partway through a pass.
-    assert!(!first.events.len().is_multiple_of(6));
-    let played: Vec<MediaId> = first.events.iter().map(|e| e.media_id.clone()).collect();
-
-    let second = generate(
-        &params(Mode::Shuffle),
-        &items,
-        &Resume {
-            cursor: first.cursor.clone(),
-            played: played.clone(),
-        },
-        first.events.last().unwrap().end_ms,
-        start + 7 * DAY,
-    )
-    .unwrap();
-
-    let all: Vec<&str> = played
-        .iter()
-        .map(MediaId::as_str)
-        .chain(ids(&second.events))
-        .collect();
-    assert_passes_are_permutations(&all, 6);
-}
-
-#[test]
-fn a_shuffle_resumed_on_the_same_date_matches_an_unbroken_run() {
-    let items = pool(&["a", "b", "c", "d", "e", "f"]);
-    let start = at(2026, 6, 1, 17, 0);
-    let whole = generate(
-        &params(Mode::Shuffle),
-        &items,
-        &Resume::default(),
-        start,
-        start + 3 * 60 * MINUTE,
-    )
-    .unwrap();
-    let cut = 2;
-    let played: Vec<MediaId> = whole.events[..cut]
-        .iter()
-        .map(|e| e.media_id.clone())
-        .collect();
-
-    let rest = generate(
-        &params(Mode::Shuffle),
-        &items,
-        &Resume {
-            cursor: played.last().cloned(),
-            played,
-        },
-        whole.events[cut - 1].end_ms,
-        start + 3 * 60 * MINUTE,
-    )
-    .unwrap();
-
-    // The first pass is the same; later passes number from zero again.
-    assert_eq!(ids(&rest.events)[..4], ids(&whole.events)[cut..6]);
-}
-
-#[test]
-fn a_shuffle_with_only_a_cursor_does_not_open_with_it() {
-    let items = pool(&["a", "b", "c"]);
-    for cursor in ["a", "b", "c"] {
-        let out = generate(&params(Mode::Shuffle), &items, &resume(cursor), 0, 1).unwrap();
-        assert_ne!(out.events[0].media_id.as_str(), cursor);
+    for n in [2, 3, 4, 5, 8, 13, 40] {
+        let out = shuffle(&uniform(n), &[], start, start + 7 * DAY);
+        assert_cooldown_holds(&ids(&out.events), n);
     }
+}
+
+#[test]
+fn every_item_of_a_shuffle_plays_within_a_week() {
+    let start = at(2026, 6, 1, 12, 0);
+    for n in [5, 13, 40] {
+        let items = uniform(n);
+        let out = shuffle(&items, &[], start, start + 7 * DAY);
+        let played = ids(&out.events);
+        for item in &items {
+            assert!(
+                played.contains(&item.id.as_str()),
+                "{} never played",
+                item.id
+            );
+        }
+    }
+}
+
+#[test]
+fn a_shuffle_differs_by_channel() {
+    let items = uniform(8);
+    let start = at(2026, 6, 1, 12, 0);
+    let order = |channel: u32| {
+        let params = Params {
+            channel,
+            mode: Mode::Shuffle,
+        };
+        let out = generate(&params, &items, &Resume::default(), start, start + DAY).unwrap();
+        out.events
+            .into_iter()
+            .map(|e| e.media_id)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(3), order(3));
+    assert_ne!(order(3), order(4));
+}
+
+#[test]
+fn a_shuffle_resumed_at_any_boundary_matches_an_unbroken_run() {
+    let items = pool(&["a", "b", "c", "d", "e", "f", "g", "h", "i"]);
+    let start = at(2026, 6, 1, 12, 0);
+    let end = start + 7 * DAY;
+    let history = ["c", "x", "a", "b"];
+    let whole = shuffle(&items, &history, start, end);
+
+    for cut in [1, 2, 5, 9, 17, 40] {
+        let boundary = whole.events[cut].start_ms;
+        let first = shuffle(&items, &history, start, boundary);
+        assert_eq!(first.events, whole.events[..cut]);
+        // The stored history, newest first: this run's programs, then the old.
+        let mut recent: Vec<&str> = ids(&first.events);
+        recent.reverse();
+        recent.extend(history);
+        let rest = shuffle(&items, &recent, boundary, end);
+        assert_eq!(rest.events, whole.events[cut..], "cut at {cut}");
+    }
+}
+
+#[test]
+fn a_new_item_is_eligible_at_once() {
+    // N = 4, k = 1: the three old items are cooling down, so only the new one
+    // can play next.
+    let items = pool(&["a", "b", "c", "new"]);
+    let out = shuffle(&items, &["c", "b", "a"], 0, 1);
+    assert_eq!(ids(&out.events), ["new"]);
+}
+
+#[test]
+fn ids_no_longer_in_the_pool_are_ignored() {
+    // `gone` and `old` do not count toward the three items cooling down.
+    let items = pool(&["a", "b", "c", "d"]);
+    let out = shuffle(&items, &["gone", "c", "old", "b", "gone", "a"], 0, 1);
+    assert_eq!(ids(&out.events), ["d"]);
+
+    // History made only of unknown ids is no history.
+    let start = at(2026, 6, 1, 12, 0);
+    assert_eq!(
+        shuffle(&items, &["gone", "old"], start, start + DAY),
+        shuffle(&items, &[], start, start + DAY)
+    );
+}
+
+#[test]
+fn a_two_item_shuffle_alternates() {
+    let items = pool(&["a", "b"]);
+    let out = shuffle(&items, &["b"], 0, 4 * 60 * MINUTE);
+    assert_eq!(&ids(&out.events)[..4], ["a", "b", "a", "b"]);
+}
+
+#[test]
+fn a_three_item_shuffle_rotates_once_its_history_is_full() {
+    // N = 3, k = 1: two items are cooling down, so one is eligible.
+    let items = pool(&["a", "b", "c"]);
+    let out = shuffle(&items, &["b", "a"], 0, 6 * 60 * MINUTE);
+    assert_eq!(&ids(&out.events)[..6], ["c", "a", "b", "c", "a", "b"]);
+}
+
+#[test]
+fn a_shuffle_skips_zero_runtime_items() {
+    // `zero` does not count toward N: four playable items rotate.
+    let items = vec![
+        item("a", 20),
+        item("zero", 0),
+        item("b", 25),
+        item("c", 30),
+        item("d", 35),
+    ];
+    let start = at(2026, 6, 1, 12, 0);
+    let out = shuffle(&items, &[], start, start + DAY);
+    let played = ids(&out.events);
+    assert!(!played.contains(&"zero"));
+    assert_cooldown_holds(&played, 4);
+    assert_eq!(out.notes, [Note::SkippedZeroRuntime { count: 1 }]);
 }
 
 #[test]
@@ -381,54 +385,6 @@ fn a_one_item_shuffle_repeats_that_item() {
     )
     .unwrap();
     assert_eq!(ids(&out.events), ["only", "only", "only"]);
-}
-
-#[test]
-fn local_dates_follow_the_calendar_on_days_of_23_and_25_hours() {
-    let day = |ms| local_date_days(CHICAGO, ms).unwrap();
-
-    // 2026-11-01: clocks go back, the day has 25 hours.
-    let start = day(at(2026, 11, 1, 5, 0)); // 00:00 CDT
-    assert_eq!(day(at(2026, 11, 1, 4, 59)), start - 1);
-    assert_eq!(day(at(2026, 11, 2, 5, 59)), start); // 23:59 CST
-    assert_eq!(day(at(2026, 11, 2, 6, 0)), start + 1);
-
-    // 2026-03-08: clocks go forward, the day has 23 hours.
-    let start = day(at(2026, 3, 8, 6, 0)); // 00:00 CST
-    assert_eq!(day(at(2026, 3, 8, 5, 59)), start - 1);
-    assert_eq!(day(at(2026, 3, 9, 4, 59)), start); // 23:59 CDT
-    assert_eq!(day(at(2026, 3, 9, 5, 0)), start + 1);
-}
-
-#[test]
-fn the_shuffle_seed_uses_the_local_date_not_the_utc_date() {
-    let items = pool(&["a", "b", "c", "d", "e", "f", "g", "h"]);
-    let first_pass = |start: i64| {
-        let pass = generate(
-            &params(Mode::Shuffle),
-            &items,
-            &Resume::default(),
-            start,
-            start + 8 * 60 * MINUTE,
-        )
-        .unwrap();
-        ids(&pass.events)[..8]
-            .iter()
-            .map(|s| s.to_string())
-            .collect::<Vec<_>>()
-    };
-
-    // 00:30 CDT and 23:30 CST on 2026-11-01: the same local date, though they
-    // fall on two UTC dates and are 24 hours apart.
-    assert_eq!(
-        first_pass(at(2026, 11, 1, 5, 30)),
-        first_pass(at(2026, 11, 2, 5, 30))
-    );
-    // 00:30 CST the next day is a new date.
-    assert_ne!(
-        first_pass(at(2026, 11, 2, 6, 30)),
-        first_pass(at(2026, 11, 2, 5, 30))
-    );
 }
 
 #[test]
@@ -447,7 +403,7 @@ fn seven_days_across_a_daylight_saving_change_have_no_gaps() {
             .unwrap();
             assert_covers(&out.events, start, start + HORIZON_MS);
             if mode == Mode::Shuffle {
-                assert_passes_are_permutations(&ids(&out.events), 5);
+                assert_cooldown_holds(&ids(&out.events), 5);
             }
         }
     }
@@ -465,15 +421,7 @@ fn nothing_is_generated_while_the_clock_is_not_trusted() {
     let mut store = setup();
     let channel = channel(3, Mode::Sequential);
 
-    let result = extend(
-        &mut store,
-        &channel,
-        &items,
-        CHICAGO,
-        at(1970, 1, 1, 0, 0),
-        false,
-    )
-    .unwrap();
+    let result = extend(&mut store, &channel, &items, at(1970, 1, 1, 0, 0), false).unwrap();
 
     assert_eq!(result, Extended::ClockNotTrusted);
     assert!(
@@ -482,7 +430,7 @@ fn nothing_is_generated_while_the_clock_is_not_trusted() {
             .unwrap()
             .is_empty()
     );
-    assert!(store.programs_before(3, i64::MAX).unwrap().is_empty());
+    assert_eq!(store.last_program_before(3, i64::MAX).unwrap(), None);
 }
 
 #[test]
@@ -492,7 +440,7 @@ fn an_extend_stores_seven_days_with_no_gaps_and_ends_on_the_last_program() {
     let channel = channel(3, Mode::Sequential);
     let now = at(2026, 6, 1, 12, 0);
 
-    let result = extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
+    let result = extend(&mut store, &channel, &items, now, true).unwrap();
 
     let Extended::Generated {
         from_ms,
@@ -509,7 +457,7 @@ fn an_extend_stores_seven_days_with_no_gaps_and_ends_on_the_last_program() {
     assert_eq!(stored.len(), written);
     assert_covers(&stored, now, now + HORIZON_MS);
     assert_eq!(
-        store.programs_before(3, i64::MAX).unwrap().last(),
+        store.last_program_before(3, i64::MAX).unwrap().as_ref(),
         Some(&stored.last().unwrap().media_id)
     );
 }
@@ -543,15 +491,7 @@ fn a_sequential_extend_continues_after_the_last_stored_program() {
         )
         .unwrap();
 
-    extend(
-        &mut store,
-        &channel(3, Mode::Sequential),
-        &items,
-        CHICAGO,
-        now,
-        true,
-    )
-    .unwrap();
+    extend(&mut store, &channel(3, Mode::Sequential), &items, now, true).unwrap();
 
     let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
     assert_eq!(&ids(&stored)[..5], ["c", "d", "a", "b", "c"]);
@@ -577,15 +517,7 @@ fn the_resume_point_ignores_a_break_after_the_last_program() {
         )
         .unwrap();
 
-    extend(
-        &mut store,
-        &channel(3, Mode::Sequential),
-        &items,
-        CHICAGO,
-        now,
-        true,
-    )
-    .unwrap();
+    extend(&mut store, &channel(3, Mode::Sequential), &items, now, true).unwrap();
 
     let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
     assert_eq!(ids(&stored)[0], "c");
@@ -597,11 +529,11 @@ fn a_sequential_channel_resumes_where_it_stopped_after_a_long_gap() {
     let mut store = setup();
     let channel = channel(3, Mode::Sequential);
     let then = at(2026, 6, 1, 12, 0);
-    extend(&mut store, &channel, &items, CHICAGO, then, true).unwrap();
-    let last_old = store.programs_before(3, i64::MAX).unwrap().pop().unwrap();
+    extend(&mut store, &channel, &items, then, true).unwrap();
+    let last_old = store.last_program_before(3, i64::MAX).unwrap().unwrap();
     let now = then + 30 * DAY;
 
-    extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
+    extend(&mut store, &channel, &items, now, true).unwrap();
 
     let first_new = &store.events_between(3, now, now + HORIZON_MS).unwrap()[0];
     let after = items.iter().position(|i| i.id == last_old).unwrap();
@@ -618,10 +550,10 @@ fn a_reopened_store_continues_where_it_stopped() {
     let later = now + 3 * DAY + 37 * MINUTE;
 
     let mut store = Store::open(&path).unwrap();
-    extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
+    extend(&mut store, &channel, &items, now, true).unwrap();
     drop(store);
     let mut store = Store::open(&path).unwrap();
-    extend(&mut store, &channel, &items, CHICAGO, later, true).unwrap();
+    extend(&mut store, &channel, &items, later, true).unwrap();
 
     let stored = store.events_between(3, now, later + HORIZON_MS).unwrap();
     assert_covers(&stored, now, later + HORIZON_MS);
@@ -640,19 +572,19 @@ fn later_extends_continue_the_schedule_without_a_gap_or_a_repeat() {
         let channel = channel(3, mode);
         let now = at(2026, 6, 1, 12, 0);
 
-        extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
+        extend(&mut store, &channel, &items, now, true).unwrap();
         // Up to date: the same moment again has nothing to add.
-        let again = extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
+        let again = extend(&mut store, &channel, &items, now, true).unwrap();
         assert!(matches!(again, Extended::UpToDate { .. }), "{mode:?}");
         // Three days on, the next run fills the gap at the far end.
         let later = now + 3 * DAY + 37 * MINUTE;
-        extend(&mut store, &channel, &items, CHICAGO, later, true).unwrap();
+        extend(&mut store, &channel, &items, later, true).unwrap();
 
         let stored = store.events_between(3, now, later + HORIZON_MS).unwrap();
         assert_covers(&stored, now, later + HORIZON_MS);
         let played = ids(&stored);
         match mode {
-            Mode::Shuffle => assert_passes_are_permutations(&played, 6),
+            Mode::Shuffle => assert_cooldown_holds(&played, 6),
             _ => {
                 for pair in played.windows(2) {
                     let next = items.iter().position(|i| i.id.as_str() == pair[0]).unwrap();
@@ -664,15 +596,80 @@ fn later_extends_continue_the_schedule_without_a_gap_or_a_repeat() {
 }
 
 #[test]
+fn a_shuffle_extended_twice_matches_one_unbroken_run() {
+    let items = pool(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"]);
+    let mut store = setup();
+    let channel = channel(3, Mode::Shuffle);
+    let now = at(2026, 6, 1, 12, 0);
+    let later = now + 2 * DAY + 11 * MINUTE;
+
+    extend(&mut store, &channel, &items, now, true).unwrap();
+    extend(&mut store, &channel, &items, later, true).unwrap();
+
+    let whole = shuffle(&items, &[], now, later + HORIZON_MS);
+    let stored = store.events_between(3, now, later + HORIZON_MS).unwrap();
+    assert_eq!(stored, whole.events);
+}
+
+#[test]
+fn a_shuffle_extend_reads_back_past_ids_no_longer_in_the_pool() {
+    // 40 items of 3 days: N - k = 30, and one page is 80 rows. The newest 60
+    // stored programs are no longer in the pool, so the 30 cooling items lie
+    // beyond the first page.
+    let items: Vec<MediaItem> = (0..40)
+        .map(|i| item(&format!("p{i}"), 3 * 24 * 60))
+        .collect();
+    let mut history: Vec<String> = (0..30).map(|i| format!("p{i}")).collect();
+    history.extend((0..60).map(|i| format!("x{i}")));
+    let mut store = setup();
+    let channel = channel(3, Mode::Shuffle);
+    let now = at(2026, 6, 1, 12, 0);
+    let count = i64::try_from(history.len()).unwrap();
+    let old: Vec<Event> = (0..count)
+        .zip(&history)
+        .map(|(i, id)| {
+            let start = now - (count - i) * 30 * MINUTE;
+            stored(start, start + 30 * MINUTE, id, EventKind::Program)
+        })
+        .collect();
+    store.write_events(3, &old).unwrap();
+
+    extend(&mut store, &channel, &items, now, true).unwrap();
+    let first_end = store
+        .events_between(3, now, i64::MAX)
+        .unwrap()
+        .last()
+        .unwrap()
+        .end_ms;
+    extend(
+        &mut store,
+        &channel,
+        &items,
+        first_end - HORIZON_MS + 1,
+        true,
+    )
+    .unwrap();
+    let stored_events = store.events_between(3, now, i64::MAX).unwrap();
+    let end = stored_events.last().unwrap().end_ms;
+
+    let recent: Vec<&str> = history.iter().rev().map(String::as_str).collect();
+    let whole = shuffle(&items, &recent, now, end);
+    assert_eq!(stored_events, whole.events);
+    // p0..p29 are all cooling down, so the first pick is one of p30..p39.
+    let first: usize = whole.events[0].media_id.as_str()[1..].parse().unwrap();
+    assert!(first >= 30, "{first}");
+}
+
+#[test]
 fn an_extend_after_a_long_gap_starts_at_now() {
     let items = pool(&["a", "b", "c"]);
     let mut store = setup();
     let channel = channel(3, Mode::Sequential);
     let then = at(2026, 6, 1, 12, 0);
-    extend(&mut store, &channel, &items, CHICAGO, then, true).unwrap();
+    extend(&mut store, &channel, &items, then, true).unwrap();
     let now = then + 30 * DAY;
 
-    extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
+    extend(&mut store, &channel, &items, now, true).unwrap();
 
     let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
     assert_covers(&stored, now, now + HORIZON_MS);
@@ -684,15 +681,7 @@ fn an_unplayable_library_writes_nothing_and_reports_it() {
     let mut store = setup();
     let now = at(2026, 6, 1, 12, 0);
 
-    let result = extend(
-        &mut store,
-        &channel(3, Mode::Shuffle),
-        &items,
-        CHICAGO,
-        now,
-        true,
-    )
-    .unwrap();
+    let result = extend(&mut store, &channel(3, Mode::Shuffle), &items, now, true).unwrap();
 
     assert_eq!(
         result,
@@ -703,7 +692,7 @@ fn an_unplayable_library_writes_nothing_and_reports_it() {
             notes: vec![Note::SkippedZeroRuntime { count: 1 }, Note::NoPlayableItems],
         }
     );
-    assert!(store.programs_before(3, i64::MAX).unwrap().is_empty());
+    assert_eq!(store.last_program_before(3, i64::MAX).unwrap(), None);
     assert!(
         store
             .events_between(3, i64::MIN, i64::MAX)
@@ -718,7 +707,7 @@ fn a_blocks_channel_is_refused() {
     let mut channel = channel(3, Mode::Sequential);
     channel.plan = Plan::Blocks(Vec::new());
 
-    let result = extend(&mut store, &channel, &pool(&["a"]), CHICAGO, 0, true);
+    let result = extend(&mut store, &channel, &pool(&["a"]), 0, true);
 
     assert!(matches!(result, Err(ScheduleError::UnsupportedPlan)));
 }
@@ -741,7 +730,7 @@ fn a_resolved_collection_pool_schedules_only_its_items() {
     let mut store = setup();
     let now = at(2026, 6, 1, 12, 0);
 
-    extend(&mut store, &channel, &items, CHICAGO, now, true).unwrap();
+    extend(&mut store, &channel, &items, now, true).unwrap();
 
     let stored = store.events_between(3, now, now + HORIZON_MS).unwrap();
     assert_eq!(ids(&stored[..4]), ["d", "b", "d", "b"]);

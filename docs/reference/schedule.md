@@ -4,11 +4,11 @@ The code is in `src/schedule/`. It turns a pool of media items into `timeline::E
 
 ## Two layers
 
-`generate(&Params, pool, &Resume, start_ms, end_ms)` is a pure function inside the crate. It reads no clock and does no I/O. `Params` holds the channel number, the `Mode` and the time zone. `Resume` holds the cursor (the media id of the last item scheduled) and `played`, the media ids of earlier programs, oldest first. It returns `Generated { events, cursor, notes }`. Times are Unix epoch milliseconds.
+`generate(&Params, pool, &Resume, start_ms, end_ms)` is a pure function inside the crate. It reads no clock and does no I/O. `Params` holds the channel number and the `Mode`. `Resume` holds `recent`, the media ids of earlier programs, newest first; the first of them is the cursor, the last item scheduled. It returns `Generated { events, cursor, notes }`. Times are Unix epoch milliseconds.
 
-`schedule::extend(&mut Store, &Channel, pool, tz, now_ms, clock_trusted)` keeps a channel's week filled. The caller supplies the pool as a slice of `MediaItem`s: it takes `source` from the channel's `Plan::Fixed`, resolves it with `library::resolve_pool` and passes the result to `extend`. Until #30 only a `jellyfin_collection` source resolves, to the collection's cached members in collection order; the other sources return `PoolError::Unsupported`, so a channel never falls back to the whole library. `extend` returns `Extended::ClockNotTrusted` and touches nothing when `clock_trusted` is false, because a Pi with an unsynchronized clock must not store a wrong week. Otherwise it starts at the later of `now_ms` and the end of the last stored event and generates up to `now_ms` plus seven days (`HORIZON_MS`). If the schedule already reaches that far it returns `Extended::UpToDate`. It never reads the system clock.
+`schedule::extend(&mut Store, &Channel, pool, now_ms, clock_trusted)` keeps a channel's week filled. The caller supplies the pool as a slice of `MediaItem`s: it takes `source` from the channel's `Plan::Fixed`, resolves it with `library::resolve_pool` and passes the result to `extend`. Until #30 only a `jellyfin_collection` source resolves, to the collection's cached members in collection order; the other sources return `PoolError::Unsupported`, so a channel never falls back to the whole library. `extend` returns `Extended::ClockNotTrusted` and touches nothing when `clock_trusted` is false, because a Pi with an unsynchronized clock must not store a wrong week. Otherwise it starts at the later of `now_ms` and the end of the last stored event and generates up to `now_ms` plus seven days (`HORIZON_MS`). If the schedule already reaches that far it returns `Extended::UpToDate`. It never reads the system clock.
 
-The resume point comes from the stored events, not from a separate cursor. The cursor is the media id of the channel's last program event that starts before the new window, at any time, past or future. A sequential channel reads only that one event (`Store::last_program_before`). A shuffle channel reads all of its earlier program events (`Store::programs_before`), counts consecutive events of one media id as one program, takes the last as the cursor and passes all of them as `Resume::played`. That read grows with the stored history, because old events are not deleted yet. Writing the new events is the only write and is one transaction, so a crash cannot leave the schedule and the resume point disagreeing. Because the resume point is read from the events, `Store::replace_events_from` also moves it back to the last program it keeps.
+The resume point comes from the stored events, not from a separate cursor. The cursor is the media id of the channel's last program event that starts before the new window, at any time, past or future. A sequential channel reads only that one event (`Store::last_program_before`). A shuffle channel reads its most recent program events, newest first, in pages of twice the pool's length (`Store::recent_programs_before`, which walks back on the primary key). It reads the next page, bounded by the oldest start time so far, until the rows hold the N - k distinct pool items cooling down (see Shuffle) or the history ends, and passes the rows as `Resume::recent`. One page is usually enough; the read reaches further back only when the recent programs are mostly ids no longer in the pool, or when the history is shorter than N - k distinct pool items, in which case it reads the whole history. Writing the new events is the only write and is one transaction, so a crash cannot leave the schedule and the resume point disagreeing. Because the resume point is read from the events, `Store::replace_events_from` also moves it back to the last program it keeps.
 
 ## Rules for every run
 
@@ -24,19 +24,24 @@ Items play in the pool's order. A run continues after the cursor item and wraps 
 
 ## Shuffle
 
-No item repeats until every other item has played. One trip through the pool is a pass.
+Each program slot picks at random from the items that are not cooling down.
 
-- A pass is a Fisher-Yates shuffle driven by SplitMix64, both written in `src/schedule/rng.rs` so the result does not depend on the `rand` crate, a hasher or the Rust version.
-- The seed is the channel number, the local date in the channel's time zone when the pass is drawn, and the number of passes already drawn in this run. The date is a calendar date, so a 23-hour or 25-hour day does not change it.
-- The cursor is one media id and cannot say which items the current pass has used. `extend` therefore passes the ids of the channel's earlier program events as `Resume::played`. The generator replays them to find the items already used in the current pass, plays the rest of that pass in the seeded order, then starts a new one. A restart does not replay an item inside the same pass. A pass never opens with the item that just played, unless the pool has one item.
+- Let N be the number of distinct playable items in the pool and k = max(1, ceil(N / 4)). Walk the earlier programs newest first, the resumed history and then this run's picks, collecting distinct pool ids until there are N - k of them. Those items are cooling down; every other playable item is eligible.
+- An item that never played, or was added to the pool since, is eligible. An id that is no longer in the pool is ignored and does not count toward N - k. When the history holds fewer than N - k distinct pool items, fewer items are cooling down.
+- The pick draws an index into the eligible items, in pool order, with SplitMix64 (`src/schedule/rng.rs`) seeded from the channel number and the slot's `start_ms`. The seed has no date, counter or run state, and the result does not depend on the `rand` crate, a hasher or the Rust version.
+
+What this gives:
+
+- No item repeats within N - k + 1 consecutive programs. With N = 1 the one item always plays. With N >= 2 the item that just played never plays next. With N up to 4, k is 1, so once the history is full the items rotate in a fixed order.
+- An eligible item stays eligible until it plays, so every item plays eventually.
+- A run that stops at an event boundary and resumes from the stored events produces exactly what an unbroken run would. This holds because `extend` reads back until it has N - k distinct pool items or reaches the first stored program, so a resumed run sees the same cooling items as the unbroken one. A caller of `generate` that passes a shorter history loses that guarantee.
 
 Limits:
 
-- A run resumed on the same local date plays the rest of the pass exactly as an unbroken run would. Later passes, or a different date, can differ from an unbroken run but are still valid shuffles.
-- If the pool changes, a new item joins the current pass and a removed one is forgotten.
-- Reading the whole event history is what makes the replay exact. If old events are deleted, the replay may start in the middle of a pass and misjudge it once.
+- There are no passes, so there is no guarantee that every item plays once before any item plays twice.
+- If the whole stored history holds fewer than N - k distinct pool items, for example on a new channel or after the pool changed, fewer items are cooling down and more are eligible.
 
 ## Notes for later work
 
-- Breaks will cut a program into several events with the same `media_id`. The shuffle replay already counts consecutive events of one media id as one program.
+- Breaks will cut a program into several events with the same `media_id`. The cooldown walk already counts them as one item, but each event uses a row of the history read, so the read may need more pages.
 - A run stops with `ScheduleError::TooManyEvents` after 200,000 events, which only happens when runtimes are seconds long.
