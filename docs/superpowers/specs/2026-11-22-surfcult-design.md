@@ -67,7 +67,7 @@ remote/keys ──> tuner ──> player (MPV, JSON IPC) ──> HDMI
 axum web admin and API (later) reads and writes the same state
 ```
 
-Modules: `timeline` (pure functions, no I/O), `schedule` (generator), `library` (the `MediaSource` trait plus a Jellyfin implementation and a SQLite cache), `player` (MPV process and IPC), `overlay` (TV screen graphics), `tuner` (channel state machine), `config`, `server`.
+Modules: `timeline` (pure functions, no I/O), `schedule` (generator), `library` (the media model, the `MediaSource` trait and pool resolution), `store` (the one SQLite file: schedules, playback history and the library cache, which is the `MediaSource` the program uses), `jellyfin` (a sync step that copies the Jellyfin library into the store's cache), `player` (MPV process and IPC), `overlay` (TV screen graphics), `tuner` (channel state machine), `config`, `server`. `store` depends on `library` and `jellyfin` on both; `library` uses neither, so there is no cycle.
 
 ### Configuration and storage
 
@@ -97,7 +97,7 @@ Each channel has a materialized, persisted list of events: start, end, media id,
 Content sources and modes (v1):
 
 - Sources: a Jellyfin library, collection, tag or genre, or a single series. Collections and series expand to their episodes and movies.
-- `sequential`: plays items in order and remembers its place. The next item is kept as a cursor per channel in SQLite and advances as events are generated, so regenerating the future continues from the cursor at the frozen boundary.
+- `sequential`: plays items in order and remembers its place. There is no separate cursor: the channel continues after the media of its last stored program event, so regenerating the future continues from the last program before the frozen boundary.
 - `shuffle`: seeded random order without repeats until the pool is used up.
 - `weighted`: seeded random pick where each source or item carries a weight.
 - `blocks`: a list of time-of-day (and day-of-week) blocks, each with its own source and mode, for things like Saturday-morning cartoons. Later blocks in the file do not override earlier ones; overlapping blocks are a config error.
