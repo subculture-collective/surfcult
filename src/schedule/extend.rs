@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use super::blocks::spans;
 use super::{
-    BreakPlan, Lane, Layout, Note, Params, ROTATION_MEMORY_MS, Resume, ScheduleError,
+    BreakPlan, Generated, Lane, Layout, Note, Params, ROTATION_MEMORY_MS, Resume, ScheduleError,
     cooling_target, generate, generate_blocks,
 };
 use crate::clips::Pool;
@@ -79,6 +79,32 @@ pub fn extend(
         return Ok(Extended::UpToDate { until_ms: from_ms });
     }
 
+    let generated = fill(store, channel, pools, clips, timezone, from_ms, horizon_ms)?;
+    if !generated.events.is_empty() {
+        store.write_events(n, &generated.events)?;
+    }
+    Ok(Extended::Generated {
+        from_ms,
+        to_ms: horizon_ms,
+        written: generated.events.len(),
+        notes: generated.notes,
+    })
+}
+
+/// Generates `channel`'s events for `[from_ms, horizon_ms)`, resuming from the
+/// stored history before `from_ms`: its programs and its last break clip.
+/// Writes nothing. [`extend`] and [`regenerate`](super::regenerate) differ
+/// only in where they start and how they write the result.
+pub(super) fn fill(
+    store: &Store,
+    channel: &Channel,
+    pools: &[(Source, Vec<MediaItem>)],
+    clips: &[Pool],
+    timezone: Tz,
+    from_ms: i64,
+    horizon_ms: i64,
+) -> Result<Generated, ScheduleError> {
+    let n = channel.number;
     let clips_of = |name: &str| {
         clips
             .iter()
@@ -169,15 +195,7 @@ pub fn extend(
             generate_blocks(&layout, &resume, from_ms, horizon_ms)?
         }
     };
-    if !generated.events.is_empty() {
-        store.write_events(n, &generated.events)?;
-    }
-    Ok(Extended::Generated {
-        from_ms,
-        to_ms: horizon_ms,
-        written: generated.events.len(),
-        notes: generated.notes,
-    })
+    Ok(generated)
 }
 
 /// A configured duration in whole milliseconds. Config durations are whole

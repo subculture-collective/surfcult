@@ -1843,3 +1843,470 @@ fn breaks_after_a_block_end_are_not_counted_as_short() {
     assert_eq!(out.events.last().unwrap().end_ms, end);
     assert_eq!(out.notes, [Note::ShortBreaks { count: 1 }]);
 }
+
+// Regeneration.
+
+/// `regenerate` for a channel with one source, whose pool is `items`, in UTC.
+fn regenerate_fixed(
+    store: &mut Store,
+    channel: &Channel,
+    items: &[MediaItem],
+    clips: &[ClipPool],
+    now_ms: i64,
+) -> Extended {
+    let pools: Vec<(Source, Vec<MediaItem>)> = channel
+        .plan
+        .sources()
+        .into_iter()
+        .map(|source| (source.clone(), items.to_vec()))
+        .collect();
+    regenerate(store, channel, &pools, clips, Tz::UTC, now_ms, true).unwrap()
+}
+
+fn all_events(store: &Store) -> Vec<Event> {
+    store.events_between(3, i64::MIN, i64::MAX).unwrap()
+}
+
+fn regenerated_from(result: &Extended) -> i64 {
+    let Extended::Generated { from_ms, .. } = result else {
+        panic!("expected events, got {result:?}");
+    };
+    *from_ms
+}
+
+#[test]
+fn a_regeneration_keeps_every_event_that_starts_within_30_minutes() {
+    // a 0-20, b 20-47, c 47-81 minutes. Regenerating at 5 minutes freezes
+    // until 35, so c, the first program starting after that, is the boundary.
+    let items = pool(&["a", "b", "c", "d"]);
+    let mut store = setup();
+    let channel = channel(3, Mode::Sequential);
+    let now = at(2026, 6, 1, 12, 0);
+    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
+    let before = all_events(&store);
+
+    let later = now + 5 * MINUTE;
+    let result = regenerate_fixed(&mut store, &channel, &pool(&["x", "y", "z"]), &[], later);
+
+    let boundary = regenerated_from(&result);
+    assert_eq!(boundary, now + 47 * MINUTE);
+    assert!(boundary >= later + FREEZE_MS);
+    let after = all_events(&store);
+    let kept = before.iter().take_while(|e| e.start_ms < boundary).count();
+    assert_eq!(after[..kept], before[..kept]);
+    assert_eq!(ids(&after[..kept]), ["a", "b"]);
+    // The cursor `b` is not in the new pool, so the order restarts at `x`.
+    assert_eq!(after[kept].media_id.as_str(), "x");
+    assert_covers(&after, now, later + HORIZON_MS);
+}
+
+#[test]
+fn a_regeneration_with_unchanged_inputs_changes_nothing() {
+    let items = pool(&["a", "b", "c", "d", "e", "f", "g", "h"]);
+    let pools = clip_pools();
+    let now = at(2026, 6, 1, 12, 0);
+    for mode in [Mode::Sequential, Mode::Shuffle, Mode::Weighted] {
+        let mut store = setup();
+        let channel = channel_with_breaks(mode);
+        extend_fixed(&mut store, &channel, &items, &pools, now, true).unwrap();
+        let before = all_events(&store);
+
+        let result = regenerate_fixed(&mut store, &channel, &items, &pools, now);
+
+        regenerated_from(&result);
+        assert_eq!(all_events(&store), before, "{mode:?}");
+    }
+}
+
+#[test]
+fn a_regeneration_starts_at_a_program_not_inside_its_breaks() {
+    // With an 11-minute break interval, `a` (20 minutes) is cut once and `b`
+    // (27 minutes) twice. The freeze point falls inside `b`, so all of `b`
+    // and its breaks are kept and the new schedule starts at `c`.
+    let items = pool(&["a", "b", "c", "d"]);
+    let pools = clip_pools();
+    let mut store = setup();
+    let channel = channel_with_breaks(Mode::Sequential);
+    let now = at(2026, 6, 1, 12, 0);
+    extend_fixed(&mut store, &channel, &items, &pools, now, true).unwrap();
+    let before = all_events(&store);
+
+    let result = regenerate_fixed(&mut store, &channel, &pool(&["x"]), &pools, now);
+
+    let boundary = regenerated_from(&result);
+    let first = before.iter().find(|e| e.start_ms == boundary).unwrap();
+    assert_eq!(
+        (first.kind, first.media_id.as_str(), first.media_offset_ms),
+        (EventKind::Program, "c", 0)
+    );
+    let after = all_events(&store);
+    let kept = before.iter().take_while(|e| e.start_ms < boundary).count();
+    assert_eq!(after[..kept], before[..kept]);
+    assert_eq!(before[kept - 1].kind, EventKind::Program);
+    assert_eq!(programs(&after[kept..])[0], "x");
+    assert_covers(&after, now, now + HORIZON_MS);
+}
+
+#[test]
+fn changing_an_item_duration_changes_only_later_events() {
+    // a 0-20, b 20-47 and then c, d, a, b again from 47 minutes. `b` grows
+    // from 27 to 30 minutes.
+    let items = pool(&["a", "b", "c", "d"]);
+    let mut store = setup();
+    let channel = channel(3, Mode::Sequential);
+    let now = at(2026, 6, 1, 12, 0);
+    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
+    let before = all_events(&store);
+    let mut longer = items.clone();
+    longer[1].runtime_ms = 30 * MINUTE as u64;
+
+    let result = regenerate_fixed(&mut store, &channel, &longer, &[], now);
+
+    let boundary = regenerated_from(&result);
+    let after = all_events(&store);
+    // The `b` in the frozen half hour keeps its scheduled length.
+    assert_eq!(after[1], before[1]);
+    assert_eq!(after[1].media_duration_ms, 27 * MINUTE as u64);
+    // Everything up to the next `b` after the boundary is the same.
+    let next_b = after
+        .iter()
+        .position(|e| e.start_ms >= boundary && e.media_id.as_str() == "b")
+        .unwrap();
+    assert_eq!(ids(&after[..next_b]), ["a", "b", "c", "d", "a"]);
+    assert_eq!(after[..next_b], before[..next_b]);
+    assert_eq!(after[next_b].media_duration_ms, 30 * MINUTE as u64);
+    assert_eq!(after[next_b].end_ms - after[next_b].start_ms, 30 * MINUTE);
+    assert_ne!(after[next_b + 1].start_ms, before[next_b + 1].start_ms);
+    assert_covers(&after, now, now + HORIZON_MS);
+}
+
+#[test]
+fn a_regeneration_past_the_end_of_a_short_schedule_extends_it() {
+    let items = pool(&["a", "b"]);
+    let mut store = setup();
+    let channel = channel(3, Mode::Sequential);
+    let now = at(2026, 6, 1, 12, 0);
+    store
+        .write_events(
+            3,
+            &[stored(now, now + 20 * MINUTE, "a", EventKind::Program)],
+        )
+        .unwrap();
+
+    let result = regenerate_fixed(&mut store, &channel, &items, &[], now);
+
+    assert_eq!(regenerated_from(&result), now + 20 * MINUTE);
+    let after = all_events(&store);
+    assert_eq!(ids(&after[..2]), ["a", "b"]);
+    assert_covers(&after, now, now + HORIZON_MS);
+}
+
+/// A blocks channel with a 06:00 to 07:00 block of `a` every day, the
+/// `filler` pool in the time no block covers when `filler` is true, and no
+/// default.
+fn morning_channel(filler: bool) -> Channel {
+    let mut channel = channel(3, Mode::Sequential);
+    channel.plan = Plan::Blocks {
+        blocks: vec![block(&[], (6, 0), (7, 0), "a", Mode::Sequential)],
+        default: None,
+    };
+    channel.filler = filler.then(|| "filler".into());
+    channel
+}
+
+/// Adds an evening block of `b`, 20:00 to 21:00 every day, to `channel`.
+fn add_evening_block(channel: &mut Channel) {
+    let Plan::Blocks { blocks, .. } = &mut channel.plan else {
+        unreachable!()
+    };
+    blocks.push(block(&[], (20, 0), (21, 0), "b", Mode::Sequential));
+}
+
+fn morning_pools() -> Vec<(Source, Vec<MediaItem>)> {
+    vec![
+        (Source::JellyfinTag("a".into()), named("a", 3, 20)),
+        (Source::JellyfinTag("b".into()), named("b", 3, 30)),
+    ]
+}
+
+#[test]
+fn a_blocks_regeneration_reaches_the_filler_before_the_next_program() {
+    // At 12:00 the channel plays filler until 06:00 tomorrow. A block added
+    // at 20:00 airs tonight.
+    let mut channel = morning_channel(true);
+    let pools = morning_pools();
+    let clips = [ClipPool::new(
+        "filler",
+        "/clips",
+        vec![clip("slate", 90), clip("ident", 45)],
+        Vec::new(),
+    )];
+    let now = at(2026, 6, 1, 17, 0); // 12:00 CDT
+    let mut store = setup();
+    extend(&mut store, &channel, &pools, &clips, CHICAGO, now, true).unwrap();
+    let before = all_events(&store);
+
+    // Unchanged inputs change nothing.
+    let same = regenerate(&mut store, &channel, &pools, &clips, CHICAGO, now, true).unwrap();
+    regenerated_from(&same);
+    assert_eq!(all_events(&store), before);
+
+    add_evening_block(&mut channel);
+    let result = regenerate(&mut store, &channel, &pools, &clips, CHICAGO, now, true).unwrap();
+
+    let boundary = regenerated_from(&result);
+    assert!(boundary >= now + FREEZE_MS);
+    assert!(boundary < now + FREEZE_MS + 2 * MINUTE, "{boundary}");
+    let after = all_events(&store);
+    let kept = before.iter().take_while(|e| e.start_ms < boundary).count();
+    assert_eq!(after[..kept], before[..kept]);
+    assert_eq!(after[kept - 1].kind, EventKind::Filler);
+    let eight = at(2026, 6, 2, 1, 0); // 20:00 CDT
+    let first = after.iter().find(|e| e.start_ms == eight).unwrap();
+    assert_eq!(
+        (first.kind, first.media_id.as_str()),
+        (EventKind::Program, "b0")
+    );
+    assert_covers(&after, before[0].start_ms, now + HORIZON_MS);
+}
+
+#[test]
+fn a_blocks_regeneration_reaches_dead_air_after_the_freeze_point() {
+    // Without filler the channel has no events from 07:00 to 06:00. The
+    // freeze point falls inside that time, so the new schedule starts there.
+    let mut channel = morning_channel(false);
+    let pools = morning_pools();
+    let now = at(2026, 6, 1, 17, 0); // 12:00 CDT
+    let mut store = setup();
+    extend(&mut store, &channel, &pools, &[], CHICAGO, now, true).unwrap();
+    let before = all_events(&store);
+
+    add_evening_block(&mut channel);
+    let result = regenerate(&mut store, &channel, &pools, &[], CHICAGO, now, true).unwrap();
+
+    assert_eq!(regenerated_from(&result), now + FREEZE_MS);
+    let after = all_events(&store);
+    let eight = at(2026, 6, 2, 1, 0); // 20:00 CDT
+    assert_eq!(after[0].start_ms, eight);
+    assert_eq!(after[0].media_id.as_str(), "b0");
+    assert!(after.len() > before.len());
+}
+
+#[test]
+fn a_regeneration_with_nothing_playable_keeps_the_stored_schedule() {
+    // An empty pool, as after a failed library fetch, would leave the channel
+    // without programs for a week.
+    let items = pool(&["a", "b", "c"]);
+    let mut store = setup();
+    let channel = channel(3, Mode::Sequential);
+    let now = at(2026, 6, 1, 12, 0);
+    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
+    let before = all_events(&store);
+
+    let result = regenerate_fixed(&mut store, &channel, &[], &[], now);
+
+    let Extended::Generated { written, notes, .. } = result else {
+        panic!("expected events, got {result:?}");
+    };
+    assert_eq!(written, 0);
+    assert_eq!(notes, [Note::NoPlayableItems]);
+    assert_eq!(all_events(&store), before);
+}
+
+#[test]
+fn a_regeneration_does_nothing_while_the_clock_is_not_trusted() {
+    let mut store = setup();
+    let channel = channel(3, Mode::Sequential);
+    let pools = [(Source::JellyfinLibrary("All".into()), pool(&["a"]))];
+
+    let result = regenerate(&mut store, &channel, &pools, &[], Tz::UTC, 0, false).unwrap();
+
+    assert_eq!(result, Extended::ClockNotTrusted);
+    assert!(all_events(&store).is_empty());
+}
+
+// Fitting a file to its event.
+
+/// A program event for a 20-minute item `a`, `length_min` long, playing the
+/// media from `offset_min`.
+fn slot(offset_min: u64, length_min: i64) -> Event {
+    let start = at(2026, 6, 1, 12, 0);
+    Event {
+        start_ms: start,
+        end_ms: start + length_min * MINUTE,
+        media_id: MediaId::new("a"),
+        media_offset_ms: offset_min * 60 * SECOND,
+        media_duration_ms: 20 * 60 * SECOND,
+        kind: EventKind::Program,
+    }
+}
+
+#[test]
+fn a_short_file_is_padded_from_the_filler_pool_to_its_scheduled_end() {
+    let event = slot(0, 20);
+    let filler = [clip("slate", 90), clip("ident", 45)];
+
+    let fitted = fit(&event, 18 * 60 * SECOND, &filler);
+
+    assert_eq!(
+        fitted.fit,
+        Fit::Short {
+            by_ms: 2 * 60 * SECOND,
+            padded: true
+        }
+    );
+    assert_eq!(
+        shape(&fitted.events),
+        [
+            (EventKind::Program, "a".into(), 0, 18 * MINUTE),
+            (EventKind::Filler, clip_id("slate"), 0, 90_000),
+            (EventKind::Filler, clip_id("ident"), 0, 30_000),
+        ]
+    );
+    assert_covers(&fitted.events, event.start_ms, event.end_ms);
+    assert_eq!(fitted.events.last().unwrap().end_ms, event.end_ms);
+}
+
+#[test]
+fn a_long_file_is_cut_at_its_scheduled_end() {
+    let event = slot(0, 20);
+
+    let fitted = fit(&event, 23 * 60 * SECOND, &[clip("slate", 90)]);
+
+    assert_eq!(
+        fitted.fit,
+        Fit::Long {
+            by_ms: 3 * 60 * SECOND
+        }
+    );
+    assert_eq!(fitted.events, [event]);
+}
+
+#[test]
+fn each_mismatch_is_recorded_in_playback_history() {
+    let mut store = setup();
+    let event = slot(0, 20);
+    let filler = [clip("slate", 90)];
+    let start = event.start_ms;
+
+    for (real_min, at_ms) in [
+        (20, start),
+        (18, start + 1),
+        (19, start + 2),
+        (25, start + 3),
+    ] {
+        let fitted = fit(&event, real_min * 60 * SECOND, &filler);
+        record_fit(&mut store, 3, &event, fitted.fit, at_ms).unwrap();
+    }
+    let short = fit(&event, 18 * 60 * SECOND, &[]);
+    assert!(record_fit(&mut store, 3, &event, short.fit, start + 4).unwrap());
+
+    let history: Vec<(i64, String, String)> = store
+        .playback_history(3, 10)
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.started_at_ms - start,
+                row.media_id.to_string(),
+                row.outcome,
+            )
+        })
+        .collect();
+    // The exact fit at `start` writes no row.
+    let row = |at: i64, outcome: &str| (at, "a".to_string(), outcome.to_string());
+    assert_eq!(
+        history,
+        [
+            row(4, "short"),
+            row(3, "cut"),
+            row(2, "padded"),
+            row(1, "padded")
+        ]
+    );
+}
+
+#[test]
+fn a_short_file_without_filler_leaves_the_rest_of_the_event_empty() {
+    let event = slot(0, 20);
+
+    let fitted = fit(&event, 18 * 60 * SECOND, &[]);
+
+    assert_eq!(fitted.fit.outcome(), Some("short"));
+    assert_eq!(
+        shape(&fitted.events),
+        [(EventKind::Program, "a".into(), 0, 18 * MINUTE)]
+    );
+}
+
+#[test]
+fn a_segment_the_file_does_not_reach_is_all_filler() {
+    // The segment plays 15..20 minutes; the file is 14 minutes long.
+    let event = slot(15, 5);
+
+    let fitted = fit(&event, 14 * 60 * SECOND, &[clip("slate", 240)]);
+
+    assert_eq!(
+        shape(&fitted.events),
+        [
+            (EventKind::Filler, clip_id("slate"), 0, 4 * MINUTE),
+            (EventKind::Filler, clip_id("slate"), 0, MINUTE),
+        ]
+    );
+    assert_eq!(fitted.fit.outcome(), Some("padded"));
+}
+
+#[test]
+fn a_long_file_in_a_segment_before_a_break_is_not_a_mismatch() {
+    // The first 11 minutes of a 20-minute item, cut for a break. The file is
+    // longer than scheduled, but this event does not reach the item's end.
+    let event = slot(0, 11);
+
+    assert_eq!(fit(&event, 25 * 60 * SECOND, &[]).fit, Fit::Exact);
+    assert_eq!(fit(&event, 11 * 60 * SECOND, &[]).fit, Fit::Exact);
+    // The last segment, 11..20 minutes, is where the long file is cut.
+    assert_eq!(
+        fit(&slot(11, 9), 25 * 60 * SECOND, &[]).fit,
+        Fit::Long {
+            by_ms: 5 * 60 * SECOND
+        }
+    );
+}
+
+#[test]
+fn a_length_within_half_a_second_of_the_event_is_exact() {
+    let event = slot(0, 20);
+    let filler = [clip("slate", 90)];
+    let scheduled = 20 * 60 * SECOND;
+
+    for real_ms in [scheduled - FIT_TOLERANCE_MS, scheduled + FIT_TOLERANCE_MS] {
+        let fitted = fit(&event, real_ms, &filler);
+        assert_eq!(
+            (fitted.fit, &fitted.events),
+            (Fit::Exact, &vec![event.clone()])
+        );
+    }
+    assert_eq!(
+        fit(&event, scheduled - FIT_TOLERANCE_MS - 1, &filler).fit,
+        Fit::Short {
+            by_ms: FIT_TOLERANCE_MS + 1,
+            padded: true
+        }
+    );
+    assert_eq!(
+        fit(&event, scheduled + FIT_TOLERANCE_MS + 1, &filler).fit,
+        Fit::Long {
+            by_ms: FIT_TOLERANCE_MS + 1
+        }
+    );
+}
+
+#[test]
+fn clip_events_are_never_fitted() {
+    let mut event = slot(0, 2);
+    event.kind = EventKind::Break;
+
+    let fitted = fit(&event, 0, &[clip("slate", 90)]);
+
+    assert_eq!((fitted.fit, fitted.events), (Fit::Exact, vec![event]));
+}
