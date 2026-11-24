@@ -3,10 +3,11 @@
 
 use std::collections::HashSet;
 
-use super::blocks::spans;
+use super::blocks::{Span, spans};
+use super::sign_off::{clip as sign_off_clip, nights};
 use super::{
     BreakPlan, Generated, Lane, Layout, Note, Params, Resume, ScheduleError, cooling_target,
-    generate, generate_blocks,
+    generate, generate_blocks, generate_fixed,
 };
 use crate::clips::Pool;
 use crate::config::{Channel, Mode, Plan, Source, Tz};
@@ -38,13 +39,14 @@ pub enum Extended {
 /// ([`Plan::sources`]), each resolved with
 /// [`library::resolve_pool`](crate::library::resolve_pool). A source that is
 /// not there counts as an empty pool. `timezone` is the config's time zone,
-/// in which a blocks channel's times are read; other channels ignore it.
+/// in which a blocks channel's times and a sign-off's times are read; other
+/// channels ignore it.
 ///
 /// `clips` are the scanned clip pools, usually
 /// [`ClipLibrary::pools`](crate::clips::ClipLibrary::pools). The channel's
-/// break pool, its `breaks.pad` pool and its `filler` pool are looked up there
-/// by name; a pool that is not there counts as empty. A channel without
-/// breaks or blocks ignores `clips`.
+/// break pool, its `breaks.pad` pool, its `filler` pool and its sign-off pool
+/// are looked up there by name; a pool that is not there counts as empty. A
+/// channel without breaks, blocks or a sign-off ignores `clips`.
 ///
 /// Does nothing unless `clock_trusted` is true: a Pi whose clock has not
 /// synchronized must not store a wrong week. Starts at the later of `now_ms`
@@ -141,6 +143,21 @@ pub(super) fn fill(
         None => Vec::new(),
     };
     let last_break = aired.first().cloned();
+    let filler = channel.filler.as_deref().map_or(&[][..], clips_of);
+
+    // The nights off the air and the clip that starts each. Where the last
+    // stored event ends, and what it is, tells a run that starts in the gap
+    // before a sign-off from one that starts after a program.
+    let (nights, sign_off, last_event) = match &channel.sign_off {
+        Some(config) => (
+            nights(config, timezone, from_ms, horizon_ms)?,
+            sign_off_clip(clips_of(&config.pool), config.clip.as_deref()),
+            store
+                .last_event_before(n, from_ms)?
+                .map(|event| (event.end_ms, event.kind)),
+        ),
+        None => (Vec::new(), None, None),
+    };
 
     let generated = match &channel.plan {
         Plan::Fixed {
@@ -152,28 +169,49 @@ pub(super) fn fill(
             // Sequential and weighted need only the last earlier program.
             // Shuffle needs the programs back to the N - k distinct pool items
             // cooling down.
+            let lane = Lane {
+                mode: *mode,
+                weights,
+                pool,
+            };
             let recent = if *mode == Mode::Shuffle {
-                let lane = Lane {
-                    mode: *mode,
-                    weights,
-                    pool,
-                };
                 recent_history(store, n, &[lane], from_ms)?
             } else {
                 store.last_program_before(n, from_ms)?.into_iter().collect()
-            };
-            let params = Params {
-                channel: n,
-                mode: *mode,
-                weights,
-                breaks,
             };
             let resume = Resume {
                 recent,
                 last_break,
                 aired,
+                last_event,
             };
-            generate(&params, pool, &resume, from_ms, horizon_ms)?
+            if channel.sign_off.is_none() {
+                let params = Params {
+                    channel: n,
+                    mode: *mode,
+                    weights,
+                    breaks,
+                };
+                generate(&params, pool, &resume, from_ms, horizon_ms)?
+            } else {
+                // One lane over all time, cut by the nights off the air, with
+                // the filler pool for the gap before each sign-off.
+                let layout = Layout {
+                    channel: n,
+                    breaks,
+                    lanes: vec![lane],
+                    default: None,
+                    spans: vec![Span {
+                        start_ms: i64::MIN,
+                        end_ms: i64::MAX,
+                        block: Some(0),
+                    }],
+                    filler,
+                    nights,
+                    sign_off,
+                };
+                generate_fixed(&layout, &resume, from_ms, horizon_ms)?
+            }
         }
         Plan::Blocks { blocks, default } => {
             let mut lanes: Vec<Lane<'_>> = blocks
@@ -199,12 +237,15 @@ pub(super) fn fill(
                 spans: spans(blocks, timezone, from_ms, horizon_ms)?,
                 lanes,
                 default,
-                filler: channel.filler.as_deref().map_or(&[][..], clips_of),
+                filler,
+                nights,
+                sign_off,
             };
             let resume = Resume {
                 recent,
                 last_break,
                 aired,
+                last_event,
             };
             generate_blocks(&layout, &resume, from_ms, horizon_ms)?
         }

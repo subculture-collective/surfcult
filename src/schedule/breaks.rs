@@ -125,6 +125,7 @@ pub(super) fn cut_points(item: &MediaItem, every_ms: u64) -> Vec<u64> {
 
 /// Fills breaks from one plan and carries the pool's rotation and each clip's
 /// airings from one break to the next.
+#[derive(Clone)]
 pub(super) struct Rotation {
     channel: u32,
     length_ms: u64,

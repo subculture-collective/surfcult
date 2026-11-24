@@ -26,6 +26,14 @@ name = "MOVIE NIGHT"
 source = { jellyfin_library = "Movies" }
 mode = "sequential"
 # No grid: long, irregular programs.
+# End each night with one clip, then go off the air. `at` is when the clip
+# starts and `until` when the channel comes back, both HH:MM in the time zone
+# above; `until` is the next morning when it is not after `at`. `pool` is an
+# interstitial pool and `clip` one file name in it; without `clip`, or when
+# that file is missing, the pool's first clip plays. No program starts that
+# would still be on at `at`. The channel's `filler` pool plays the time
+# between; this channel has none, so that time would be dead air.
+# sign_off = { at = "23:30", pool = "anthem", clip = "anthem.mp4", until = "06:00" }
 
 # mode = "blocks": time-of-day windows, each with its own source and mode.
 # Times are HH:MM in the time zone above and do not cross midnight (use
@@ -71,3 +79,8 @@ path = "/var/lib/surfcult/clips/ads-90s"
 [[interstitial_pool]]
 name = "filler"
 path = "/var/lib/surfcult/clips/filler"
+
+# The clip a channel signs off with each night; see `sign_off` above.
+[[interstitial_pool]]
+name = "anthem"
+path = "/var/lib/surfcult/clips/anthem"

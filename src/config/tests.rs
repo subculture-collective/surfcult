@@ -41,7 +41,7 @@ fn the_example_file_loads_into_typed_config() {
 
     assert_eq!(config.timezone, Tz::America__Chicago);
     assert_eq!(config.channels.len(), 3);
-    assert_eq!(config.pools.len(), 3);
+    assert_eq!(config.pools.len(), 4);
 
     let cartoons = &config.channels[0];
     assert_eq!(cartoons.number, 3);
@@ -508,4 +508,72 @@ fn sources_lists_each_source_once_in_config_order() {
         config.channels[0].plan.sources(),
         vec![&Source::JellyfinCollection("Cartoons".into())]
     );
+}
+
+#[test]
+fn a_sign_off_loads_its_times_pool_and_clip() {
+    let text = with_channel(&format!(
+        "{PLAIN}\nsign_off = {{ at = \"23:30\", pool = \"ads\", clip = \"anthem.mp4\", until = \"06:00\" }}"
+    ));
+    let config = Config::parse(&text).unwrap();
+    assert_eq!(
+        config.channels[0].sign_off,
+        Some(SignOff {
+            at_minute: 23 * 60 + 30,
+            until_minute: 6 * 60,
+            pool: "ads".into(),
+            clip: Some("anthem.mp4".into()),
+        })
+    );
+
+    let text = with_channel(&format!(
+        "{PLAIN}\nsign_off = {{ at = \"01:00\", pool = \"ads\", until = \"05:00\" }}"
+    ));
+    let sign_off = Config::parse(&text).unwrap().channels[0].sign_off.clone();
+    assert_eq!(sign_off.and_then(|s| s.clip), None);
+    let plain = Config::parse(&with_channel(PLAIN)).unwrap();
+    assert_eq!(plain.channels[0].sign_off, None);
+}
+
+#[test]
+fn rejects_bad_sign_off_fields_naming_each() {
+    let sign_off = |fields: &str| with_channel(&format!("{PLAIN}\nsign_off = {{ {fields} }}"));
+    for (text, field) in [
+        (
+            sign_off("at = \"23:00\", pool = \"nope\", until = \"06:00\""),
+            "channel[0].sign_off.pool",
+        ),
+        (
+            sign_off("at = \"23:00\", pool = \"ads\", clip = \"x/anthem.mp4\", until = \"06:00\""),
+            "channel[0].sign_off.clip",
+        ),
+        (
+            sign_off("at = \"23:00\", pool = \"ads\", clip = \"..\", until = \"06:00\""),
+            "channel[0].sign_off.clip",
+        ),
+        (
+            sign_off("at = \"23:00\", pool = \"ads\", until = \"23:00\""),
+            "channel[0].sign_off.until",
+        ),
+        (
+            sign_off("at = \"11pm\", pool = \"ads\", until = \"06:00\""),
+            "channel[0].sign_off.at",
+        ),
+        (
+            sign_off("at = \"23:00\", pool = \"ads\", until = \"24:00\""),
+            "channel[0].sign_off.until",
+        ),
+    ] {
+        assert_eq!(fields(&text), vec![field], "{text}");
+    }
+
+    for text in [
+        sign_off("at = \"23:00\", pool = \"ads\""),
+        sign_off("at = \"23:00\", pool = \"ads\", until = \"06:00\", days = []"),
+    ] {
+        assert!(
+            matches!(Config::parse(&text), Err(ConfigError::Parse(_))),
+            "{text}"
+        );
+    }
 }

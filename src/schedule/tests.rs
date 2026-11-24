@@ -41,6 +41,7 @@ fn channel(number: u32, mode: Mode) -> Channel {
         grid: None,
         breaks: None,
         filler: None,
+        sign_off: None,
     }
 }
 
@@ -1703,6 +1704,8 @@ fn layout<'a>(
         lanes,
         default,
         filler,
+        nights: Vec::new(),
+        sign_off: None,
     }
 }
 
@@ -2023,6 +2026,8 @@ fn a_blocks_extend_twice_matches_one_unbroken_run_across_dst() {
         lanes,
         default: Some(2),
         filler: clips[1].clips(),
+        nights: Vec::new(),
+        sign_off: None,
     };
     let whole = generate_blocks(&layout, &Resume::default(), now, end).unwrap();
 
@@ -2086,6 +2091,8 @@ fn a_blocks_extend_with_break_settings_matches_one_unbroken_run() {
             lanes,
             default: Some(2),
             filler: clips[1].clips(),
+            nights: Vec::new(),
+            sign_off: None,
         };
         let whole = generate_blocks(&layout, &Resume::default(), now, end).unwrap();
 
@@ -2130,6 +2137,8 @@ fn a_break_clip_cut_off_by_a_block_end_does_not_count_toward_repeat_after() {
             },
         ],
         filler: &[],
+        nights: Vec::new(),
+        sign_off: None,
     };
 
     let out = generate_blocks(&layout, &Resume::default(), 0, cut + 1).unwrap();
@@ -2698,3 +2707,5 @@ fn clip_events_are_never_fitted() {
 
     assert_eq!((fitted.fit, fitted.events), (Fit::Exact, vec![event]));
 }
+
+mod sign_off;

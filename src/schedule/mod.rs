@@ -174,6 +174,34 @@
 //!   blocks that share items share their place. A run that resumes at an event
 //!   boundary gives the events an unbroken run would.
 //!
+//! # Sign-off
+//!
+//! A channel with `sign_off` ends each night with one clip and is then off
+//! the air (`sign_off.rs`). Each night is the epoch span from `at` to `until`
+//! in the config's time zone, read with the block rules for clock changes;
+//! `until` is the next morning when it is not after `at`.
+//!
+//! - **Before.** No program, and so none of its breaks, starts if it would
+//!   still be on at `at`: the generator writes each program before the
+//!   sign-off whole and takes it back if it ends later. The gap to `at` plays
+//!   the filler pool in pool order, whole clips, in cycles counted back from
+//!   `at` so the last clip ends as the sign-off starts; without filler it is
+//!   dead air.
+//! - **The clip.** One `EventKind::Ident` event at `at`, as long as the clip
+//!   (cut at `until` if longer): the named file in the pool, else the pool's
+//!   first usable clip. With none, [`Note::NoSignOffClip`].
+//! - **Off the air.** No events from the end of the clip to `until`. It
+//!   overrides a blocks channel's blocks and default.
+//! - **Resuming.** At `until` the plan resumes where it left off. A run that
+//!   starts inside the stretch before a sign-off is in the gap when the
+//!   channel's last stored event (`Resume::last_event`) is filler, or is a
+//!   program that ended earlier in the stretch and after which the next
+//!   program would still be on at `at`. When no stored event ends inside the
+//!   stretch, it is in the gap when the first program from the stretch's
+//!   start would still be on at `at`. Otherwise it places programs, so a run
+//!   after an outage does not fill the day with filler. Everything else
+//!   depends only on the time, so a resumed run matches an unbroken one.
+//!
 //! # Persisting
 //!
 //! [`extend`] does nothing unless the caller says the clock is trusted (see
@@ -185,7 +213,7 @@
 //! source kind.
 //! The caller also passes the scanned clip pools
 //! ([`ClipLibrary::pools`](crate::clips::ClipLibrary::pools)); `extend` looks
-//! up the channel's break, pad and filler pools there by name, and a pool
+//! up the channel's break, pad, filler and sign-off pools there by name, and a pool
 //! that is missing counts as empty. A channel with breaks also reads its
 //! recent stored break clips, where the rotation continues and the repeat
 //! limit counts from.
@@ -210,7 +238,8 @@
 //! schedule after the freeze point, `now` plus [`FREEZE_MS`] (30 minutes),
 //! when a channel's config or an item's runtime changed. It starts at the
 //! first boundary at or after the freeze point: a program's start, a blocks
-//! channel's uncovered filler, or time with no events. It keeps every event
+//! channel's uncovered filler or the gap before a sign-off, the sign-off
+//! clip, or time with no events. It keeps every event
 //! before it (so a program and its breaks running past the freeze point are
 //! kept whole), and resumes from the history before it as `extend` does.
 //! With unchanged inputs the schedule comes out the same; a changed runtime
@@ -233,6 +262,7 @@ mod fit;
 mod generate;
 mod regenerate;
 mod rng;
+mod sign_off;
 #[cfg(test)]
 mod tests;
 
@@ -248,7 +278,7 @@ pub use breaks::{ROTATION_MEMORY_MS, SNAP_MS, clip_media_id};
 pub use extend::{Extended, HORIZON_MS, extend};
 pub use fit::{FIT_TOLERANCE_MS, Fit, Fitted, fit, record_fit};
 pub(crate) use generate::{
-    Lane, Layout, Params, Resume, cooling_target, generate, generate_blocks,
+    Lane, Layout, Params, Resume, cooling_target, generate, generate_blocks, generate_fixed,
 };
 pub use regenerate::{FREEZE_MS, regenerate};
 
@@ -284,9 +314,13 @@ pub enum Note {
     /// A weighted lane has a weight for this title and no playable item has
     /// it, so the weight does nothing.
     WeightNotInPool { title: String },
-    /// A blocks channel had this many milliseconds with nothing to play: no
-    /// block, no playable default and no filler clip. That time has no events.
+    /// The channel had this many milliseconds with nothing to play and no
+    /// filler clip: a blocks channel's time with no block or playable
+    /// default, or the gap before a sign-off. That time has no events.
     DeadAir { ms: u64 },
+    /// The sign-off pool has no usable clip, so the channel went off the air
+    /// at the sign-off time without one.
+    NoSignOffClip,
 }
 
 #[derive(Debug)]
