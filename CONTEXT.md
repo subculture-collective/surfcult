@@ -31,6 +31,12 @@ The words surfcult's code and documentation use, and the code item each one name
 - **Resume point** (cursor): the media id of the channel's last stored program event, which says where the next extend continues. It has no table of its own; `extend` derives it from the events, so it cannot disagree with them.
 - **Recent history**: the media ids of the channel's most recent stored program events before the new window, newest first, read with `Store::recent_programs_before` and passed as `Resume::recent`. Only shuffle reads more than one row, to find the items cooling down; a sequential channel reads just its last program (`Store::last_program_before`). It is not the `playback_history` table, which records what the tuner started.
 
+## Guide
+
+- **Guide cell**: one program in the program guide, `guide::Cell`, with its start, end, title and an empty description (the media model has none). A program cut by breaks is one cell from its first segment's start to its last segment's end; breaks, filler and idents are not cells.
+- **Guide window**: the stretch of time the guide shows, `guide::Window`, by default now through three hours (`guide::DEFAULT_SPAN_MS`). Cells that overlap it are kept whole, not clipped.
+- **Progress**: how far through the current cell a moment is, `guide::Cell::progress`, counting breaks inside the program as program time.
+
 ## Running
 
 - **Store**: the one SQLite file, `store::Store`. It holds the channel schedules, the playback history and the library cache. The composition root owns it and passes it to each call (`&mut` to write, `&` to read); nothing else keeps a store between calls.

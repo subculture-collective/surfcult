@@ -1,5 +1,6 @@
 pub mod clips;
 pub mod config;
+pub mod guide;
 pub mod jellyfin;
 pub mod library;
 pub mod player;
