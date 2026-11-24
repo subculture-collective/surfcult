@@ -1,11 +1,11 @@
 # surfcult
 
-A self-hosted, offline-first television channel simulator for Raspberry Pi and Linux. It plays your own media as continuously broadcasting channels with schedules, commercials and a program guide. The planned design is in [`docs/idea.md`](docs/idea.md), which uses the codename BROADCAST. Nothing in it is implemented yet; the code is still the template's `greet` example.
+A self-hosted, offline-first television channel simulator for Raspberry Pi and Linux. It plays your own media as continuously broadcasting channels with schedules, commercials and a program guide. The planned design is in [`docs/idea.md`](docs/idea.md), which uses the codename BROADCAST. Nothing in it is implemented yet.
 
 ## What it contains
 
-- `src/lib.rs`: the `greet` function and its test
-- `src/main.rs`: the binary; prints a greeting
+- `src/lib.rs`: declares the library modules
+- `src/main.rs`: the binary, `surfcult check-config <channels.toml>`
 - `Cargo.toml`, `Cargo.lock`: package metadata (edition 2024, no dependencies) and the lockfile
 - `Makefile`: `make verify` runs every check; `make help` lists the targets
 - `.github/workflows/pr-ci.yml`: the `PR CI` workflow; runs on every pull request and ends with the `CI gate` job
