@@ -43,12 +43,25 @@ pub(super) fn choose_clip(clips: &[Clip], start_cost_ms: u64) -> Option<&Clip> {
 /// clip stands in for the break.
 ///
 /// An empty schedule, no event on at `at_ms`, or no program after the break is
-/// an error.
-pub(super) fn program_at(events: &[Event], at_ms: i64) -> Result<Target, Reason> {
+/// an error. So is a program after the break that starts more than
+/// `max_early_ms` after `at_ms`: the run before it is a long filler stretch,
+/// such as time no block covers, not a break the clip can stand in for.
+pub(super) fn program_at(
+    events: &[Event],
+    at_ms: i64,
+    max_early_ms: u64,
+) -> Result<Target, Reason> {
     if events.is_empty() {
         return Err(Reason::NoEvents);
     }
     match timeline::program_from(events, at_ms) {
+        Lookup::On { event, .. }
+            if event.start_ms > at_ms && event.start_ms.abs_diff(at_ms) > max_early_ms =>
+        {
+            Err(Reason::NoProgramSoon {
+                next_program_ms: event.start_ms,
+            })
+        }
         Lookup::On {
             event, offset_ms, ..
         } => Ok(Target {

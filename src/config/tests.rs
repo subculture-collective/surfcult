@@ -51,6 +51,7 @@ fn the_example_file_loads_into_typed_config() {
         Plan::Fixed {
             source: Source::JellyfinCollection("Cartoons".into()),
             mode: Mode::Shuffle,
+            weights: Weights::new(),
         }
     );
     assert_eq!(cartoons.grid, Some(Duration::from_secs(30 * 60)));
@@ -64,14 +65,20 @@ fn the_example_file_loads_into_typed_config() {
     );
     assert_eq!(cartoons.filler.as_deref(), Some("filler"));
 
-    let Plan::Blocks(blocks) = &config.channels[2].plan else {
+    let Plan::Blocks { blocks, default } = &config.channels[2].plan else {
         panic!("channel 5 should use blocks");
     };
+    assert_eq!(
+        default.as_ref().map(|lineup| lineup.mode),
+        Some(Mode::Sequential)
+    );
     assert_eq!(blocks.len(), 2);
     assert_eq!(blocks[0].days, vec![Day::Sat, Day::Sun]);
     assert_eq!((blocks[0].start_minute, blocks[0].end_minute), (360, 720));
     assert_eq!(blocks[1].days.len(), 7);
     assert_eq!(blocks[1].end_minute, 1440);
+    assert_eq!(blocks[1].mode, Mode::Weighted);
+    assert_eq!(blocks[1].weights.get("Groundhog Day"), Some(&3));
 }
 
 #[test]
@@ -283,4 +290,97 @@ fn display_lists_each_problem_with_its_field() {
     .unwrap_err();
     let shown = err.to_string();
     assert!(shown.starts_with("channel[0].mode: "), "{shown}");
+}
+
+#[test]
+fn weights_load_for_a_weighted_channel() {
+    let text = with_channel(
+        "source = { jellyfin_library = \"M\" }\nmode = \"weighted\"\nweights = { \"Cars\" = 3, \"Up\" = 1 }",
+    );
+    let config = Config::parse(&text).unwrap();
+    let Plan::Fixed { weights, .. } = &config.channels[0].plan else {
+        panic!("expected a fixed plan");
+    };
+    assert_eq!(
+        weights,
+        &Weights::from([("Cars".into(), 3), ("Up".into(), 1)])
+    );
+}
+
+#[test]
+fn rejects_weights_outside_weighted_and_bad_values() {
+    let text = with_channel(&format!("{PLAIN}\nweights = {{ \"Cars\" = 2 }}"));
+    assert_eq!(fields(&text), vec!["channel[0].weights"]);
+
+    let text = with_channel(
+        "source = { jellyfin_library = \"M\" }\nmode = \"weighted\"\nweights = { \"Cars\" = 0, \"Up\" = -1, \"Big\" = 4294967296 }",
+    );
+    assert_eq!(
+        fields(&text),
+        vec![
+            "channel[0].weights.\"Big\"",
+            "channel[0].weights.\"Cars\"",
+            "channel[0].weights.\"Up\"",
+        ]
+    );
+}
+
+#[test]
+fn a_blocks_channel_takes_a_default_lineup_and_no_channel_weights() {
+    let text = blocks_channel(&format!(
+        "default = {{ source = {{ jellyfin_tag = \"d\" }}, mode = \"weighted\", weights = {{ \"X\" = 2 }} }}\n{BLOCK_MORNING}"
+    ));
+    let config = Config::parse(&text).unwrap();
+    let Plan::Blocks { default, .. } = &config.channels[0].plan else {
+        panic!("expected blocks");
+    };
+    assert_eq!(
+        default,
+        &Some(Lineup {
+            source: Source::JellyfinTag("d".into()),
+            mode: Mode::Weighted,
+            weights: Weights::from([("X".into(), 2)]),
+        })
+    );
+
+    let text = blocks_channel(&format!(
+        "weights = {{ \"X\" = 2 }}\ndefault = {{ source = {{ jellyfin_tag = \"d\" }}, mode = \"blocks\" }}\n{BLOCK_MORNING}"
+    ));
+    assert_eq!(
+        fields(&text),
+        vec!["channel[0].weights", "channel[0].default.mode"]
+    );
+
+    let text = with_channel(&format!(
+        "{PLAIN}\ndefault = {{ source = {{ jellyfin_tag = \"d\" }}, mode = \"shuffle\" }}"
+    ));
+    assert_eq!(fields(&text), vec!["channel[0].default"]);
+}
+
+#[test]
+fn rejects_block_weights_outside_weighted() {
+    let block = BLOCK_MORNING.replace(
+        "mode = \"shuffle\"",
+        "mode = \"shuffle\"\nweights = { \"X\" = 2 }",
+    );
+    assert_eq!(
+        fields(&blocks_channel(&block)),
+        vec!["channel[0].block[0].weights"]
+    );
+}
+
+#[test]
+fn sources_lists_each_source_once_in_config_order() {
+    let config = Config::parse(EXAMPLE).unwrap();
+    assert_eq!(
+        config.channels[2].plan.sources(),
+        vec![
+            &Source::JellyfinCollection("Cartoons".into()),
+            &Source::JellyfinGenre("Comedy".into()),
+        ]
+    );
+    assert_eq!(
+        config.channels[0].plan.sources(),
+        vec![&Source::JellyfinCollection("Cartoons".into())]
+    );
 }

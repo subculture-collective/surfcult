@@ -149,7 +149,7 @@ async fn channels(State(state): State<AppState>) -> Json<ChannelsBody> {
             name: channel.name.clone(),
             mode: match &channel.plan {
                 Plan::Fixed { mode, .. } => mode_name(*mode),
-                Plan::Blocks(_) => "blocks",
+                Plan::Blocks { .. } => "blocks",
             }
             .to_string(),
             grid_ms: channel

@@ -4,7 +4,7 @@ The words surfcult's code and documentation use, and the code item each one name
 
 ## Channels and media
 
-- **Channel**: a numbered entry in `channels.toml`, `config::Channel`. It has a name, a plan (one source in one mode, or time-of-day blocks) and optional grid, break and filler settings.
+- **Channel**: a numbered entry in `channels.toml`, `config::Channel`. It has a name, a plan (`config::Plan`: one source in one mode, or time-of-day blocks) and optional grid, break and filler settings. `Plan::sources` lists the sources the caller resolves into program pools.
 - **Source**: where a channel's items come from in Jellyfin: a library, collection, tag, genre or series, `config::Source`.
 - **Media source**: the interface that lists and resolves media items without saying where they come from, `library::MediaSource`. Its two adapters are the library cache in the `Store` and `library::FakeMediaSource` for tests.
 - **Library cache**: the `library_*` tables in the store, a copy of the Jellyfin library. Everything except the sync step reads the library from here, so it keeps working while Jellyfin is down.
@@ -13,7 +13,7 @@ The words surfcult's code and documentation use, and the code item each one name
 - **Device profile**: what the Pi plays directly and what Jellyfin transcodes to, ADR 0001 decisions 3 and 4. Its rules are the constants in `library::profile`; `needs_transcode` and the `DeviceProfile` that `JellyfinClient::playback` sends are both built from them.
 - **Playback**: how the player gets an item, `jellyfin::Playback`, from `JellyfinClient::playback`. `Direct` is the file as stored, and the player seeks to the start position; `Transcode` is a progressive MPEG-TS stream that already starts there. Neither URL carries the key, and playback is never reported to Jellyfin.
 - **Transcode session**: the device id and play session id of a transcode surfcult started, `jellyfin::TranscodeSession`. `JellyfinClient::stop_transcode` stops it when playback ends.
-- **Program pool**: the ordered items a channel draws its programs from, built from its source by `library::resolve_pool(channel, source, media)`. A collection keeps its member order and expands each series in it to its episodes; a library, tag or genre keeps the cache's order with each series' episodes gathered together; a series gives its episodes. A source that matches nothing is a `PoolError` naming the channel and the source, never the whole library.
+- **Program pool**: the ordered items a channel, block or default draws its programs from, built from its source by `library::resolve_pool(channel, source, media)`; `schedule::extend` takes one per source. A collection keeps its member order and expands each series in it to its episodes; a library, tag or genre keeps the cache's order with each series' episodes gathered together; a series gives its episodes. A source that matches nothing is a `PoolError` naming the channel and the source, never the whole library.
 - **Episode order**: season, then episode number, `library::SeriesEpisode`. Season 0 (specials) comes first, missing numbers come last, and ties keep the cache's order.
 - **Series member**: a collection member that is a series id rather than an item id, `library::Collection::members`. It stands for all of the series' cached episodes.
 
@@ -26,7 +26,7 @@ The words surfcult's code and documentation use, and the code item each one name
 ## Schedule
 
 - **Event**: one scheduled stretch of one media item, a half-open interval `[start_ms, end_ms)`, `timeline::Event`. At a boundary the later event is the one on.
-- **Program**, **break**, **filler** and **ident**: the four `timeline::EventKind`s. A program is an item from the program pool. A break event is one whole clip, such as an ad, from a channel's break pool; filler pads a break the break clips do not fill, and later fills a gap up to the next grid slot; an ident is a short station identification. Ident events are not generated yet.
+- **Program**, **break**, **filler** and **ident**: the four `timeline::EventKind`s. A program is an item from the program pool. A break event is one whole clip, such as an ad, from a channel's break pool; filler pads a break the break clips do not fill, plays the time a blocks channel has no block or default for, and later fills a gap up to the next grid slot; an ident is a short station identification. Ident events are not generated yet.
 - **Commercial break**: the break events and the filler pad at one cut in a program, `breaks.length` long, filled by `schedule` from the channel's break pool. Breaks add to the slot.
 - **Cut point**: where a program is cut for a break: a multiple of `breaks.every` in the program's time, moved to a chapter mark within 60 seconds when there is one. The program's events then have increasing `media_offset_ms`.
 - **Break rotation**: break clips play in pool order from break to break and at most once per break, continuing after the channel's last stored break clip (`Store::last_break_before`) if it started within the last 24 hours, else from the first clip. Clips that share a media id count once.
@@ -38,7 +38,13 @@ The words surfcult's code and documentation use, and the code item each one name
 - **Sequential**: a mode, `config::Mode::Sequential`. Items play in program pool order, continuing after the resume point and wrapping from the last item to the first.
 - **Shuffle** and **cooldown**: in shuffle mode (`config::Mode::Shuffle`) each program slot picks at random, seeded from the channel and the slot's start, from the items not cooling down. With N playable items and k = max(1, ceil(N / 4)), the N - k most recently played distinct items are cooling down.
 - **Resume point** (cursor): the media id of the channel's last stored program event, which says where the next extend continues. It has no table of its own; `extend` derives it from the events, so it cannot disagree with them.
-- **Recent history**: the media ids of the channel's most recent stored program events before the new window, newest first, read with `Store::recent_programs_before` and passed as `Resume::recent`. Only shuffle reads more than one row, to find the items cooling down; a sequential channel reads just its last program (`Store::last_program_before`). It is not the `playback_history` table, which records what the tuner started.
+- **Weighted** and **weights**: in weighted mode (`config::Mode::Weighted`) each program slot picks an item with probability proportional to its weight, seeded like the shuffle and with no cooldown. `weights` (`config::Weights`) maps an item title to a whole number of at least 1; other items weigh 1.
+- **Block**: a time-of-day window on some days of the week with its own source, mode and weights, `config::Block`, in a channel with `mode = "blocks"`. Its times are local wall-clock times in the config's time zone, so its length in real time changes on the days the clocks change.
+- **Default**: the lineup (`config::Lineup`: source, mode, weights) a blocks channel plays when no block is on. Without one the channel's filler pool plays, and without that the time is dead air. The tuner does not show a long filler stretch yet; it shows static with `Reason::NoProgramSoon`.
+- **Lane**: one program pool in one mode inside the generator, `schedule::Lane`: a block or the default. Each lane keeps its own place.
+- **Span**: a stretch of a blocks channel's time in epoch milliseconds, covered by one block or by none, `Span` in `src/schedule/blocks.rs`, from `spans`. A program on at a span's end is cut there.
+- **Dead air**: time a blocks channel has nothing to play (no block, default or filler clip). It has no events and is reported as `Note::DeadAir`.
+- **Recent history**: the media ids of the channel's most recent stored program events before the new window, newest first, read with `Store::recent_programs_before` and passed as `Resume::recent`. Shuffle and blocks channels read more than one row, to find the items cooling down and each block's place; a sequential or weighted channel reads just its last program (`Store::last_program_before`). It is not the `playback_history` table, which records what the tuner started.
 
 ## Guide
 

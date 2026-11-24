@@ -1,14 +1,16 @@
 # Schedule generator
 
-The code is in `src/schedule/`. It turns a pool of media items into `timeline::Event`s for one channel: `sequential` and `shuffle` channels, programs back to back with commercial breaks, seven days ahead. Grids, `weighted`, `blocks` and regeneration are not done yet.
+The code is in `src/schedule/`. It turns pools of media items into `timeline::Event`s for one channel: `sequential`, `shuffle` and `weighted` channels and `blocks` channels, programs back to back with commercial breaks, seven days ahead. Grids and regeneration are not done yet.
 
 ## Two layers
 
-`generate(&Params, pool, &Resume, start_ms, end_ms)` is a pure function inside the crate. It reads no clock and does no I/O. `Params` holds the channel number, the `Mode` and an optional `BreakPlan` (the break interval and length, the break pool's clips and the filler pool's clips). `Resume` holds `recent`, the media ids of earlier programs, newest first, of which the first is the cursor, the last item scheduled; and `last_break`, the start time and media id of the last break clip. It returns `Generated { events, cursor, notes }`. Times are Unix epoch milliseconds.
+`generate(&Params, pool, &Resume, start_ms, end_ms)` is a pure function inside the crate. It reads no clock and does no I/O. `Params` holds the channel number, the `Mode`, the `weights` (used by `weighted`) and an optional `BreakPlan` (the break interval and length, the break pool's clips and the filler pool's clips). `Resume` holds `recent`, the media ids of earlier programs, newest first, of which the first is the cursor, the last item scheduled; and `last_break`, the start time and media id of the last break clip. It returns `Generated { events, cursor, notes }`. Times are Unix epoch milliseconds.
 
-`schedule::extend(&mut Store, &Channel, pool, clips, now_ms, clock_trusted)` keeps a channel's week filled. `clips` is the scanned clip pools, `ClipLibrary::pools()`; a channel with `breaks` finds its break pool and its `filler` pool there by name, and a missing pool counts as empty. The caller supplies the pool as a slice of `MediaItem`s: it takes `source` from the channel's `Plan::Fixed`, resolves it with `library::resolve_pool(channel.number, source, &store)` and passes the result to `extend`. Every source kind resolves; a source that matches nothing is an error naming the channel and the source, so a channel never falls back to the whole library. The order each source gives is in [Jellyfin source](jellyfin.md#channel-sources). `extend` returns `Extended::ClockNotTrusted` and touches nothing when `clock_trusted` is false, because a Pi with an unsynchronized clock must not store a wrong week. Otherwise it starts at the later of `now_ms` and the end of the last stored event and generates up to `now_ms` plus seven days (`HORIZON_MS`). If the schedule already reaches that far it returns `Extended::UpToDate`. It never reads the system clock.
+`generate_blocks(&Layout, &Resume, start_ms, end_ms)` is the same for a blocks channel. `Layout` holds the channel number, the `BreakPlan`, one `Lane` (mode, weights and pool) per block in config order and then one for the default if there is one, the default's index, the spans from `blocks::spans(blocks, timezone, start_ms, end_ms)` and the channel's filler clips. `spans` is pure too: it turns the blocks' local times into epoch instants.
 
-The resume point comes from the stored events, not from a separate cursor. The cursor is the media id of the channel's last program event that starts before the new window, at any time, past or future. A sequential channel reads only that one event (`Store::last_program_before`). A shuffle channel reads its most recent program events, newest first, in pages of twice the pool's length (`Store::recent_programs_before`, which walks back on the primary key). It reads the next page, bounded by the oldest start time so far, until the rows hold the N - k distinct pool items cooling down (see Shuffle) or the history ends, and passes the rows as `Resume::recent`. One page is usually enough; the read reaches further back only when the recent programs are mostly ids no longer in the pool, or when the history is shorter than N - k distinct pool items, in which case it reads the whole history. Writing the new events is the only write and is one transaction, so a crash cannot leave the schedule and the resume point disagreeing. Because the resume point is read from the events, `Store::replace_events_from` also moves it back to the last program it keeps. A channel with breaks also reads its last stored break event from the last 24 hours (`Store::last_break_before`) as `Resume::last_break`, so the break rotation continues where it stopped. The read stops at that bound, so a channel that never stores a break does not walk its whole history on every extend.
+`schedule::extend(&mut Store, &Channel, pools, clips, timezone, now_ms, clock_trusted)` keeps a channel's week filled. `clips` is the scanned clip pools, `ClipLibrary::pools()`; a channel finds its break pool and its `filler` pool there by name, and a missing pool counts as empty. The caller supplies the program pools as `(Source, Vec<MediaItem>)` pairs: it resolves each source of `channel.plan.sources()` with `library::resolve_pool(channel.number, source, &store)` and passes the pairs to `extend`. A source with no pair counts as an empty pool. `timezone` is the config's `timezone`; only blocks channels read it. Every source kind resolves; a source that matches nothing is an error naming the channel and the source, so a channel never falls back to the whole library. The order each source gives is in [Jellyfin source](jellyfin.md#channel-sources). `extend` returns `Extended::ClockNotTrusted` and touches nothing when `clock_trusted` is false, because a Pi with an unsynchronized clock must not store a wrong week. Otherwise it starts at the later of `now_ms` and the end of the last stored event and generates up to `now_ms` plus seven days (`HORIZON_MS`). If the schedule already reaches that far it returns `Extended::UpToDate`. It never reads the system clock.
+
+The resume point comes from the stored events, not from a separate cursor. The cursor is the media id of the channel's last program event that starts before the new window, at any time, past or future. A sequential or weighted channel reads only that one event (`Store::last_program_before`); weighted does not use it to pick. A shuffle channel reads its most recent program events, newest first, in pages of twice the pool's length (`Store::recent_programs_before`, which walks back on the primary key). It reads the next page, bounded by the oldest start time so far, until the rows hold the N - k distinct pool items cooling down (see Shuffle) or the history ends, and passes the rows as `Resume::recent`. One page is usually enough; the read reaches further back only when the recent programs are mostly ids no longer in the pool, or when the history is shorter than N - k distinct pool items, in which case it reads the whole history. Writing the new events is the only write and is one transaction, so a crash cannot leave the schedule and the resume point disagreeing. Because the resume point is read from the events, `Store::replace_events_from` also moves it back to the last program it keeps. A channel with breaks also reads its last stored break event from the last 24 hours (`Store::last_break_before`) as `Resume::last_break`, so the break rotation continues where it stopped. The read stops at that bound, so a channel that never stores a break does not walk its whole history on every extend.
 
 ## Rules for every run
 
@@ -17,6 +19,8 @@ The resume point comes from the stored events, not from a separate cursor. The c
 - An item with a runtime of 0 is skipped. An id that appears twice in the pool is used once.
 - A pool with nothing playable gives no events and `Note::NoPlayableItems`. Nothing is written, so the resume point stays as it was.
 - A `grid` setting on the channel is ignored for now.
+
+A blocks channel differs in two ways: a program still on at the end of its block is cut there, and time with nothing to play has no events. See Blocks.
 
 ## Sequential
 
@@ -40,6 +44,46 @@ Limits:
 
 - There are no passes, so there is no guarantee that every item plays once before any item plays twice.
 - If the whole stored history holds fewer than N - k distinct pool items, for example on a new channel or after the pool changed, fewer items are cooling down and more are eligible.
+
+## Weighted
+
+Each program slot picks one playable item, with probability proportional to its weight.
+
+- `weights = { "Toy Story" = 3, "Cars" = 2 }` on a `weighted` channel, block or default maps an item title to a whole number of at least 1. Every pool item with that exact title has that weight; every other item weighs 1. `weights` with any other mode is a config error.
+- The pick draws a number below the total weight with SplitMix64 seeded from the channel number and the slot's `start_ms`, as the shuffle does, and takes the first item in pool order whose running total of weights is above it.
+- Over many picks each item's share approaches its weight divided by the total. The same inputs give the same picks on every machine.
+- It reads no history, so a resumed run matches an unbroken one.
+
+Limits:
+
+- There is no cooldown. An item can play twice in a row, and a heavy item often will.
+- A weight whose title matches no playable item does nothing and is reported as `Note::WeightNotInPool { title }`. Titles are matched exactly, so a typo shows up there.
+
+## Blocks
+
+A `blocks` channel lists `[[channel.block]]` entries, each with `days`, `start`, `end`, a `source`, a `mode` and, for `weighted`, `weights`. It may also have a `default = { source, mode, weights }`, which plays the time no block covers.
+
+### Where a block falls
+
+- Block times are local wall-clock times in the config's `timezone`. Each block covers `[start, end)` on each of its days; `days` are the days it starts on, every day when left out.
+- The spans hold real instants, so a block from 00:00 to 24:00 lasts 23 hours on the day the clocks go forward and 25 on the day they go back. A block from 06:00 to 12:00 in Chicago starts at 11:00 UTC in summer and 12:00 UTC in winter, including on both change days.
+- A local time that happens twice, when the clocks go back, means its first occurrence. A local time that does not happen, when the clocks go forward, means the moment they jump: in Chicago on the spring change, 02:30 means 03:00 CDT. A block wholly inside the skipped hour does not play that day.
+
+### What plays
+
+- A block plays its own pool in its own mode. Its first program starts at the block's start.
+- A program still on at the block's end is cut there: the event ends at the boundary and keeps the item's runtime as `media_duration_ms`. A break or clip on at that moment is cut the same way, and break clips after it are dropped. Breaks that would start at or after the block's end are not filled and do not count toward `Note::ShortBreaks`. The break rotation continues after the last break clip that was kept.
+- Time no block covers plays the `default` when there is one. Otherwise it plays the channel's `filler` pool: its clips in pool order, over and over, counted from the start of the uncovered stretch, with the last clip cut at the stretch's end. Because the cycle is counted from the stretch's start, a run that resumes in the middle of it plays the same clips.
+- Such a filler stretch can last hours, unlike a break. The tuner cannot play filler clips yet, and it does not queue the next block's first program early: when filler is on as the tune-in clip ends and the next program starts more than 10 minutes later, it shows static with `Reason::NoProgramSoon` ([tuner.md](tuner.md), "A break when the clip ends").
+- With no default and no filler clip, uncovered time has no events. The tuner treats that time as a gap ([tuner.md](tuner.md), "When there is nothing to show"). `Note::DeadAir { ms }` says how much there was.
+- A block whose pool has nothing playable falls back the same way, and `Note::NoPlayableItems` is reported.
+
+### Keeping each block's place
+
+- Each block, and the default, keeps its own place. A sequential block continues after the newest program, anywhere in the channel's history, that is in its pool, so Saturday's cartoons continue from last Saturday's. A shuffle block's cooldown counts only programs from its pool. A weighted block needs no history.
+- A program counts for every block whose pool holds it, so two blocks that share items share their place.
+- `extend` reads the channel's programs, newest first, in pages of twice the pools' total length, until each sequential block has one program from its pool and each shuffle block the N - k distinct items it keeps cooling down, or the history ends. A block that has never played, such as a new one, makes it read the whole history.
+- A run that resumes at an event boundary gives what an unbroken run would, across days and clock changes.
 
 ## Breaks
 

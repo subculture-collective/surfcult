@@ -1,13 +1,15 @@
 //! Keeps a channel's week filled: reads the stored schedule, calls `generate`
-//! and writes the new events in one transaction.
+//! or `generate_blocks` and writes the new events in one transaction.
 
 use std::collections::HashSet;
 
+use super::blocks::spans;
 use super::{
-    BreakPlan, Note, Params, ROTATION_MEMORY_MS, Resume, ScheduleError, cooling_target, generate,
+    BreakPlan, Lane, Layout, Note, Params, ROTATION_MEMORY_MS, Resume, ScheduleError,
+    cooling_target, generate, generate_blocks,
 };
 use crate::clips::Pool;
-use crate::config::{Channel, Mode, Plan};
+use crate::config::{Channel, Mode, Plan, Source, Tz};
 use crate::library::{MediaId, MediaItem};
 use crate::store::Store;
 
@@ -30,13 +32,19 @@ pub enum Extended {
     },
 }
 
-/// Fills `channel`'s schedule from `pool` up to `now_ms` plus seven days.
+/// Fills `channel`'s schedule up to `now_ms` plus seven days.
+///
+/// `pools` holds the program pool of each source the channel's plan names
+/// ([`Plan::sources`]), each resolved with
+/// [`library::resolve_pool`](crate::library::resolve_pool). A source that is
+/// not there counts as an empty pool. `timezone` is the config's time zone,
+/// in which a blocks channel's times are read; other channels ignore it.
 ///
 /// `clips` are the scanned clip pools, usually
-/// [`ClipLibrary::pools`](crate::clips::ClipLibrary::pools). When the channel
-/// has `breaks`, its break pool and its `filler` pool are looked up there by
-/// name; a pool that is not there counts as empty. A channel without breaks
-/// ignores `clips`.
+/// [`ClipLibrary::pools`](crate::clips::ClipLibrary::pools). The channel's
+/// break pool and its `filler` pool are looked up there by name; a pool that
+/// is not there counts as empty. A channel without breaks or blocks ignores
+/// `clips`.
 ///
 /// Does nothing unless `clock_trusted` is true: a Pi whose clock has not
 /// synchronized must not store a wrong week. Starts at the later of `now_ms`
@@ -47,18 +55,15 @@ pub enum Extended {
 pub fn extend(
     store: &mut Store,
     channel: &Channel,
-    pool: &[MediaItem],
+    pools: &[(Source, Vec<MediaItem>)],
     clips: &[Pool],
+    timezone: Tz,
     now_ms: i64,
     clock_trusted: bool,
 ) -> Result<Extended, ScheduleError> {
     if !clock_trusted {
         return Ok(Extended::ClockNotTrusted);
     }
-    let mode = match &channel.plan {
-        Plan::Fixed { mode, .. } => *mode,
-        Plan::Blocks(_) => return Err(ScheduleError::UnsupportedPlan),
-    };
     let horizon_ms = now_ms
         .checked_add(HORIZON_MS)
         .ok_or(ScheduleError::TimeOutOfRange)?;
@@ -74,26 +79,23 @@ pub fn extend(
         return Ok(Extended::UpToDate { until_ms: from_ms });
     }
 
-    // Sequential needs only the last earlier program. Shuffle needs the
-    // programs back to the N - k distinct pool items cooling down.
-    let recent = if mode == Mode::Shuffle {
-        recent_until_cooling(store, n, pool, from_ms)?
-    } else {
-        store.last_program_before(n, from_ms)?.into_iter().collect()
+    let clips_of = |name: &str| {
+        clips
+            .iter()
+            .find(|pool| pool.name() == name)
+            .map_or(&[][..], Pool::clips)
     };
-    let breaks = channel.breaks.as_ref().map(|breaks| {
-        let clips_of = |name: &str| {
-            clips
-                .iter()
-                .find(|pool| pool.name() == name)
-                .map_or(&[][..], Pool::clips)
-        };
-        BreakPlan {
-            every_ms: millis(breaks.every),
-            length_ms: millis(breaks.length),
-            clips: clips_of(&breaks.pool),
-            pad: channel.filler.as_deref().map_or(&[][..], clips_of),
-        }
+    let pool_of = |source: &Source| {
+        pools
+            .iter()
+            .find(|(pooled, _)| pooled == source)
+            .map_or(&[][..], |(_, items)| items.as_slice())
+    };
+    let breaks = channel.breaks.as_ref().map(|breaks| BreakPlan {
+        every_ms: millis(breaks.every),
+        length_ms: millis(breaks.length),
+        clips: clips_of(&breaks.pool),
+        pad: channel.filler.as_deref().map_or(&[][..], clips_of),
     });
     // The rotation continues after the last break clip already stored. A clip
     // that started more than ROTATION_MEMORY_MS before `from_ms` cannot affect
@@ -107,14 +109,66 @@ pub fn extend(
         }
         None => None,
     };
-    let resume = Resume { recent, last_break };
 
-    let params = Params {
-        channel: n,
-        mode,
-        breaks,
+    let generated = match &channel.plan {
+        Plan::Fixed {
+            source,
+            mode,
+            weights,
+        } => {
+            let pool = pool_of(source);
+            // Sequential and weighted need only the last earlier program.
+            // Shuffle needs the programs back to the N - k distinct pool items
+            // cooling down.
+            let recent = if *mode == Mode::Shuffle {
+                let lane = Lane {
+                    mode: *mode,
+                    weights,
+                    pool,
+                };
+                recent_history(store, n, &[lane], from_ms)?
+            } else {
+                store.last_program_before(n, from_ms)?.into_iter().collect()
+            };
+            let params = Params {
+                channel: n,
+                mode: *mode,
+                weights,
+                breaks,
+            };
+            let resume = Resume { recent, last_break };
+            generate(&params, pool, &resume, from_ms, horizon_ms)?
+        }
+        Plan::Blocks { blocks, default } => {
+            let mut lanes: Vec<Lane<'_>> = blocks
+                .iter()
+                .map(|block| Lane {
+                    mode: block.mode,
+                    weights: &block.weights,
+                    pool: pool_of(&block.source),
+                })
+                .collect();
+            let default = default.as_ref().map(|lineup| {
+                lanes.push(Lane {
+                    mode: lineup.mode,
+                    weights: &lineup.weights,
+                    pool: pool_of(&lineup.source),
+                });
+                lanes.len() - 1
+            });
+            let recent = recent_history(store, n, &lanes, from_ms)?;
+            let layout = Layout {
+                channel: n,
+                breaks,
+                spans: spans(blocks, timezone, from_ms, horizon_ms)?,
+                lanes,
+                default,
+                filler: channel.filler.as_deref().map_or(&[][..], clips_of),
+            };
+            let resume = Resume { recent, last_break };
+            generate_blocks(&layout, &resume, from_ms, horizon_ms)?
+        }
     };
-    let generated = generate(&params, pool, &resume, from_ms, horizon_ms)?;
     if !generated.events.is_empty() {
         store.write_events(n, &generated.events)?;
     }
@@ -132,32 +186,51 @@ fn millis(duration: std::time::Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Reads `channel`'s programs before `before_ms`, newest first, until they hold
-/// the N - k distinct pool items a shuffle keeps cooling down or the history
-/// ends. Every run therefore sees the same cooling items as an unbroken run
-/// would. Pages of twice the pool's length leave room for programs cut into
-/// several events and ids no longer in the pool, so one page is usually
-/// enough. The read goes further back when the recent rows are mostly such
-/// ids, and reads the whole history when it holds fewer than N - k distinct
-/// pool items.
-fn recent_until_cooling(
+/// Reads `channel`'s programs before `before_ms`, newest first, until every
+/// lane has what it resumes from, or the history ends: a shuffle lane the
+/// N - k distinct pool items it keeps cooling down, and a sequential lane
+/// one program from its pool. A weighted lane needs none. Every run therefore
+/// sees what an unbroken run would.
+///
+/// Pages of twice the pools' total length leave room for programs cut into
+/// several events and ids from other pools or no longer in any, so one page
+/// is usually enough. The read goes further back when the recent rows are
+/// mostly such ids, and reads the whole history when it never satisfies some
+/// lane, for example a block whose pool has not played yet.
+fn recent_history(
     store: &Store,
     channel: u32,
-    pool: &[MediaItem],
+    lanes: &[Lane<'_>],
     before_ms: i64,
 ) -> Result<Vec<MediaId>, ScheduleError> {
-    let (playable, target) = cooling_target(pool);
-    let page = u32::try_from(pool.len().saturating_mul(2).max(1)).unwrap_or(u32::MAX);
+    // For each lane: the ids it counts, how many distinct ones it needs, and
+    // those found so far.
+    let mut needs: Vec<(HashSet<&str>, usize, HashSet<&str>)> = lanes
+        .iter()
+        .filter_map(|lane| match lane.mode {
+            Mode::Shuffle => Some(cooling_target(lane.pool)),
+            Mode::Sequential => {
+                let ids: HashSet<&str> = lane.pool.iter().map(|item| item.id.as_str()).collect();
+                let target = ids.len().min(1);
+                Some((ids, target))
+            }
+            Mode::Weighted => None,
+        })
+        .map(|(ids, target)| (ids, target, HashSet::new()))
+        .collect();
+    let total: usize = lanes.iter().map(|lane| lane.pool.len()).sum();
+    let page = u32::try_from(total.saturating_mul(2).max(1)).unwrap_or(u32::MAX);
     let mut recent = Vec::new();
-    let mut found = HashSet::new();
     let mut bound = before_ms;
-    while found.len() < target {
+    while needs.iter().any(|(_, target, found)| found.len() < *target) {
         let rows = store.recent_programs_before(channel, bound, page)?;
         let full = rows.len() == page as usize;
         for (start_ms, id) in rows {
             bound = start_ms;
-            if let Some(&pooled) = playable.get(id.as_str()) {
-                found.insert(pooled);
+            for (ids, _, found) in &mut needs {
+                if let Some(&pooled) = ids.get(id.as_str()) {
+                    found.insert(pooled);
+                }
             }
             recent.push(id);
         }

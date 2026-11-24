@@ -20,9 +20,14 @@ impl SplitMix64 {
 
     /// A number in `0..bound`. `bound` must not be zero.
     pub(super) fn below(&mut self, bound: usize) -> usize {
+        self.below_u64(bound as u64) as usize
+    }
+
+    /// A number in `0..bound`. `bound` must not be zero.
+    pub(super) fn below_u64(&mut self, bound: u64) -> u64 {
         // Multiply-and-shift keeps the result in range without a division and
         // with a bias too small to matter for a TV schedule.
-        ((u128::from(self.next_u64()) * bound as u128) >> 64) as usize
+        ((u128::from(self.next_u64()) * u128::from(bound)) >> 64) as u64
     }
 }
 

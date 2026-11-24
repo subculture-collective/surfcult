@@ -76,6 +76,14 @@
 //! the break. The tuner does not correct this: it only corrects a program that
 //! is behind. The next event boundary puts the screen back on the schedule.
 //!
+//! A filler stretch can be far longer than a break: a blocks channel plays its
+//! filler pool through time no block covers. If the program after the run
+//! starts more than [`Timing::max_early_ms`] (10 minutes) after the clip
+//! ends, the tuner does not queue it hours early. It leaves static up with
+//! [`Reason::NoProgramSoon`]. The tuner cannot play filler clips itself yet.
+//! A stretch that runs past the hour of schedule the tuner reads has no
+//! program in view at all and ends on [`Reason::Gap`] with no next start.
+//!
 //! # A late start
 //!
 //! When the player reports the program started, the tuner looks up the live
@@ -102,6 +110,9 @@
 //!   ([`Reason::NoEvents`]);
 //! - nothing is scheduled when the clip ends, or nothing follows the break
 //!   ([`Reason::Gap`]);
+//! - a break, filler or ident run is on when the clip ends and the next
+//!   program starts more than [`Timing::max_early_ms`] later
+//!   ([`Reason::NoProgramSoon`]);
 //! - the schedule or the media source fails ([`Reason::Schedule`],
 //!   [`Reason::Media`]);
 //! - the player rejects a command ([`Reason::Player`]).
@@ -149,6 +160,9 @@ pub struct Timing {
     pub transcode_start_ms: u64,
     /// How far behind the live position a program may start without a seek.
     pub late_tolerance_ms: u64,
+    /// How long before its scheduled start a program after a break may be
+    /// queued. A longer filler stretch is not treated as a break.
+    pub max_early_ms: u64,
 }
 
 impl Default for Timing {
@@ -158,6 +172,7 @@ impl Default for Timing {
             direct_start_ms: 1_000,
             transcode_start_ms: 7_000,
             late_tolerance_ms: 500,
+            max_early_ms: 10 * 60 * 1000,
         }
     }
 }
@@ -173,6 +188,10 @@ pub enum Reason {
     /// the clip stands in for. `next_start_ms` is when the next event starts,
     /// if the schedule has one.
     Gap { next_start_ms: Option<i64> },
+    /// A break, filler or ident is on when the clip ends and the program
+    /// after it starts at `next_program_ms`, more than
+    /// [`Timing::max_early_ms`] later.
+    NoProgramSoon { next_program_ms: i64 },
     /// The schedule could not be read.
     Schedule(StoreError),
     /// The media source could not describe the program.
@@ -192,6 +211,9 @@ impl fmt::Display for Reason {
             Self::Gap {
                 next_start_ms: None,
             } => f.write_str("nothing is scheduled"),
+            Self::NoProgramSoon { next_program_ms } => {
+                write!(f, "no program starts until {next_program_ms}")
+            }
             Self::Schedule(error) => write!(f, "cannot read the schedule: {error}"),
             Self::Media(why) => write!(f, "cannot look up the program: {why}"),
             Self::Player(why) => write!(f, "the player failed: {why}"),
@@ -433,7 +455,7 @@ impl<P: Player> Tuner<P> {
                 ends_at_ms.saturating_add(SCHEDULE_WINDOW_MS),
             )
             .map_err(Reason::Schedule)?;
-        let target = program_at(&events, ends_at_ms)?;
+        let target = program_at(&events, ends_at_ms, self.timing.max_early_ms)?;
         let item = media
             .resolve(&target.media_id)
             .map_err(|e| Reason::Media(e.to_string()))?;
