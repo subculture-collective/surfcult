@@ -11,8 +11,8 @@ use serde::Deserialize;
 
 use super::duration::{parse_duration, parse_minute_of_day};
 use super::{
-    Block, Breaks, Channel, Config, Day, InterstitialPool, Lineup, Mode, Plan, Problem, Rotation,
-    SignOff, Source, Tz, Weights,
+    Block, Breaks, Channel, Config, Day, Display, Filter, InterstitialPool, Lineup, Mode, Plan,
+    Problem, Rotation, SignOff, Source, Tz, Weights,
 };
 
 #[derive(Deserialize)]
@@ -23,6 +23,16 @@ pub struct RawConfig {
     channel: Vec<RawChannel>,
     #[serde(default)]
     interstitial_pool: Vec<RawPool>,
+    display: Option<RawDisplay>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDisplay {
+    #[serde(default)]
+    filters: Vec<String>,
+    standby_filters: Option<Vec<String>>,
+    glitch_every: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -202,11 +212,17 @@ impl RawConfig {
             }
         }
 
+        let display = self
+            .display
+            .as_ref()
+            .map_or_else(Display::default, |raw| raw.check(&mut problems));
+
         match (timezone, problems.0.is_empty()) {
             (Some(timezone), true) => Ok(Config {
                 timezone,
                 channels,
                 pools,
+                display,
             }),
             _ => Err(problems.0),
         }
@@ -401,6 +417,46 @@ fn check_sign_off(
         pool: raw.pool.clone(),
         clip: raw.clip.clone(),
     })
+}
+
+impl RawDisplay {
+    fn check(&self, problems: &mut Problems) -> Display {
+        let defaults = Display::default();
+        let filters = filters_named(&self.filters, "display.filters", problems);
+        let standby_filters = match &self.standby_filters {
+            Some(names) => filters_named(names, "display.standby_filters", problems),
+            None => defaults.standby_filters,
+        };
+        let glitch_every = match &self.glitch_every {
+            Some(text) => positive_duration(text, "display.glitch_every", problems)
+                .unwrap_or(defaults.glitch_every),
+            None => defaults.glitch_every,
+        };
+        Display {
+            filters,
+            standby_filters,
+            glitch_every,
+        }
+    }
+}
+
+/// The filters `names` stands for. An unknown name is a problem at
+/// `field[index]`.
+fn filters_named(names: &[String], field: &str, problems: &mut Problems) -> Vec<Filter> {
+    let mut filters = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        match Filter::from_name(name) {
+            Some(filter) => filters.push(filter),
+            None => {
+                let known: Vec<&str> = Filter::ALL.iter().map(|f| f.name()).collect();
+                problems.add(
+                    format!("{field}[{i}]"),
+                    format!("unknown filter {name:?}; use {}", known.join(" or ")),
+                );
+            }
+        }
+    }
+    filters
 }
 
 fn parse_mode(text: &str, field: &str, problems: &mut Problems) -> Option<Mode> {

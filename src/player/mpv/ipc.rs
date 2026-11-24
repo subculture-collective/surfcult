@@ -38,6 +38,7 @@ impl IpcError {
 /// What a playlist entry is, by MPV's `playlist_entry_id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Entry {
+    /// Static or the stand-by card. Neither reports anything.
     Static,
     Clip,
     Program {
@@ -63,6 +64,16 @@ pub(super) struct Session {
     entries: HashMap<i64, Entry>,
     /// The entry on screen, from the last `start-file` event.
     current: Option<i64>,
+    /// Whether the stand-by card is up.
+    standby: bool,
+    /// The subtitle track id of the card's flicker, while one shows.
+    flicker: Option<i64>,
+    /// The `glsl-shaders` list outside the stand-by card.
+    global_shaders: Vec<String>,
+    /// The `glsl-shaders` list while the stand-by card shows.
+    standby_shaders: Vec<String>,
+    /// The `glsl-shaders` list MPV has now, as far as this session knows.
+    shaders: Vec<String>,
 }
 
 impl Session {
@@ -79,15 +90,105 @@ impl Session {
             events: VecDeque::new(),
             entries: HashMap::new(),
             current: None,
+            standby: false,
+            flicker: None,
+            global_shaders: Vec::new(),
+            standby_shaders: Vec::new(),
+            shaders: Vec::new(),
         })
     }
 
-    /// Plays `source` in a loop, replacing the playlist.
+    /// Sets the shader files for everything on screen (`global`) and for the
+    /// stand-by card (`standby`), and gives MPV the global ones. A new MPV
+    /// starts with none, so an empty `global` sends nothing.
+    pub(super) fn use_shaders(
+        &mut self,
+        global: Vec<String>,
+        standby: Vec<String>,
+    ) -> Result<(), IpcError> {
+        self.global_shaders = global;
+        self.standby_shaders = standby;
+        if self.shaders != self.global_shaders {
+            self.set_shaders(self.global_shaders.clone())?;
+        }
+        Ok(())
+    }
+
+    /// Whether the stand-by card is up.
+    pub(super) fn standby_up(&self) -> bool {
+        self.standby
+    }
+
+    /// Plays `source`, replacing the playlist. `loop-file=inf` restarts a
+    /// source that ends; a `lavfi` generator never does.
     pub(super) fn show_static(&mut self, source: &str) -> Result<(), IpcError> {
-        let options = json!({ "loop-file": "inf" });
+        self.replace(source, json!({ "loop-file": "inf" }), Entry::Static)
+    }
+
+    /// Switches MPV to the stand-by shaders and plays `source` as
+    /// [`Session::show_static`] does, with the ASS file `subtitles` (the
+    /// card's band and text) as its subtitle track. `blend-subtitles=yes`
+    /// puts the track through the shaders, and
+    /// `secondary-sub-ass-override=no` keeps a flicker's drawings (MPV
+    /// strips the styling of secondary subtitles by default). These options
+    /// belong to the card's playlist entry, so MPV drops them with it:
+    /// whatever replaces the card shows no subtitles. On an error the card
+    /// may be partly set up; the caller replaces it.
+    pub(super) fn show_standby(&mut self, source: &str, subtitles: &str) -> Result<(), IpcError> {
+        self.leave_standby()?;
+        if self.shaders != self.standby_shaders {
+            self.set_shaders(self.standby_shaders.clone())?;
+        }
+        let options = json!({
+            "loop-file": "inf",
+            "sub-files-append": subtitles,
+            "blend-subtitles": "yes",
+            "secondary-sub-ass-override": "no",
+        });
         let id = self.loadfile(source, "replace", options)?;
         self.entries.clear();
         self.entries.insert(id, Entry::Static);
+        self.standby = true;
+        Ok(())
+    }
+
+    /// Shows the ASS file `subtitles` over the card as MPV's secondary
+    /// subtitle track, for a flicker. The card's own track stays selected
+    /// underneath, so no frame shows the bars without the band. (Rewriting
+    /// that track and `sub-reload` left one or two frames without it.) Does
+    /// nothing when the card is not up or already flickers.
+    pub(super) fn start_flicker(&mut self, subtitles: &str) -> Result<(), IpcError> {
+        if !self.standby || self.flicker.is_some() {
+            return Ok(());
+        }
+        self.command(json!(["sub-add", subtitles, "auto"]))?;
+        // MPV 0.40 and 0.41 return no track id from sub-add.
+        let tracks = self.command(json!(["get_property", "track-list"]))?;
+        let id = tracks
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|t| t["type"] == "sub" && t["external-filename"] == subtitles)
+            .filter_map(|t| t["id"].as_i64())
+            .max()
+            .ok_or_else(|| IpcError::Rejected("MPV did not add the flicker's subtitles".into()))?;
+        self.flicker = Some(id);
+        self.command(json!(["set_property", "secondary-sid", id]))
+            .map(drop)
+    }
+
+    /// Hides and removes the flicker's track, if there is one.
+    pub(super) fn end_flicker(&mut self) -> Result<(), IpcError> {
+        let Some(id) = self.flicker.take() else {
+            return Ok(());
+        };
+        self.command(json!(["set_property", "secondary-sid", "no"]))?;
+        self.command(json!(["sub-remove", id])).map(drop)
+    }
+
+    fn set_shaders(&mut self, shaders: Vec<String>) -> Result<(), IpcError> {
+        self.command(json!(["set_property", "glsl-shaders", shaders]))?;
+        self.shaders = shaders;
         Ok(())
     }
 
@@ -98,9 +199,27 @@ impl Session {
         let path = absolute
             .to_str()
             .ok_or_else(|| IpcError::Rejected("the clip path is not UTF-8".into()))?;
-        let id = self.loadfile(path, "replace", json!({}))?;
+        self.replace(path, json!({}), Entry::Clip)
+    }
+
+    /// Leaves the stand-by card, then loads `url` in place of the playlist.
+    fn replace(&mut self, url: &str, options: Value, entry: Entry) -> Result<(), IpcError> {
+        self.leave_standby()?;
+        let id = self.loadfile(url, "replace", options)?;
         self.entries.clear();
-        self.entries.insert(id, Entry::Clip);
+        self.entries.insert(id, entry);
+        Ok(())
+    }
+
+    /// Forgets the stand-by card and gives MPV the global shaders if it has
+    /// others. The card's subtitles, a flicker's included, need no command:
+    /// they leave with its playlist entry.
+    fn leave_standby(&mut self) -> Result<(), IpcError> {
+        self.standby = false;
+        self.flicker = None;
+        if self.shaders != self.global_shaders {
+            self.set_shaders(self.global_shaders.clone())?;
+        }
         Ok(())
     }
 
@@ -115,6 +234,7 @@ impl Session {
     /// property, so a key is never sent to another server.
     pub(super) fn queue_program(&mut self, stream: &Stream, start_ms: u64) -> Result<(), IpcError> {
         let fields = header_fields(&stream.headers).map_err(IpcError::Rejected)?;
+        self.leave_standby()?;
         self.command(json!(["set_property", "http-header-fields", fields]))?;
         let start = start_ms.saturating_sub(stream.stream_offset_ms);
         let options = json!({ "start": seconds(start) });
@@ -144,6 +264,7 @@ impl Session {
 
     /// Stops playback and empties the playlist.
     pub(super) fn stop(&mut self) -> Result<(), IpcError> {
+        self.leave_standby()?;
         self.command(json!(["stop"]))?;
         self.entries.clear();
         self.current = None;
@@ -184,6 +305,12 @@ impl Session {
     /// meanwhile are queued for [`Session::poll`].
     pub(super) fn ping(&mut self) -> Result<(), IpcError> {
         self.command(json!(["get_property", "pid"])).map(drop)
+    }
+
+    /// Reads one MPV property, for tests that check what MPV is doing.
+    #[cfg(test)]
+    pub(super) fn get_property(&mut self, name: &str) -> Result<Value, IpcError> {
+        self.command(json!(["get_property", name]))
     }
 
     /// The next [`PlayerEvent`], from the events MPV has sent so far, or
@@ -257,7 +384,11 @@ impl Session {
     /// Sends one command and waits for its reply. Error messages name the
     /// command but never its arguments, which can hold an HTTP header.
     fn command(&mut self, args: Value) -> Result<Value, IpcError> {
-        let name = args[0].as_str().unwrap_or("command").to_owned();
+        let name = args[0]
+            .as_str()
+            .or_else(|| args["name"].as_str())
+            .unwrap_or("command")
+            .to_owned();
         self.next_request += 1;
         let request_id = self.next_request;
         let mut line = json!({ "command": args, "request_id": request_id }).to_string();

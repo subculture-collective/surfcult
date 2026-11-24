@@ -9,10 +9,12 @@
 - `reference/schedule.md`: how the schedule generator orders items, resumes and persists
 - `reference/guide.md`: guide cells from the schedule: merging a program's segments, the window, progress
 - `reference/api.md`: the read API: endpoints, JSON shapes, the listen address and the bearer token
-- `reference/tuner.md`: the tune-in sequence, clip choice, break stand-in, late-start seek and how the tuner is driven
+- `reference/player.md`: the player and MPV: commands, the stand-by card, display filters (the CRT shader and the glitch), the Jellyfin key, events and the watchdog
+- `reference/tuner.md`: the tune-in sequence, clip choice, break stand-in, late-start seek, the stand-by card and how the tuner is driven
 - `runbooks/raspberry-pi.md`: reaching and operating the Pi 4B TV box
 - `research/2026-11-22-pi-playback-spike.md`: Phase 0 results: decode, Jellyfin tune time, overlay cost
 - `../tools/pi-spike/`: the scripts behind those measurements
+- `../tools/standby/`: the generator of the stand-by card's colour bars and Oswald-derived lettering, with its fit data and the Oswald licence
 - `adr/`: architecture decision records; [0001](adr/0001-pi-and-library-findings.md) records what the Pi 4B and the library showed in Phase 0
 - `reference/`: stable technical references
 - `research/`: exploratory notes and comparisons

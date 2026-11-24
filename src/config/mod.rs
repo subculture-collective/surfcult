@@ -15,11 +15,40 @@ use std::time::Duration;
 pub use chrono_tz::Tz;
 use serde::Deserialize;
 
+pub use crate::player::Filter;
+use crate::player::{DEFAULT_GLITCH_EVERY, DEFAULT_STANDBY_FILTERS};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub timezone: Tz,
     pub channels: Vec<Channel>,
     pub pools: Vec<InterstitialPool>,
+    pub display: Display,
+}
+
+/// The optional `[display]` table: which display filters are on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Display {
+    /// Filters on everything on screen: programs, clips, static and the
+    /// stand-by card.
+    pub filters: Vec<Filter>,
+    /// Filters the stand-by card adds while it shows. One that is also in
+    /// `filters` is applied once.
+    pub standby_filters: Vec<Filter>,
+    /// The mean time between two glitches of the stand-by card's text.
+    pub glitch_every: Duration,
+}
+
+/// No global filters; the CRT shader and the glitch on the stand-by card,
+/// glitching about every 20 seconds.
+impl Default for Display {
+    fn default() -> Self {
+        Self {
+            filters: Vec::new(),
+            standby_filters: DEFAULT_STANDBY_FILTERS.to_vec(),
+            glitch_every: DEFAULT_GLITCH_EVERY,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

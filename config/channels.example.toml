@@ -62,6 +62,21 @@ mode = "weighted"
 # as the rest, which weigh 1. Weights are whole numbers of at least 1.
 weights = { "Groundhog Day" = 3 }
 
+# Display filters (optional). The defaults are shown.
+#   filters          on everything on screen: programs, clips, static and the
+#                    stand-by card
+#   standby_filters  added while the stand-by card shows; a filter already in
+#                    `filters` is applied once
+#   glitch_every     mean time between flickers of the stand-by card's band
+# Filters: crt (a CRT look: scanlines, curvature, colour fringing, flicker,
+# a rolling band; on the card it covers the band and text too) and glitch
+# (thin slices of the card's band shift for a moment now and then). An empty
+# list turns its filters off.
+# [display]
+# filters = []
+# standby_filters = ["crt", "glitch"]
+# glitch_every = "20s"
+
 # Pools of short local clips.
 [[interstitial_pool]]
 name = "tune-in"

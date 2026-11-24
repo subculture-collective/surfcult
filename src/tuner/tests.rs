@@ -439,7 +439,7 @@ fn a_long_filler_stretch_does_not_queue_the_next_program_early() {
             next_program_ms: T + 2_400_000
         })
     );
-    assert_eq!(rig.commands(), [Command::ShowStatic]);
+    assert_eq!(rig.commands(), [Command::ShowStatic, Command::ShowStandby]);
 }
 
 #[test]
@@ -473,7 +473,7 @@ fn a_break_that_ends_before_the_clip_does_not_stand_in() {
 }
 
 #[test]
-fn a_break_followed_by_a_gap_or_nothing_ends_on_static() {
+fn a_break_followed_by_a_gap_or_nothing_ends_on_the_standby_card() {
     let gap_after = vec![
         event(T - 100_000, T + 1_000, "show", 0, EventKind::Program),
         event(T + 1_000, T + 30_000, "ad", 0, EventKind::Break),
@@ -488,6 +488,7 @@ fn a_break_followed_by_a_gap_or_nothing_ends_on_static() {
             next_start_ms: Some(T + 60_000)
         })
     );
+    assert_eq!(rig.commands(), [Command::ShowStatic, Command::ShowStandby]);
 
     let last_event = vec![
         event(T - 100_000, T + 1_000, "show", 0, EventKind::Program),
@@ -502,7 +503,7 @@ fn a_break_followed_by_a_gap_or_nothing_ends_on_static() {
             next_start_ms: None
         })
     );
-    assert_eq!(rig.commands(), [Command::ShowStatic]);
+    assert_eq!(rig.commands(), [Command::ShowStatic, Command::ShowStandby]);
 }
 
 // Late start
@@ -749,21 +750,28 @@ fn an_empty_tune_in_pool_leaves_static_up() {
 }
 
 #[test]
-fn a_channel_with_no_schedule_leaves_static_up() {
+fn a_channel_with_no_schedule_shows_the_standby_card() {
     let mut rig = Rig::new(Vec::new(), vec![direct("show")], tune_in_clips());
     rig.tune(CHANNEL, T);
     rig.at(T + 500);
     assert_eq!(rig.failed_with(), Some(&Reason::NoEvents));
-    assert_eq!(rig.commands(), [Command::ShowStatic]);
+    assert_eq!(
+        rig.issued(),
+        [(T, Command::ShowStatic), (T + 500, Command::ShowStandby)]
+    );
 
     // A channel number nobody scheduled is the same.
     rig.tune(99, T + 10_000);
     rig.at(T + 10_500);
     assert_eq!(rig.failed_with(), Some(&Reason::NoEvents));
+    assert_eq!(
+        rig.commands()[2..],
+        [Command::ShowStatic, Command::ShowStandby]
+    );
 }
 
 #[test]
-fn a_gap_when_the_clip_ends_leaves_static_up() {
+fn a_gap_when_the_clip_ends_shows_the_standby_card() {
     let events = vec![
         event(T - 100_000, T + 1_000, "show", 0, EventKind::Program),
         event(T + 20_000, T + 900_000, "show", 50_000, EventKind::Program),
@@ -777,16 +785,49 @@ fn a_gap_when_the_clip_ends_leaves_static_up() {
             next_start_ms: Some(T + 20_000)
         })
     );
-    assert_eq!(rig.commands(), [Command::ShowStatic]);
+    assert_eq!(rig.commands(), [Command::ShowStatic, Command::ShowStandby]);
 }
 
 #[test]
-fn a_program_the_media_source_does_not_know_leaves_static_up() {
+fn a_program_the_media_source_does_not_know_shows_the_standby_card() {
     let mut rig = Rig::new(long_program(), Vec::new(), tune_in_clips());
     rig.tune(CHANNEL, T);
     rig.at(T + 500);
     assert!(matches!(rig.failed_with(), Some(Reason::Media(_))));
+    assert_eq!(rig.commands(), [Command::ShowStatic, Command::ShowStandby]);
+}
+
+#[test]
+fn a_rejected_standby_card_is_a_player_failure() {
+    let mut rig = Rig::new(Vec::new(), vec![direct("show")], tune_in_clips());
+    rig.tune(CHANNEL, T);
+    rig.tuner.player_mut().fail_commands("socket closed");
+    rig.at(T + 500);
+    assert_eq!(
+        rig.failed_with(),
+        Some(&Reason::Player("socket closed".into()))
+    );
     assert_eq!(rig.commands(), [Command::ShowStatic]);
+}
+
+#[test]
+fn a_restart_on_the_standby_card_tunes_again_and_shows_it_again() {
+    let mut rig = Rig::new(Vec::new(), vec![direct("show")], tune_in_clips());
+    rig.tune(CHANNEL, T);
+    rig.at(T + 500);
+    rig.tuner.player_mut().restarted();
+    rig.at(T + 60_000);
+    rig.at(T + 60_500);
+    assert_eq!(rig.failed_with(), Some(&Reason::NoEvents));
+    assert_eq!(
+        rig.commands(),
+        [
+            Command::ShowStatic,
+            Command::ShowStandby,
+            Command::ShowStatic,
+            Command::ShowStandby
+        ]
+    );
 }
 
 #[test]

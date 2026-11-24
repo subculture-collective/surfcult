@@ -79,8 +79,9 @@
 //! A filler stretch can be far longer than a break: a blocks channel plays its
 //! filler pool through time no block covers. If the program after the run
 //! starts more than [`Timing::max_early_ms`] (10 minutes) after the clip
-//! ends, the tuner does not queue it hours early. It leaves static up with
-//! [`Reason::NoProgramSoon`]. The tuner cannot play filler clips itself yet.
+//! ends, the tuner does not queue it hours early. It shows the stand-by card
+//! with [`Reason::NoProgramSoon`]. The tuner cannot play filler clips itself
+//! yet.
 //! A stretch that runs past the hour of schedule the tuner reads has no
 //! program in view at all and ends on [`Reason::Gap`] with no next start.
 //!
@@ -102,10 +103,11 @@
 //!
 //! # When there is nothing to show
 //!
-//! The tuner never panics. It leaves static on screen and sets
-//! [`State::Failed`] with a [`Reason`] when
+//! The tuner never panics. It sets [`State::Failed`] with a [`Reason`].
 //!
-//! - the tune-in pool has no clip ([`Reason::NoTuneInClip`]);
+//! When the schedule has nothing to play it shows the stand-by card
+//! ([`Player::show_standby`]) in place of static:
+//!
 //! - the schedule has no events from now to an hour after the clip ends
 //!   ([`Reason::NoEvents`]);
 //! - nothing is scheduled when the clip ends, or nothing follows the break
@@ -113,11 +115,18 @@
 //! - a break, filler or ident run is on when the clip ends and the next
 //!   program starts more than [`Timing::max_early_ms`] later
 //!   ([`Reason::NoProgramSoon`]);
-//! - the schedule or the media source fails ([`Reason::Schedule`],
-//!   [`Reason::Media`]);
-//! - the player rejects a command ([`Reason::Player`]).
+//! - the media source cannot look up the program ([`Reason::Media`]).
 //!
-//! Static stays up until the next [`Tuner::tune`]. The tuner does not retry.
+//! It leaves static up when
+//!
+//! - the tune-in pool has no clip ([`Reason::NoTuneInClip`]);
+//! - the schedule cannot be read ([`Reason::Schedule`]);
+//! - the player rejects a command ([`Reason::Player`]), including the
+//!   stand-by card itself. [`crate::player::MpvPlayer`] shows static in
+//!   place of a card that MPV refused in part.
+//!
+//! The screen stays as it is until the next [`Tuner::tune`]. The tuner does
+//! not retry.
 //!
 //! # When the player restarts
 //!
@@ -177,7 +186,7 @@ impl Default for Timing {
     }
 }
 
-/// Why a sequence ended on static instead of a program.
+/// Why a sequence ended without a program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
     /// The tune-in pool has no clip.
@@ -234,7 +243,9 @@ pub enum State {
     AwaitingProgram { channel: u32 },
     /// The program started. The sequence is over.
     Live { channel: u32 },
-    /// The sequence ended on static, for this reason.
+    /// The sequence ended without a program, for this reason. The screen
+    /// shows the stand-by card when the schedule has nothing to play or the
+    /// item cannot be looked up, and static otherwise.
     Failed { channel: u32, reason: Reason },
 }
 
@@ -310,14 +321,18 @@ impl<P: Player> Tuner<P> {
 
     /// Does what is due at `now_ms`: starts the clip once static has shown for
     /// long enough, reading the channel's events from `store` and the
-    /// program's codecs from `media`. Calling it early or with nothing due
-    /// does nothing.
+    /// program's codecs from `media`, or shows the stand-by card when there
+    /// is nothing to play. Calling it early or with nothing due does nothing.
     pub fn tick(&mut self, now_ms: i64, store: &Store, media: &impl MediaSource) {
         if let State::Static { channel, until_ms } = self.state
             && now_ms >= until_ms
         {
             self.state = match self.start_clip(channel, now_ms, store, media) {
                 Ok(()) => State::ClipPlaying { channel },
+                Err(reason) if shows_standby(&reason) => match self.player.show_standby() {
+                    Ok(()) => State::Failed { channel, reason },
+                    Err(e) => failed(channel, e),
+                },
                 Err(reason) => State::Failed { channel, reason },
             };
         }
@@ -466,6 +481,16 @@ impl<P: Player> Tuner<P> {
             needs_transcode: needs_transcode(&item),
         })
     }
+}
+
+/// Whether a sequence that ends for `reason` shows the stand-by card: the
+/// schedule has nothing to play, or the item cannot be looked up. Other
+/// failures leave static up.
+fn shows_standby(reason: &Reason) -> bool {
+    matches!(
+        reason,
+        Reason::NoEvents | Reason::Gap { .. } | Reason::NoProgramSoon { .. } | Reason::Media(_)
+    )
 }
 
 fn failed(channel: u32, error: PlayerError) -> State {
