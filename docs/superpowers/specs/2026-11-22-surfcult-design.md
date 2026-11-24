@@ -99,7 +99,7 @@ Content sources and modes (v1):
 - Sources: a Jellyfin library, collection, tag or genre, or a single series. Collections and series expand to their episodes and movies.
 - `sequential`: plays items in order and remembers its place. There is no separate cursor: the channel continues after the media of its last stored program event, so regenerating the future continues from the last program before the frozen boundary.
 - `shuffle`: each slot picks at random from the items not played recently. With N items, the N - k most recently played (k = max(1, ceil(N / 4))) are cooling down.
-- `weighted`: seeded random pick where each source or item carries a weight.
+- `weighted`: a lineup of several sources, each with a weight. A seeded random pick chooses a source in proportion to its weight, then an item from that source by the shuffle's cooldown, counted per source pool.
 - `blocks`: a list of time-of-day (and day-of-week) blocks, each with its own source and mode, for things like Saturday-morning cartoons. Later blocks in the file do not override earlier ones; overlapping blocks are a config error.
 
 Programs and breaks:
@@ -114,7 +114,7 @@ Programs and breaks:
 - A channel can end its broadcast day with `sign_off`: one clip, such as the national anthem, at a set local time, after which the channel is off the air until a set time, the next morning or later the same day. No program starts that would still be on when the clip starts; filler plays the time before it, or it is dead air. Off the air the channel has no events, and the tuner shows static (`NoEvents` or `Gap`).
 - Events starting within the next 30 minutes are frozen. Anything later may be regenerated, for example when Tdarr changes a file's duration or when the owner edits a channel. The show on screen and the next few guide rows never change under the viewer.
 - A file that disappears from Jellyfin is replaced by valid content and the substitution is recorded.
-- A shuffle channel uses a cooldown counted in plays, not in time. With N playable items in its pool, the N - k most recently played distinct items (k = max(1, ceil(N / 4))) cannot be picked; each slot picks at random from the rest. An item therefore never airs again until at least N - k others have aired since, and waits about N plays on average. With four items or fewer this settles into a fixed rotation. Sequential channels play the pool in order, and weighted channels have no cooldown.
+- A shuffle channel uses a cooldown counted in plays, not in time. With N playable items in its pool, the N - k most recently played distinct items (k = max(1, ceil(N / 4))) cannot be picked; each slot picks at random from the rest. An item therefore never airs again until at least N - k others have aired since, and waits about N plays on average. With four items or fewer this settles into a fixed rotation. Sequential channels play the pool in order. A weighted channel applies the same cooldown to each source's pool separately.
 
 ### Tuning
 

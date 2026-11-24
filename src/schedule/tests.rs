@@ -8,7 +8,7 @@ use super::breaks::cut_points;
 use super::*;
 use crate::clips::{Clip, Pool as ClipPool};
 use crate::config::{
-    Block, Breaks, Channel, Day, Lineup, Mode, Plan, Rotation, Source, Tz, Weights,
+    Block, Breaks, Channel, Day, Lineup, Mode, Plan, Rotation, Source, Tz, WeightedSource,
 };
 use crate::library::{Chapter, FakeMediaSource, MediaId, MediaItem, MediaKind, resolve_pool};
 use crate::store::Store;
@@ -34,9 +34,8 @@ fn channel(number: u32, mode: Mode) -> Channel {
         number,
         name: format!("Channel {number}"),
         plan: Plan::Fixed {
-            source: Source::JellyfinLibrary("All".into()),
+            sources: vec![WeightedSource::new(Source::JellyfinLibrary("All".into()))],
             mode,
-            weights: Weights::new(),
         },
         grid: None,
         breaks: None,
@@ -45,13 +44,21 @@ fn channel(number: u32, mode: Mode) -> Channel {
     }
 }
 
-static NO_WEIGHTS: Weights = Weights::new();
+static NO_SOURCE: Source = Source::JellyfinLibrary(String::new());
+
+/// `items` as the one source of a single-source lineup.
+fn single(items: &[MediaItem]) -> [SourcePool<'_>; 1] {
+    [SourcePool {
+        source: &NO_SOURCE,
+        weight: 1,
+        items,
+    }]
+}
 
 fn params(mode: Mode) -> Params<'static> {
     Params {
         channel: 3,
         mode,
-        weights: &NO_WEIGHTS,
         breaks: None,
     }
 }
@@ -92,7 +99,7 @@ fn programs_are_whole_items_back_to_back() {
 
     let out = generate(
         &params(Mode::Sequential),
-        &items,
+        &single(&items),
         &Resume::default(),
         start,
         start + 3 * 60 * MINUTE,
@@ -113,7 +120,16 @@ fn the_same_inputs_give_the_same_events() {
     let items = pool(&["a", "b", "c", "d", "e", "f"]);
     let start = at(2026, 6, 1, 12, 0);
     for mode in [Mode::Sequential, Mode::Shuffle] {
-        let run = || generate(&params(mode), &items, &resume("b"), start, start + 7 * DAY).unwrap();
+        let run = || {
+            generate(
+                &params(mode),
+                &single(&items),
+                &resume("b"),
+                start,
+                start + 7 * DAY,
+            )
+            .unwrap()
+        };
         assert_eq!(run(), run(), "{mode:?}");
     }
 }
@@ -125,7 +141,7 @@ fn sequential_continues_after_the_cursor_and_wraps() {
 
     let out = generate(
         &params(Mode::Sequential),
-        &items,
+        &single(&items),
         &resume("c"),
         start,
         start + 6 * 60 * MINUTE,
@@ -143,7 +159,14 @@ fn sequential_continues_after_the_cursor_and_wraps() {
 #[test]
 fn sequential_starts_at_the_beginning_without_a_cursor() {
     let items = pool(&["a", "b", "c"]);
-    let out = generate(&params(Mode::Sequential), &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(
+        &params(Mode::Sequential),
+        &single(&items),
+        &Resume::default(),
+        0,
+        1,
+    )
+    .unwrap();
     assert_eq!(ids(&out.events), ["a"]);
     assert_eq!(out.cursor.as_ref().map(MediaId::as_str), Some("a"));
 }
@@ -152,7 +175,14 @@ fn sequential_starts_at_the_beginning_without_a_cursor() {
 fn sequential_restarts_and_says_so_when_the_cursor_item_vanished() {
     let items = pool(&["a", "b", "c"]);
 
-    let out = generate(&params(Mode::Sequential), &items, &resume("gone"), 0, 1).unwrap();
+    let out = generate(
+        &params(Mode::Sequential),
+        &single(&items),
+        &resume("gone"),
+        0,
+        1,
+    )
+    .unwrap();
 
     assert_eq!(ids(&out.events), ["a"]);
     assert_eq!(
@@ -169,7 +199,7 @@ fn sequential_skips_zero_runtime_items_and_continues_past_a_zero_cursor() {
 
     let out = generate(
         &params(Mode::Sequential),
-        &items,
+        &single(&items),
         &resume("a"),
         0,
         60 * MINUTE,
@@ -179,7 +209,14 @@ fn sequential_skips_zero_runtime_items_and_continues_past_a_zero_cursor() {
     assert_eq!(ids(&out.events), ["c", "a", "c"]);
     assert_eq!(out.notes, [Note::SkippedZeroRuntime { count: 1 }]);
 
-    let after_zero = generate(&params(Mode::Sequential), &items, &resume("zero"), 0, 1).unwrap();
+    let after_zero = generate(
+        &params(Mode::Sequential),
+        &single(&items),
+        &resume("zero"),
+        0,
+        1,
+    )
+    .unwrap();
     assert_eq!(ids(&after_zero.events), ["c"]);
     assert!(
         after_zero
@@ -191,13 +228,13 @@ fn sequential_skips_zero_runtime_items_and_continues_past_a_zero_cursor() {
 #[test]
 fn an_empty_or_unplayable_pool_gives_no_events_and_a_note() {
     for mode in [Mode::Sequential, Mode::Shuffle] {
-        let none = generate(&params(mode), &[], &resume("x"), 0, DAY).unwrap();
+        let none = generate(&params(mode), &single(&[]), &resume("x"), 0, DAY).unwrap();
         assert!(none.events.is_empty());
         assert_eq!(none.cursor.as_ref().map(MediaId::as_str), Some("x"));
         assert_eq!(none.notes, [Note::NoPlayableItems]);
 
         let zeros = vec![item("a", 0), item("b", 0)];
-        let out = generate(&params(mode), &zeros, &Resume::default(), 0, DAY).unwrap();
+        let out = generate(&params(mode), &single(&zeros), &Resume::default(), 0, DAY).unwrap();
         assert!(out.events.is_empty());
         assert_eq!(
             out.notes,
@@ -209,7 +246,14 @@ fn an_empty_or_unplayable_pool_gives_no_events_and_a_note() {
 #[test]
 fn an_empty_window_gives_no_events_and_keeps_the_cursor() {
     let items = pool(&["a", "b"]);
-    let out = generate(&params(Mode::Sequential), &items, &resume("a"), 100, 100).unwrap();
+    let out = generate(
+        &params(Mode::Sequential),
+        &single(&items),
+        &resume("a"),
+        100,
+        100,
+    )
+    .unwrap();
     assert!(out.events.is_empty());
     assert_eq!(out.cursor.as_ref().map(MediaId::as_str), Some("a"));
 }
@@ -219,7 +263,7 @@ fn a_duplicate_id_in_the_pool_is_used_once() {
     let items = vec![item("a", 20), item("b", 20), item("a", 45)];
     let out = generate(
         &params(Mode::Sequential),
-        &items,
+        &single(&items),
         &Resume::default(),
         0,
         80 * MINUTE,
@@ -239,7 +283,7 @@ fn shuffle(items: &[MediaItem], recent: &[&str], start: i64, end: i64) -> Genera
         recent: recent.iter().map(|id| MediaId::new(*id)).collect(),
         ..Resume::default()
     };
-    generate(&params(Mode::Shuffle), items, &resume, start, end).unwrap()
+    generate(&params(Mode::Shuffle), &single(items), &resume, start, end).unwrap()
 }
 
 /// With `n` playable items, N - k of them are cooling down at each pick, so
@@ -288,10 +332,16 @@ fn a_shuffle_differs_by_channel() {
         let params = Params {
             channel,
             mode: Mode::Shuffle,
-            weights: &NO_WEIGHTS,
             breaks: None,
         };
-        let out = generate(&params, &items, &Resume::default(), start, start + DAY).unwrap();
+        let out = generate(
+            &params,
+            &single(&items),
+            &Resume::default(),
+            start,
+            start + DAY,
+        )
+        .unwrap();
         out.events
             .into_iter()
             .map(|e| e.media_id)
@@ -384,7 +434,7 @@ fn a_one_item_shuffle_repeats_that_item() {
     let items = pool(&["only"]);
     let out = generate(
         &params(Mode::Shuffle),
-        &items,
+        &single(&items),
         &resume("only"),
         0,
         60 * MINUTE,
@@ -401,7 +451,7 @@ fn seven_days_across_a_daylight_saving_change_have_no_gaps() {
         for mode in [Mode::Sequential, Mode::Shuffle] {
             let out = generate(
                 &params(mode),
-                &items,
+                &single(&items),
                 &Resume::default(),
                 start,
                 start + HORIZON_MS,
@@ -774,14 +824,15 @@ fn a_resolved_collection_pool_schedules_only_its_items() {
         .with_collection("Cartoons", &["d", "b"]);
     let mut channel = channel(3, Mode::Sequential);
     channel.plan = Plan::Fixed {
-        source: Source::JellyfinCollection("Cartoons".into()),
+        sources: vec![WeightedSource::new(Source::JellyfinCollection(
+            "Cartoons".into(),
+        ))],
         mode: Mode::Sequential,
-        weights: Weights::new(),
     };
-    let Plan::Fixed { source, .. } = &channel.plan else {
+    let Plan::Fixed { sources, .. } = &channel.plan else {
         unreachable!()
     };
-    let items = resolve_pool(channel.number, source, &media).unwrap();
+    let items = resolve_pool(channel.number, &sources[0].source, &media).unwrap();
     let mut store = setup();
     let now = at(2026, 6, 1, 12, 0);
 
@@ -823,7 +874,6 @@ fn with_breaks(mode: Mode, breaks: BreakPlan<'_>) -> Params<'_> {
     Params {
         channel: 3,
         mode,
-        weights: &NO_WEIGHTS,
         breaks: Some(breaks),
     }
 }
@@ -858,7 +908,7 @@ fn a_22_minute_program_with_two_2_minute_breaks_occupies_26_minutes() {
     let ads = [clip("ad1", 60), clip("ad2", 60)];
     let params = with_breaks(Mode::Sequential, plan(8, 120, &ads, &[]));
 
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
 
     use EventKind::{Break, Program};
     let m = MINUTE;
@@ -934,7 +984,7 @@ fn snapped_cuts_move_the_program_offsets() {
     let ads = [clip("ad", 120)];
     let params = with_breaks(Mode::Sequential, plan(8, 120, &ads, &[]));
 
-    let out = generate(&params, &[show], &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&[show]), &Resume::default(), 0, 1).unwrap();
 
     let segments: Vec<(u64, i64)> = out
         .events
@@ -960,7 +1010,7 @@ fn a_break_uses_whole_clips_and_pads_the_rest() {
     let pad = [clip("ident", 5), clip("slate", 30), clip("long", 300)];
     let params = with_breaks(Mode::Sequential, plan(10, 120, &ads, &pad));
 
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
 
     let brk: Vec<&Event> = out
         .events
@@ -986,7 +1036,7 @@ fn a_short_filler_pool_pads_with_its_longest_clip() {
     let pad = [clip("ident", 5), clip("slate", 10), clip("other", 10)];
     let params = with_breaks(Mode::Sequential, plan(10, 120, &[], &pad));
 
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
 
     let brk = &out.events[1];
     assert_eq!(brk.kind, EventKind::Filler);
@@ -1003,7 +1053,7 @@ fn a_clip_length_is_rounded_up_to_a_whole_millisecond() {
     }];
     let params = with_breaks(Mode::Sequential, plan(10, 30, &ads, &[]));
 
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
 
     assert_eq!(out.events[1].end_ms - out.events[1].start_ms, 29_971);
 }
@@ -1014,14 +1064,14 @@ fn without_filler_a_break_is_short_and_reported() {
     let ads = [clip("a", 50)];
     let params = with_breaks(Mode::Sequential, plan(10, 120, &ads, &[]));
 
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
     assert_eq!(out.events.len(), 3);
     assert_eq!(out.events[1].end_ms - out.events[1].start_ms, 50_000);
     assert_eq!(out.notes, [Note::ShortBreaks { count: 1 }]);
 
     // With nothing to show, the cut is left out and the program runs whole.
     let params = with_breaks(Mode::Sequential, plan(10, 120, &[], &[]));
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
     assert_eq!(
         shape(&out.events),
         [(EventKind::Program, "show".into(), 0, 20 * MINUTE)]
@@ -1035,7 +1085,7 @@ fn break_clips_rotate_and_play_once_per_break() {
     let ads = [clip("a", 60), clip("b", 60), clip("c", 60)];
     let params = with_breaks(Mode::Sequential, plan(10, 120, &ads, &[]));
 
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
     let played: Vec<&str> = out
         .events
         .iter()
@@ -1051,16 +1101,16 @@ fn break_clips_rotate_and_play_once_per_break() {
         last_break: Some((-MINUTE, MediaId::new(last))),
         ..Resume::default()
     };
-    let out = generate(&params, &items, &resume(&b), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &resume(&b), 0, 1).unwrap();
     assert_eq!(out.events[1].media_id.as_str(), c);
-    let out = generate(&params, &items, &resume("/clips/gone.mp4"), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &resume("/clips/gone.mp4"), 0, 1).unwrap();
     assert_eq!(out.events[1].media_id.as_str(), a);
 
     // One 60 s clip does not play twice in a 120 s break; filler pads it.
     let one = [clip("a", 60)];
     let pad = [clip("slate", 60)];
     let params = with_breaks(Mode::Sequential, plan(10, 120, &one, &pad));
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
     assert_eq!(
         shape(&out.events[1..3]),
         [
@@ -1078,7 +1128,7 @@ fn a_shuffle_with_breaks_resumed_at_a_program_matches_an_unbroken_run() {
     let params = with_breaks(Mode::Shuffle, plan(11, 120, &ads, &pad));
     let start = at(2026, 6, 1, 12, 0);
     let end = start + 2 * DAY;
-    let whole = generate(&params, &items, &Resume::default(), start, end).unwrap();
+    let whole = generate(&params, &single(&items), &Resume::default(), start, end).unwrap();
     assert_cooldown_holds(&programs(&whole.events), 7);
 
     let starts: Vec<usize> = (0..whole.events.len())
@@ -1089,7 +1139,14 @@ fn a_shuffle_with_breaks_resumed_at_a_program_matches_an_unbroken_run() {
         .collect();
     for cut in [starts[1], starts[4], starts[13]] {
         let boundary = whole.events[cut].start_ms;
-        let first = generate(&params, &items, &Resume::default(), start, boundary).unwrap();
+        let first = generate(
+            &params,
+            &single(&items),
+            &Resume::default(),
+            start,
+            boundary,
+        )
+        .unwrap();
         assert_eq!(first.events, whole.events[..cut]);
         // What `extend` reads from the store: the program rows newest first,
         // and the last break clip.
@@ -1109,7 +1166,7 @@ fn a_shuffle_with_breaks_resumed_at_a_program_matches_an_unbroken_run() {
                 .map(|e| (e.start_ms, e.media_id.clone())),
             ..Resume::default()
         };
-        let rest = generate(&params, &items, &resume, boundary, end).unwrap();
+        let rest = generate(&params, &single(&items), &resume, boundary, end).unwrap();
         assert_eq!(rest.events, whole.events[cut..], "cut at {cut}");
     }
 }
@@ -1139,7 +1196,7 @@ fn clips_sharing_a_media_id_count_once() {
 
     // A break long enough for every entry still plays `a` once.
     let params = with_breaks(Mode::Sequential, plan(10, 240, &ads, &[]));
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
     assert_eq!(breaks_of(&out.events)[0], [&a, &b, &c]);
 
     // One clip per break: the rotation is a, b, c, with the duplicate left
@@ -1147,7 +1204,7 @@ fn clips_sharing_a_media_id_count_once() {
     let params = with_breaks(Mode::Sequential, plan(10, 60, &ads, &[]));
     let items = pool(&["p", "q", "r", "s"]);
     let end = 6 * 60 * MINUTE;
-    let whole = generate(&params, &items, &Resume::default(), 0, end).unwrap();
+    let whole = generate(&params, &single(&items), &Resume::default(), 0, end).unwrap();
     let played: Vec<&str> = breaks_of(&whole.events).concat();
     assert_eq!(played[..6], [&a, &b, &c, &a, &b, &c]);
     let starts: Vec<usize> = (0..whole.events.len())
@@ -1173,7 +1230,7 @@ fn clips_sharing_a_media_id_count_once() {
                 .map(|e| (e.start_ms, e.media_id.clone())),
             ..Resume::default()
         };
-        let rest = generate(&params, &items, &resume, boundary, end).unwrap();
+        let rest = generate(&params, &single(&items), &resume, boundary, end).unwrap();
         assert_eq!(rest.events, whole.events[cut..], "cut at {cut}");
     }
 }
@@ -1190,13 +1247,20 @@ fn the_rotation_starts_over_after_a_day_without_breaks() {
     };
 
     // Exactly a day before the next break still continues after `a`.
-    let out = generate(&params, &items, &resume(first_break - DAY), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &resume(first_break - DAY), 0, 1).unwrap();
     assert_eq!(out.events[1].media_id.as_str(), clip_id("b"));
     // Any longer and the rotation starts again at the first clip, which is
     // what `extend` gets when it finds no break in the last day.
-    let out = generate(&params, &items, &resume(first_break - DAY - 1), 0, 1).unwrap();
+    let out = generate(
+        &params,
+        &single(&items),
+        &resume(first_break - DAY - 1),
+        0,
+        1,
+    )
+    .unwrap();
     assert_eq!(out.events[1].media_id.as_str(), clip_id("a"));
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
     assert_eq!(out.events[1].media_id.as_str(), clip_id("a"));
     assert_eq!(ROTATION_MEMORY_MS, DAY);
 }
@@ -1242,7 +1306,7 @@ fn an_extend_with_breaks_twice_matches_one_unbroken_run() {
 
         let params = with_breaks(mode, plan(11, 120, pools[0].clips(), pools[1].clips()));
         let end = later + HORIZON_MS;
-        let whole = generate(&params, &items, &Resume::default(), now, end).unwrap();
+        let whole = generate(&params, &single(&items), &Resume::default(), now, end).unwrap();
         // A whole program is stored, so read past `end` to its last segment.
         let stored = store.events_between(3, now, i64::MAX).unwrap();
         assert_eq!(stored, whole.events, "{mode:?}");
@@ -1308,7 +1372,7 @@ fn order_rotation_walks_the_pool_and_shuffle_draws_a_new_order_per_break() {
     let all: Vec<String> = ["a", "b", "c", "d", "e"].map(clip_id).to_vec();
 
     let order = with_breaks(Mode::Sequential, plan(10, 150, &ads, &[]));
-    let out = generate(&order, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&order, &single(&items), &Resume::default(), 0, 1).unwrap();
     for brk in breaks_of(&out.events) {
         assert_eq!(brk, all);
     }
@@ -1317,7 +1381,7 @@ fn order_rotation_walks_the_pool_and_shuffle_draws_a_new_order_per_break() {
         Mode::Sequential,
         with_rotation(Rotation::Shuffle, None, plan(10, 150, &ads, &[])),
     );
-    let out = generate(&shuffle, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&shuffle, &single(&items), &Resume::default(), 0, 1).unwrap();
     let breaks = breaks_of(&out.events);
     assert!(breaks.len() > 50);
     // Each break still plays every clip once.
@@ -1332,14 +1396,14 @@ fn order_rotation_walks_the_pool_and_shuffle_draws_a_new_order_per_break() {
     // The same channel and break starts draw the same orders; another
     // channel draws others.
     assert_eq!(
-        generate(&shuffle, &items, &Resume::default(), 0, 1).unwrap(),
+        generate(&shuffle, &single(&items), &Resume::default(), 0, 1).unwrap(),
         out
     );
     let other = Params {
         channel: 4,
         ..shuffle
     };
-    let elsewhere = generate(&other, &items, &Resume::default(), 0, 1).unwrap();
+    let elsewhere = generate(&other, &single(&items), &Resume::default(), 0, 1).unwrap();
     assert_ne!(breaks_of(&elsewhere.events), breaks);
 }
 
@@ -1354,7 +1418,7 @@ fn repeat_after_holds_a_clip_back_and_pads_a_break_none_can_fill() {
         let plan = with_rotation(rotation, Some(limit_ms), plan(10, 60, &ads, &slate));
         generate(
             &with_breaks(Mode::Sequential, plan),
-            &items,
+            &single(&items),
             &Resume::default(),
             0,
             1,
@@ -1418,7 +1482,7 @@ fn repeat_after_counts_from_the_airings_before_the_run() {
         ..Resume::default()
     };
 
-    let out = generate(&params, &items, &resume, 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &resume, 0, 1).unwrap();
 
     assert_eq!(out.events[1].media_id.as_str(), clip_id("b"));
 }
@@ -1445,7 +1509,7 @@ fn the_pad_pool_pads_a_break_before_the_filler_pool_with_idents() {
     // The shortest ident at least as long as the 70 s gap.
     let idents = [clip("ident", 5), clip("slate", 90), clip("card", 120)];
     let params = with_breaks(Mode::Sequential, pad(&idents));
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
     assert_eq!(out.events[1].kind, EventKind::Break);
     assert_eq!(
         gap(&out),
@@ -1455,7 +1519,7 @@ fn the_pad_pool_pads_a_break_before_the_filler_pool_with_idents() {
     // Else the longest ident, still exactly as long as the gap.
     let idents = [clip("ident", 5), clip("bumper", 10)];
     let params = with_breaks(Mode::Sequential, pad(&idents));
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
     assert_eq!(
         gap(&out),
         (EventKind::Ident, clip_id("bumper"), 70_000, 10_000)
@@ -1463,7 +1527,7 @@ fn the_pad_pool_pads_a_break_before_the_filler_pool_with_idents() {
 
     // With no ident the filler pool pads, as filler.
     let params = with_breaks(Mode::Sequential, pad(&[]));
-    let out = generate(&params, &items, &Resume::default(), 0, 1).unwrap();
+    let out = generate(&params, &single(&items), &Resume::default(), 0, 1).unwrap();
     assert_eq!(
         gap(&out),
         (EventKind::Filler, clip_id("filler"), 70_000, 70_000)
@@ -1523,7 +1587,7 @@ fn break_settings_survive_an_extend_restart_and_a_regeneration() {
             };
             let params = with_breaks(Mode::Shuffle, plan);
             let end = later + HORIZON_MS;
-            let whole = generate(&params, &items, &Resume::default(), now, end).unwrap();
+            let whole = generate(&params, &single(&items), &Resume::default(), now, end).unwrap();
             let stored = all_events(&store);
             assert_eq!(stored, whole.events, "{label}");
             assert_repeat_limit_holds(&stored, repeat_after as i64 * 1000);
@@ -1541,112 +1605,587 @@ fn break_settings_survive_an_extend_restart_and_a_regeneration() {
 
 // Weighted.
 
-fn weighted_params(weights: &Weights) -> Params<'_> {
+fn tag(name: &str) -> Source {
+    Source::JellyfinTag(name.into())
+}
+
+fn weighted(source: Source, weight: u32) -> WeightedSource {
+    WeightedSource { source, weight }
+}
+
+/// Weighted sources over disjoint pools: `a0`..`a2` weigh 1, `b0`..`b3` weigh
+/// 3 and `c0`..`c4` weigh 6, all one minute long, so a window of 20,000
+/// minutes holds 20,000 picks.
+struct Trio {
+    sources: [Source; 3],
+    pools: [Vec<MediaItem>; 3],
+}
+
+impl Trio {
+    fn new() -> Self {
+        Self {
+            sources: [tag("a"), tag("b"), tag("c")],
+            pools: [named("a", 3, 1), named("b", 4, 1), named("c", 5, 1)],
+        }
+    }
+
+    fn source_pools(&self) -> Vec<SourcePool<'_>> {
+        [1, 3, 6]
+            .into_iter()
+            .zip(&self.sources)
+            .zip(&self.pools)
+            .map(|((weight, source), items)| SourcePool {
+                source,
+                weight,
+                items,
+            })
+            .collect()
+    }
+}
+
+fn weighted_params(channel: u32) -> Params<'static> {
     Params {
-        channel: 3,
+        channel,
         mode: Mode::Weighted,
-        weights,
         breaks: None,
     }
 }
 
-/// How often `id` plays, as a share of all events.
-fn share(events: &[Event], id: &str) -> f64 {
-    let count = events.iter().filter(|e| e.media_id.as_str() == id).count();
+/// How often events of items whose id starts with `prefix` play, as a share of
+/// all events.
+fn share(events: &[Event], prefix: &str) -> f64 {
+    let count = events
+        .iter()
+        .filter(|e| e.media_id.as_str().starts_with(prefix))
+        .count();
     count as f64 / events.len() as f64
 }
 
 #[test]
-fn weighted_picks_approach_the_weights_and_repeat_for_a_fixed_seed() {
-    // One-minute items, so a 20,000-minute window holds 20,000 picks.
-    let items: Vec<MediaItem> = ["a", "b", "c"].iter().map(|id| item(id, 1)).collect();
-    let weights = Weights::from([("b".into(), 3), ("c".into(), 6)]);
+fn weighted_picks_approach_the_source_weights_and_repeat_for_a_fixed_seed() {
+    let trio = Trio::new();
+    let sources = trio.source_pools();
     let start = at(2026, 6, 1, 0, 0);
     let end = start + 20_000 * MINUTE;
     let run = |channel| {
-        let params = Params {
-            channel,
-            ..weighted_params(&weights)
-        };
-        generate(&params, &items, &Resume::default(), start, end).unwrap()
+        generate(
+            &weighted_params(channel),
+            &sources,
+            &Resume::default(),
+            start,
+            end,
+        )
+        .unwrap()
     };
 
     let out = run(3);
     assert_eq!(out.events.len(), 20_000);
-    for (id, expected) in [("a", 0.1), ("b", 0.3), ("c", 0.6)] {
-        let share = share(&out.events, id);
-        assert!((share - expected).abs() < 0.015, "{id}: {share}");
+    for (prefix, expected) in [("a", 0.1), ("b", 0.3), ("c", 0.6)] {
+        let share = share(&out.events, prefix);
+        assert!((share - expected).abs() < 0.015, "{prefix}: {share}");
     }
     assert_eq!(out, run(3));
     assert_ne!(out.events, run(4).events);
 }
 
 #[test]
-fn weighted_without_weights_is_uniform_and_skips_zero_runtimes() {
-    let mut items: Vec<MediaItem> = ["a", "b"].iter().map(|id| item(id, 1)).collect();
-    items.push(item("zero", 0));
+fn a_source_with_more_items_does_not_play_more_often() {
+    // The first draw picks the source by weight alone: sources of 1 and 40
+    // items with equal weights play equally often.
+    let few = [item("f0", 1)];
+    let many: Vec<MediaItem> = (0..40).map(|i| item(&format!("m{i}"), 1)).collect();
+    let (few_source, many_source) = (tag("few"), tag("many"));
+    let sources = [
+        SourcePool {
+            source: &few_source,
+            weight: 1,
+            items: &few,
+        },
+        SourcePool {
+            source: &many_source,
+            weight: 1,
+            items: &many,
+        },
+    ];
     let start = at(2026, 6, 1, 0, 0);
     let out = generate(
-        &weighted_params(&NO_WEIGHTS),
-        &items,
+        &weighted_params(3),
+        &sources,
         &Resume::default(),
         start,
         start + 10_000 * MINUTE,
     )
     .unwrap();
-    assert!((share(&out.events, "a") - 0.5).abs() < 0.02);
-    assert_eq!(share(&out.events, "zero"), 0.0);
-    assert_eq!(out.notes, [Note::SkippedZeroRuntime { count: 1 }]);
+    assert!((share(&out.events, "f") - 0.5).abs() < 0.02);
+}
+
+/// The picks of the items whose ids start with `prefix`, in order.
+fn picks_of<'a>(events: &'a [Event], prefix: &str) -> Vec<&'a str> {
+    events
+        .iter()
+        .map(|e| e.media_id.as_str())
+        .filter(|id| id.starts_with(prefix))
+        .collect()
 }
 
 #[test]
-fn a_weight_for_a_title_not_in_the_pool_is_noted() {
-    let weights = Weights::from([("a".into(), 2), ("Gone".into(), 5)]);
+fn no_item_repeats_inside_its_sources_cooldown() {
+    // Items of different lengths, over a week through the 25-hour day and one
+    // through the 23-hour day.
+    let sources = [tag("a"), tag("b"), tag("c")];
+    let pools = [named("a", 2, 21), named("b", 7, 33), named("c", 13, 47)];
+    let pooled: Vec<SourcePool<'_>> = [2, 1, 5]
+        .into_iter()
+        .zip(&sources)
+        .zip(&pools)
+        .map(|((weight, source), items)| SourcePool {
+            source,
+            weight,
+            items,
+        })
+        .collect();
+    for start in [at(2026, 10, 30, 5, 0), at(2026, 3, 6, 6, 0)] {
+        let out = generate(
+            &weighted_params(3),
+            &pooled,
+            &Resume::default(),
+            start,
+            start + HORIZON_MS,
+        )
+        .unwrap();
+        assert_covers(&out.events, start, start + HORIZON_MS);
+        for (prefix, n) in [("a", 2), ("b", 7), ("c", 13)] {
+            let picks = picks_of(&out.events, prefix);
+            assert!(picks.len() > 2 * n, "{prefix}: {}", picks.len());
+            assert_cooldown_holds(&picks, n);
+        }
+    }
+}
+
+#[test]
+fn every_item_of_a_weighted_source_plays_within_a_week() {
+    let trio = Trio::new();
+    let sources = trio.source_pools();
+    let start = at(2026, 6, 1, 0, 0);
     let out = generate(
-        &weighted_params(&weights),
-        &pool(&["a", "b"]),
+        &weighted_params(3),
+        &sources,
         &Resume::default(),
-        0,
-        DAY,
+        start,
+        start + 7 * DAY,
     )
     .unwrap();
+    for item in trio.pools.iter().flatten() {
+        assert!(
+            out.events.iter().any(|e| e.media_id == item.id),
+            "{} never played",
+            item.id.as_str()
+        );
+    }
+}
+
+#[test]
+fn a_sources_cooldown_counts_the_history_before_the_run() {
+    // `a` has four items, so three are cooling down: after a2, a1 and a0 only
+    // a3 can play from it. `b` has one item and no cooldown.
+    let (a, b) = (tag("a"), tag("b"));
+    let (a_items, b_items) = (named("a", 4, 1), named("b", 1, 1));
+    let sources = [
+        SourcePool {
+            source: &a,
+            weight: 1,
+            items: &a_items,
+        },
+        SourcePool {
+            source: &b,
+            weight: 1,
+            items: &b_items,
+        },
+    ];
+    let resume = Resume {
+        recent: ["a2", "x", "a1", "a0"]
+            .into_iter()
+            .map(MediaId::new)
+            .collect(),
+        ..Resume::default()
+    };
+    // One pick for each of many channels, which seed differently: whenever it
+    // is from `a`, it is a3.
+    let start = at(2026, 6, 1, 0, 0);
+    let mut from_a = 0;
+    for channel in 1..=40 {
+        let out = generate(
+            &weighted_params(channel),
+            &sources,
+            &resume,
+            start,
+            start + MINUTE,
+        )
+        .unwrap();
+        let id = out.events[0].media_id.as_str();
+        if id.starts_with('a') {
+            assert_eq!(id, "a3", "channel {channel}");
+            from_a += 1;
+        }
+    }
+    assert!(from_a > 0, "the check never met a pick from a");
+}
+
+#[test]
+fn a_weighted_run_resumed_at_a_program_boundary_matches_an_unbroken_run() {
+    let trio = Trio::new();
+    let sources = trio.source_pools();
+    let start = at(2026, 6, 1, 0, 0);
+    let end = start + 400 * MINUTE;
+    let history = ["old", "c1", "b3"];
+    let run = |recent: &[&str], from, to| {
+        let resume = Resume {
+            recent: recent.iter().map(|id| MediaId::new(*id)).collect(),
+            ..Resume::default()
+        };
+        generate(&weighted_params(3), &sources, &resume, from, to).unwrap()
+    };
+    let whole = run(&history, start, end);
+    for cut in [1, 2, 7, 50, 200, 399] {
+        let boundary = whole.events[cut].start_ms;
+        let first = run(&history, start, boundary);
+        assert_eq!(first.events, whole.events[..cut]);
+        // The stored history, newest first: this run's programs, then the old.
+        let mut recent: Vec<&str> = ids(&first.events);
+        recent.reverse();
+        recent.extend(history);
+        let rest = run(&recent, boundary, end);
+        assert_eq!(rest.events, whole.events[cut..], "cut at {cut}");
+    }
+}
+
+#[test]
+fn a_source_with_nothing_playable_is_skipped_and_noted() {
+    let (a, empty, zero, b) = (tag("a"), tag("empty"), tag("zero"), tag("b"));
+    let a_items = named("a", 3, 1);
+    let zero_items = [item("z0", 0)];
+    let b_items = named("b", 3, 1);
+    let sources = [
+        SourcePool {
+            source: &a,
+            weight: 1,
+            items: &a_items,
+        },
+        SourcePool {
+            source: &empty,
+            weight: 50,
+            items: &[],
+        },
+        SourcePool {
+            source: &zero,
+            weight: 50,
+            items: &zero_items,
+        },
+        SourcePool {
+            source: &b,
+            weight: 1,
+            items: &b_items,
+        },
+    ];
+    let start = at(2026, 6, 1, 0, 0);
+    let out = generate(
+        &weighted_params(3),
+        &sources,
+        &Resume::default(),
+        start,
+        start + 5_000 * MINUTE,
+    )
+    .unwrap();
+
+    // The skipped sources' weight of 100 does not count: a and b split the
+    // picks.
+    assert!((share(&out.events, "a") - 0.5).abs() < 0.03);
+    assert_eq!(share(&out.events, "z"), 0.0);
     assert_eq!(
         out.notes,
-        [Note::WeightNotInPool {
-            title: "Gone".into()
-        }]
+        [
+            Note::SourceNotPlayable { source: empty },
+            Note::SkippedZeroRuntime { count: 1 },
+            Note::SourceNotPlayable { source: zero },
+        ]
     );
+}
+
+#[test]
+fn a_weighted_channel_with_nothing_playable_is_dead_air() {
+    let (a, b) = (tag("a"), tag("b"));
+    let sources = [
+        SourcePool {
+            source: &a,
+            weight: 1,
+            items: &[],
+        },
+        SourcePool {
+            source: &b,
+            weight: 2,
+            items: &[],
+        },
+    ];
+    let out = generate(&weighted_params(3), &sources, &Resume::default(), 0, DAY).unwrap();
+    assert!(out.events.is_empty());
+    assert_eq!(
+        out.notes,
+        [
+            Note::SourceNotPlayable { source: a },
+            Note::SourceNotPlayable { source: b },
+            Note::NoPlayableItems,
+        ]
+    );
+}
+
+fn weighted_channel() -> Channel {
+    let mut channel = channel_with_breaks(Mode::Weighted);
+    channel.plan = Plan::Fixed {
+        sources: vec![weighted(tag("x"), 3), weighted(tag("y"), 1)],
+        mode: Mode::Weighted,
+    };
+    channel
+}
+
+fn weighted_pools() -> Vec<(Source, Vec<MediaItem>)> {
+    vec![(tag("x"), named("x", 6, 22)), (tag("y"), named("y", 3, 41))]
+}
+
+/// The events of one unbroken run of `channel`'s weighted lineup over
+/// `[from, to)`, with its breaks.
+fn unbroken_weighted(
+    channel: &Channel,
+    pools: &[(Source, Vec<MediaItem>)],
+    clips: &[ClipPool],
+    from: i64,
+    to: i64,
+) -> Vec<Event> {
+    let Plan::Fixed { sources, mode } = &channel.plan else {
+        unreachable!()
+    };
+    let lane = extend::lane_of(pools, *mode, sources);
+    let params = with_breaks(*mode, plan(11, 120, clips[0].clips(), clips[1].clips()));
+    generate(&params, &lane.sources, &Resume::default(), from, to)
+        .unwrap()
+        .events
 }
 
 #[test]
 fn a_weighted_extend_resumed_later_matches_one_unbroken_run() {
-    let items = pool(&["a", "b", "c", "d"]);
-    let weights = Weights::from([("a".into(), 5)]);
-    let mut channel = channel(3, Mode::Weighted);
-    channel.plan = Plan::Fixed {
-        source: Source::JellyfinLibrary("All".into()),
-        mode: Mode::Weighted,
-        weights: weights.clone(),
-    };
+    let channel = weighted_channel();
+    let pools = weighted_pools();
+    let clips = clip_pools();
     let now = at(2026, 6, 1, 12, 0);
-    let later = now + 3 * DAY;
+    let later = now + 2 * DAY + 11 * MINUTE;
     let mut store = setup();
 
-    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
-    extend_fixed(&mut store, &channel, &items, &[], later, true).unwrap();
+    extend(&mut store, &channel, &pools, &clips, Tz::UTC, now, true).unwrap();
+    extend(&mut store, &channel, &pools, &clips, Tz::UTC, later, true).unwrap();
 
+    let stored = store.events_between(3, now, i64::MAX).unwrap();
+    assert_eq!(
+        stored,
+        unbroken_weighted(&channel, &pools, &clips, now, later + HORIZON_MS)
+    );
+    assert!(stored.iter().any(|e| e.kind == EventKind::Break));
+    let played = programs(&stored);
+    for (prefix, n) in [("x", 6), ("y", 3)] {
+        let picks: Vec<&str> = played
+            .iter()
+            .copied()
+            .filter(|id| id.starts_with(prefix))
+            .collect();
+        assert!(picks.len() > 2 * n, "{prefix}");
+        assert_cooldown_holds(&picks, n);
+    }
+}
+
+#[test]
+fn a_weighted_extend_reads_back_past_ids_no_longer_in_any_pool() {
+    // Items of 3 days: x has 12 (cooling 9) and y has 4 (cooling 3), and one
+    // page is 32 rows. The newest 40 stored programs are in no pool, so the
+    // items cooling down lie beyond the first page.
+    let pools = vec![
+        (tag("x"), named("x", 12, 3 * 24 * 60)),
+        (tag("y"), named("y", 4, 3 * 24 * 60)),
+    ];
+    let mut channel = channel(3, Mode::Weighted);
+    channel.plan = Plan::Fixed {
+        sources: vec![weighted(tag("x"), 1), weighted(tag("y"), 1)],
+        mode: Mode::Weighted,
+    };
+    let mut history: Vec<String> = (0..9).map(|i| format!("x{i}")).collect();
+    history.extend((0..3).map(|i| format!("y{i}")));
+    history.extend((0..40).map(|i| format!("gone{i}")));
+    let now = at(2026, 6, 1, 12, 0);
+    let count = i64::try_from(history.len()).unwrap();
+    let old: Vec<Event> = (0..count)
+        .zip(&history)
+        .map(|(i, id)| {
+            let start = now - (count - i) * 30 * MINUTE;
+            stored(start, start + 30 * MINUTE, id, EventKind::Program)
+        })
+        .collect();
+    let mut store = setup();
+    store.write_events(3, &old).unwrap();
+
+    extend(&mut store, &channel, &pools, &[], Tz::UTC, now, true).unwrap();
+
+    let events = store.events_between(3, now, i64::MAX).unwrap();
+    let recent: Vec<MediaId> = history
+        .iter()
+        .rev()
+        .map(|id| MediaId::new(id.as_str()))
+        .collect();
+    let Plan::Fixed { sources, mode } = &channel.plan else {
+        unreachable!()
+    };
+    let lane = extend::lane_of(&pools, *mode, sources);
+    let resume = Resume {
+        recent,
+        ..Resume::default()
+    };
     let whole = generate(
-        &weighted_params(&weights),
-        &items,
-        &Resume::default(),
+        &weighted_params(3),
+        &lane.sources,
+        &resume,
         now,
-        later + HORIZON_MS,
+        now + HORIZON_MS,
     )
     .unwrap();
-    assert_eq!(
-        store.events_between(3, now, i64::MAX).unwrap(),
-        whole.events
+    assert_eq!(events, whole.events);
+    // x0..x8 and y0..y2 are cooling down, so the first pick from each source
+    // is one of the others.
+    let first_x = picks_of(&events, "x").first().copied();
+    let first_y = picks_of(&events, "y").first().copied();
+    assert!(
+        first_x.is_none_or(|id| ["x9", "x10", "x11"].contains(&id)),
+        "{first_x:?}"
     );
+    assert!(first_y.is_none_or(|id| id == "y3"), "{first_y:?}");
+    assert!(first_x.is_some() || first_y.is_some());
+}
+
+#[test]
+fn a_weighted_regeneration_with_unchanged_inputs_changes_nothing() {
+    let channel = weighted_channel();
+    let pools = weighted_pools();
+    let clips = clip_pools();
+    let now = at(2026, 6, 1, 12, 0);
+    let mut store = setup();
+    extend(&mut store, &channel, &pools, &clips, Tz::UTC, now, true).unwrap();
+    let before = all_events(&store);
+
+    for later in [now, now + 90 * MINUTE, now + 2 * DAY] {
+        let result =
+            regenerate(&mut store, &channel, &pools, &clips, Tz::UTC, later, true).unwrap();
+        // Regenerating later also extends the schedule; the old part is the
+        // same.
+        regenerated_from(&result);
+        let after = all_events(&store);
+        assert_eq!(after[..before.len()], before[..], "{later}");
+    }
+}
+
+/// A blocks channel with a weighted block: cartoons and shorts, 3 to 1, from
+/// 18:00 to 23:00 every evening, and a shuffle block of drama 06:00 to 12:00.
+fn weighted_block_channel() -> Channel {
+    let mut channel = channel_with_breaks(Mode::Sequential);
+    channel.plan = Plan::Blocks {
+        blocks: vec![
+            Block {
+                sources: vec![weighted(tag("cartoons"), 3), weighted(tag("shorts"), 1)],
+                ..block(&[], (18, 0), (23, 0), "cartoons", Mode::Weighted)
+            },
+            block(&[], (6, 0), (12, 0), "drama", Mode::Shuffle),
+        ],
+        default: None,
+    };
+    channel
+}
+
+fn weighted_block_pools() -> Vec<(Source, Vec<MediaItem>)> {
+    vec![
+        (tag("cartoons"), named("c", 6, 22)),
+        (tag("shorts"), named("s", 3, 11)),
+        (tag("drama"), named("d", 5, 44)),
+    ]
+}
+
+#[test]
+fn a_weighted_block_extended_twice_matches_one_unbroken_run_across_dst() {
+    let channel = weighted_block_channel();
+    let pools = weighted_block_pools();
+    let clips = clip_pools();
+    // Through the 25-hour day, Sunday November 1.
+    let now = at(2026, 10, 28, 12, 0);
+    let later = now + 2 * DAY + 11 * MINUTE;
+    let mut store = setup();
+
+    extend(&mut store, &channel, &pools, &clips, CHICAGO, now, true).unwrap();
+    extend(&mut store, &channel, &pools, &clips, CHICAGO, later, true).unwrap();
+
+    let Plan::Blocks { blocks, .. } = &channel.plan else {
+        unreachable!()
+    };
+    let end = later + HORIZON_MS;
+    let layout = Layout {
+        channel: 3,
+        breaks: Some(plan(11, 120, clips[0].clips(), clips[1].clips())),
+        spans: spans(blocks, CHICAGO, now, end).unwrap(),
+        lanes: blocks
+            .iter()
+            .map(|block| extend::lane_of(&pools, block.mode, &block.sources))
+            .collect(),
+        default: None,
+        filler: clips[1].clips(),
+        nights: Vec::new(),
+        sign_off: None,
+    };
+    let whole = generate_blocks(&layout, &Resume::default(), now, end).unwrap();
+
+    let stored = store.events_between(3, now, i64::MAX).unwrap();
+    assert_eq!(stored, whole.events);
+    // Both sources of the weighted block played, each inside its cooldown.
+    let played = programs(&stored);
+    for (prefix, n) in [("c", 6), ("s", 3)] {
+        let picks: Vec<&str> = played
+            .iter()
+            .copied()
+            .filter(|id| id.starts_with(prefix))
+            .collect();
+        assert!(picks.len() > 2 * n, "{prefix}");
+        assert_cooldown_holds(&picks, n);
+    }
+}
+
+#[test]
+fn a_weighted_block_regeneration_with_unchanged_inputs_changes_nothing() {
+    let channel = weighted_block_channel();
+    let pools = weighted_block_pools();
+    let clips = clip_pools();
+    let now = at(2026, 10, 28, 12, 0);
+    let mut store = setup();
+    extend(&mut store, &channel, &pools, &clips, CHICAGO, now, true).unwrap();
+    let before = all_events(&store);
+
+    // Regenerating at the same time rewrites the same week; a later one also
+    // extends it and keeps what was there.
+    let result = regenerate(&mut store, &channel, &pools, &clips, CHICAGO, now, true).unwrap();
+    regenerated_from(&result);
+    assert_eq!(all_events(&store), before);
+    regenerate(
+        &mut store,
+        &channel,
+        &pools,
+        &clips,
+        CHICAGO,
+        now + DAY + 5 * MINUTE,
+        true,
+    )
+    .unwrap();
+    let after = all_events(&store);
+    assert_eq!(after[..before.len()], before[..]);
 }
 
 // Blocks.
@@ -1668,9 +2207,8 @@ fn block(days: &[Day], start: (u16, u16), end: (u16, u16), tag: &str, mode: Mode
         days: if days.is_empty() { &every } else { days }.to_vec(),
         start_minute: start.0 * 60 + start.1,
         end_minute: end.0 * 60 + end.1,
-        source: Source::JellyfinTag(tag.into()),
+        sources: vec![WeightedSource::new(Source::JellyfinTag(tag.into()))],
         mode,
-        weights: Weights::new(),
     }
 }
 
@@ -1681,12 +2219,16 @@ fn named(prefix: &str, n: usize, minutes: u64) -> Vec<MediaItem> {
         .collect()
 }
 
-fn lane<'a>(block: &'a Block, pool: &'a [MediaItem]) -> Lane<'a> {
+/// A lane with `pool` as its one source.
+fn solo(mode: Mode, pool: &[MediaItem]) -> Lane<'_> {
     Lane {
-        mode: block.mode,
-        weights: &block.weights,
-        pool,
+        mode,
+        sources: single(pool).to_vec(),
     }
+}
+
+fn lane<'a>(block: &'a Block, pool: &'a [MediaItem]) -> Lane<'a> {
+    solo(block.mode, pool)
 }
 
 fn layout<'a>(
@@ -1809,14 +2351,7 @@ fn programs_start_at_a_block_start_and_are_cut_at_its_end() {
     let blocks = [block(&[Day::Sat], (6, 0), (12, 0), "c", Mode::Sequential)];
     let cartoons = named("c", 3, 25);
     let movies = named("m", 4, 95);
-    let lanes = vec![
-        lane(&blocks[0], &cartoons),
-        Lane {
-            mode: Mode::Shuffle,
-            weights: &NO_WEIGHTS,
-            pool: &movies,
-        },
-    ];
+    let lanes = vec![lane(&blocks[0], &cartoons), solo(Mode::Shuffle, &movies)];
     // A week that holds the 25-hour day, Sunday November 1.
     let start = at(2026, 10, 30, 5, 0);
     let end = start + HORIZON_MS;
@@ -1939,14 +2474,7 @@ fn time_with_nothing_to_play_is_dead_air_and_noted() {
 fn a_block_with_nothing_playable_falls_back_to_the_default() {
     let blocks = [block(&[Day::Mon], (6, 0), (7, 0), "a", Mode::Sequential)];
     let default = named("d", 2, 30);
-    let lanes = vec![
-        lane(&blocks[0], &[]),
-        Lane {
-            mode: Mode::Sequential,
-            weights: &NO_WEIGHTS,
-            pool: &default,
-        },
-    ];
+    let lanes = vec![lane(&blocks[0], &[]), solo(Mode::Sequential, &default)];
     let six = at(2026, 6, 1, 11, 0);
     let layout = layout(&blocks, lanes, Some(1), &[], six, six + 60 * MINUTE);
 
@@ -1976,9 +2504,8 @@ fn blocks_channel_with_breaks() -> Channel {
             ),
         ],
         default: Some(Lineup {
-            source: Source::JellyfinTag("movies".into()),
+            sources: vec![WeightedSource::new(Source::JellyfinTag("movies".into()))],
             mode: Mode::Weighted,
-            weights: Weights::from([("m1".into(), 4)]),
         }),
     };
     channel
@@ -2012,11 +2539,7 @@ fn a_blocks_extend_twice_matches_one_unbroken_run_across_dst() {
     let lanes = vec![
         lane(&blocks[0], &pools[0].1),
         lane(&blocks[1], &pools[1].1),
-        Lane {
-            mode: default.mode,
-            weights: &default.weights,
-            pool: &pools[2].1,
-        },
+        solo(default.mode, &pools[2].1),
     ];
     let end = later + HORIZON_MS;
     let layout = Layout {
@@ -2069,11 +2592,7 @@ fn a_blocks_extend_with_break_settings_matches_one_unbroken_run() {
         let lanes = vec![
             lane(&blocks[0], &pools[0].1),
             lane(&blocks[1], &pools[1].1),
-            Lane {
-                mode: default.mode,
-                weights: &default.weights,
-                pool: &pools[2].1,
-            },
+            solo(default.mode, &pools[2].1),
         ];
         let end = later + HORIZON_MS;
         let plan = BreakPlan {
@@ -2109,11 +2628,7 @@ fn a_break_clip_cut_off_by_a_block_end_does_not_count_toward_repeat_after() {
     // continues with `b`, which a kept airing at 12:00 would hold back.
     let shows = [item("show", 22)];
     let ads = [clip("a", 60), clip("b", 60)];
-    let lane = Lane {
-        mode: Mode::Sequential,
-        weights: &NO_WEIGHTS,
-        pool: &shows,
-    };
+    let lane = solo(Mode::Sequential, &shows);
     let cut = 11 * MINUTE + 30_000;
     let layout = Layout {
         channel: 3,
@@ -2122,7 +2637,7 @@ fn a_break_clip_cut_off_by_a_block_end_does_not_count_toward_repeat_after() {
             Some(15 * MINUTE),
             plan(11, 120, &ads, &[]),
         )),
-        lanes: vec![lane, lane],
+        lanes: vec![lane.clone(), lane],
         default: None,
         spans: vec![
             Span {

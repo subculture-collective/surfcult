@@ -7,7 +7,6 @@
 mod duration;
 mod raw;
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -90,9 +89,9 @@ pub struct SignOff {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Plan {
     Fixed {
-        source: Source,
+        /// One source, with weight 1, unless the mode is `weighted`.
+        sources: Vec<WeightedSource>,
         mode: Mode,
-        weights: Weights,
     },
     /// Time-of-day blocks. Time no block covers plays `default` when there is
     /// one, and otherwise the channel's `filler` pool.
@@ -107,11 +106,12 @@ impl Plan {
     /// caller resolves into program pools.
     pub fn sources(&self) -> Vec<&Source> {
         let all: Vec<&Source> = match self {
-            Self::Fixed { source, .. } => vec![source],
+            Self::Fixed { sources, .. } => sources.iter().map(|entry| &entry.source).collect(),
             Self::Blocks { blocks, default } => blocks
                 .iter()
-                .map(|block| &block.source)
-                .chain(default.iter().map(|lineup| &lineup.source))
+                .flat_map(|block| &block.sources)
+                .chain(default.iter().flat_map(|lineup| &lineup.sources))
+                .map(|entry| &entry.source)
                 .collect(),
         };
         let mut distinct: Vec<&Source> = Vec::new();
@@ -124,18 +124,29 @@ impl Plan {
     }
 }
 
-/// Relative weights for `mode = "weighted"`, keyed by item title. Every pool
-/// item whose title equals a key has that weight; any other item weighs 1.
-/// Weights are whole numbers of at least 1.
-pub type Weights = BTreeMap<String, u32>;
+/// A source and its share of the picks in a `weighted` lineup. A pick chooses
+/// a source with probability proportional to its weight, a whole number of at
+/// least 1, and then an item from that source. Every source of a lineup in
+/// another mode has weight 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeightedSource {
+    pub source: Source,
+    pub weight: u32,
+}
 
-/// A source played in a mode, with weights when the mode is `weighted`: a
-/// blocks channel's `default`.
+impl WeightedSource {
+    /// A source with weight 1.
+    pub fn new(source: Source) -> Self {
+        Self { source, weight: 1 }
+    }
+}
+
+/// The sources played in a mode: a blocks channel's `default`. There is
+/// exactly one source unless the mode is `weighted`, which has one or more.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lineup {
-    pub source: Source,
+    pub sources: Vec<WeightedSource>,
     pub mode: Mode,
-    pub weights: Weights,
 }
 
 /// Where a channel's items come from in Jellyfin.
@@ -168,7 +179,7 @@ pub enum Day {
     Sun,
 }
 
-/// A time-of-day window with its own source and mode.
+/// A time-of-day window with its own sources and mode.
 ///
 /// Times are minutes after midnight in the config time zone. `end_minute` may be
 /// 1440 (24:00); a block does not wrap past midnight. `days` are the local
@@ -178,9 +189,9 @@ pub struct Block {
     pub days: Vec<Day>,
     pub start_minute: u16,
     pub end_minute: u16,
-    pub source: Source,
+    /// One source, with weight 1, unless the mode is `weighted`.
+    pub sources: Vec<WeightedSource>,
     pub mode: Mode,
-    pub weights: Weights,
 }
 
 #[derive(Debug, Clone, PartialEq)]

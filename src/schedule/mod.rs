@@ -2,13 +2,13 @@
 //!
 //! [`extend`] keeps a channel's week filled in the
 //! [`Store`](crate::store::Store). Inside it, `generate` is a pure function. It
-//! takes a channel's number, mode, weights and break plan (with the clips it
-//! may use), the items to play, the programs and last break clip before the
-//! window and a time window, and it returns
+//! takes a channel's number, mode and break plan (with the clips it may use),
+//! the pools to play, each with its weight, the programs and last break clip
+//! before the window and a time window, and it returns
 //! [`Event`](crate::timeline::Event)s and the new cursor. It reads no clock and
 //! does no I/O, so the same inputs always give the same events.
 //! `generate_blocks` is its counterpart for a blocks channel: it takes one
-//! lane (pool, mode and weights) per block and for the default, the spans the
+//! lane (pools with their weights, and a mode) per block and for the default, the spans the
 //! blocks cover in epoch time, and the filler clips.
 //!
 //! Times are Unix epoch milliseconds (`i64`), as in [`crate::timeline`].
@@ -128,19 +128,33 @@
 //!
 //! # Weighted
 //!
-//! Each program slot picks one playable item with probability proportional to
-//! its weight. `weights` in `channels.toml` maps an item title to a whole
-//! number of at least 1; every pool item with that title has that weight and
-//! every other item weighs 1. Over many picks each item's share approaches its
-//! weight divided by the total.
+//! A weighted lineup has several sources, each with a weight, and each program
+//! slot first picks a source and then an item from it. `sources` in
+//! `channels.toml` lists them, for example
+//! `{ jellyfin_series = "The Simpsons", weight = 3 }`; a weight is a whole
+//! number of at least 1 and is 1 when left out. Over many picks a source's
+//! share of the programs approaches its weight divided by the total, however
+//! many items it holds.
 //!
-//! - **Seed.** The pick draws a number below the total weight from SplitMix64
-//!   seeded with the channel number and the slot's `start_ms`, as the shuffle
-//!   does, and takes the item whose running total first exceeds it, in pool
-//!   order. It reads no history, so a resumed run matches an unbroken one.
-//! - **Limits.** There is no cooldown: an item can play twice in a row, and a
-//!   heavy item often will. A weight whose title matches no playable item is
-//!   reported with [`Note::WeightNotInPool`].
+//! - **Seed.** One SplitMix64 per slot, seeded with the channel number and the
+//!   slot's `start_ms` as the shuffle is. Its first draw is a number below the
+//!   total weight of the playable sources; the source whose running total of
+//!   weights first exceeds it, in config order, is picked. Its next draw
+//!   picks the item, as the shuffle does, from the source's pool.
+//! - **Cooldown.** Each source's pool has its own shuffle cooldown (see
+//!   Shuffle): with N distinct playable items in it, the N - k most recently
+//!   played distinct items of that pool, k = max(1, ceil(N / 4)), cannot be
+//!   picked from it. The history is the programs before the slot, whichever
+//!   source picked them, that are in the pool, so an item two sources share
+//!   cools down in both. No item repeats within N - k + 1 consecutive programs
+//!   of its pool, and a one-item source plays that item whenever it is picked.
+//! - **Empty sources.** A source with no playable item is left out of the
+//!   draw and reported with [`Note::SourceNotPlayable`]; the others share the
+//!   picks by their weights. With none playable the lane has nothing to
+//!   play, like any lane, and says [`Note::NoPlayableItems`].
+//! - **History.** `extend` reads recent programs until every source's pool
+//!   holds its N - k cooling items or the history ends, as for a shuffle, so
+//!   a resumed run matches an unbroken one.
 //!
 //! # Blocks
 //!
@@ -218,12 +232,12 @@
 //! recent stored break clips, where the rotation continues and the repeat
 //! limit counts from.
 //! `extend` reads the schedule end and where to resume, then writes the new
-//! events in one transaction. A sequential or weighted channel reads only its
-//! last stored program. A blocks channel reads its recent programs until each
+//! events in one transaction. A sequential channel reads only its last stored
+//! program. A blocks channel reads its recent programs until each
 //! sequential block has found one program from its pool and each shuffle
-//! block its N - k items, or the history ends. A shuffle channel reads its
-//! recent programs back to the N - k
-//! distinct pool items cooling down. Usually that is one page of twice the
+//! block, and each source of a weighted block, its N - k items, or the history
+//! ends. A shuffle or weighted channel reads its recent programs back to the
+//! N - k distinct items cooling down in each pool. Usually that is one page of twice the
 //! pool's length; it reads further back when the recent programs are mostly
 //! ids no longer in the pool, and reads the whole history when that holds
 //! fewer than N - k distinct pool items. There is no separate cursor to write,
@@ -269,6 +283,7 @@ mod tests;
 use std::error::Error;
 use std::fmt;
 
+use crate::config::Source;
 use crate::library::MediaId;
 use crate::store::StoreError;
 use crate::timeline::Event;
@@ -278,7 +293,8 @@ pub use breaks::{ROTATION_MEMORY_MS, SNAP_MS, clip_media_id};
 pub use extend::{Extended, HORIZON_MS, extend};
 pub use fit::{FIT_TOLERANCE_MS, Fit, Fitted, fit, record_fit};
 pub(crate) use generate::{
-    Lane, Layout, Params, Resume, cooling_target, generate, generate_blocks, generate_fixed,
+    Lane, Layout, Params, Resume, SourcePool, cooling_target, generate, generate_blocks,
+    generate_fixed,
 };
 pub use regenerate::{FREEZE_MS, regenerate};
 
@@ -311,9 +327,9 @@ pub enum Note {
     /// out, because the break pool's clips did not fill them and the channel
     /// has no filler clip to pad the rest.
     ShortBreaks { count: usize },
-    /// A weighted lane has a weight for this title and no playable item has
-    /// it, so the weight does nothing.
-    WeightNotInPool { title: String },
+    /// A source of a weighted lane has no item with a runtime above 0, so it
+    /// is left out of the picks.
+    SourceNotPlayable { source: Source },
     /// The channel had this many milliseconds with nothing to play and no
     /// filler clip: a blocks channel's time with no block or playable
     /// default, or the gap before a sign-off. That time has no events.

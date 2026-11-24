@@ -6,11 +6,11 @@ use std::collections::HashSet;
 use super::blocks::{Span, spans};
 use super::sign_off::{clip as sign_off_clip, nights};
 use super::{
-    BreakPlan, Generated, Lane, Layout, Note, Params, Resume, ScheduleError, cooling_target,
-    generate, generate_blocks, generate_fixed,
+    BreakPlan, Generated, Lane, Layout, Note, Params, Resume, ScheduleError, SourcePool,
+    cooling_target, generate, generate_blocks, generate_fixed,
 };
 use crate::clips::Pool;
-use crate::config::{Channel, Mode, Plan, Source, Tz};
+use crate::config::{Channel, Mode, Plan, Source, Tz, WeightedSource};
 use crate::library::{MediaId, MediaItem};
 use crate::store::Store;
 
@@ -113,12 +113,6 @@ pub(super) fn fill(
             .find(|pool| pool.name() == name)
             .map_or(&[][..], Pool::clips)
     };
-    let pool_of = |source: &Source| {
-        pools
-            .iter()
-            .find(|(pooled, _)| pooled == source)
-            .map_or(&[][..], |(_, items)| items.as_slice())
-    };
     let breaks = channel.breaks.as_ref().map(|breaks| BreakPlan {
         every_ms: millis(breaks.every),
         length_ms: millis(breaks.length),
@@ -160,24 +154,15 @@ pub(super) fn fill(
     };
 
     let generated = match &channel.plan {
-        Plan::Fixed {
-            source,
-            mode,
-            weights,
-        } => {
-            let pool = pool_of(source);
-            // Sequential and weighted need only the last earlier program.
-            // Shuffle needs the programs back to the N - k distinct pool items
-            // cooling down.
-            let lane = Lane {
-                mode: *mode,
-                weights,
-                pool,
-            };
-            let recent = if *mode == Mode::Shuffle {
-                recent_history(store, n, &[lane], from_ms)?
-            } else {
+        Plan::Fixed { sources, mode } => {
+            let lane = lane_of(pools, *mode, sources);
+            // Sequential needs only the last earlier program. Shuffle needs
+            // the programs back to the N - k distinct pool items cooling
+            // down, and weighted the same for each of its sources.
+            let recent = if *mode == Mode::Sequential {
                 store.last_program_before(n, from_ms)?.into_iter().collect()
+            } else {
+                recent_history(store, n, std::slice::from_ref(&lane), from_ms)?
             };
             let resume = Resume {
                 recent,
@@ -189,10 +174,9 @@ pub(super) fn fill(
                 let params = Params {
                     channel: n,
                     mode: *mode,
-                    weights,
                     breaks,
                 };
-                generate(&params, pool, &resume, from_ms, horizon_ms)?
+                generate(&params, &lane.sources, &resume, from_ms, horizon_ms)?
             } else {
                 // One lane over all time, cut by the nights off the air, with
                 // the filler pool for the gap before each sign-off.
@@ -216,18 +200,10 @@ pub(super) fn fill(
         Plan::Blocks { blocks, default } => {
             let mut lanes: Vec<Lane<'_>> = blocks
                 .iter()
-                .map(|block| Lane {
-                    mode: block.mode,
-                    weights: &block.weights,
-                    pool: pool_of(&block.source),
-                })
+                .map(|block| lane_of(pools, block.mode, &block.sources))
                 .collect();
             let default = default.as_ref().map(|lineup| {
-                lanes.push(Lane {
-                    mode: lineup.mode,
-                    weights: &lineup.weights,
-                    pool: pool_of(&lineup.source),
-                });
+                lanes.push(lane_of(pools, lineup.mode, &lineup.sources));
                 lanes.len() - 1
             });
             let recent = recent_history(store, n, &lanes, from_ms)?;
@@ -253,6 +229,29 @@ pub(super) fn fill(
     Ok(generated)
 }
 
+/// A lineup's lane: each of its sources with its weight and its pool in
+/// `pools`. A source with no pool there counts as empty.
+pub(super) fn lane_of<'a>(
+    pools: &'a [(Source, Vec<MediaItem>)],
+    mode: Mode,
+    sources: &'a [WeightedSource],
+) -> Lane<'a> {
+    Lane {
+        mode,
+        sources: sources
+            .iter()
+            .map(|entry| SourcePool {
+                source: &entry.source,
+                weight: entry.weight,
+                items: pools
+                    .iter()
+                    .find(|(pooled, _)| pooled == &entry.source)
+                    .map_or(&[][..], |(_, items)| items.as_slice()),
+            })
+            .collect(),
+    }
+}
+
 /// A configured duration in whole milliseconds. Config durations are whole
 /// seconds or more, so nothing is lost.
 fn millis(duration: std::time::Duration) -> u64 {
@@ -261,37 +260,44 @@ fn millis(duration: std::time::Duration) -> u64 {
 
 /// Reads `channel`'s programs before `before_ms`, newest first, until every
 /// lane has what it resumes from, or the history ends: a shuffle lane the
-/// N - k distinct pool items it keeps cooling down, and a sequential lane
-/// one program from its pool. A weighted lane needs none. Every run therefore
-/// sees what an unbroken run would.
+/// N - k distinct pool items it keeps cooling down, a weighted lane the same
+/// for each of its sources' pools, and a sequential lane one program from its
+/// pool. Every run therefore sees what an unbroken run would.
 ///
 /// Pages of twice the pools' total length leave room for programs cut into
 /// several events and ids from other pools or no longer in any, so one page
 /// is usually enough. The read goes further back when the recent rows are
 /// mostly such ids, and reads the whole history when it never satisfies some
-/// lane, for example a block whose pool has not played yet.
+/// pool, for example a block whose pool has not played yet.
 fn recent_history(
     store: &Store,
     channel: u32,
     lanes: &[Lane<'_>],
     before_ms: i64,
 ) -> Result<Vec<MediaId>, ScheduleError> {
-    // For each lane: the ids it counts, how many distinct ones it needs, and
+    // For each pool: the ids it counts, how many distinct ones it needs, and
     // those found so far.
-    let mut needs: Vec<(HashSet<&str>, usize, HashSet<&str>)> = lanes
-        .iter()
-        .filter_map(|lane| match lane.mode {
-            Mode::Shuffle => Some(cooling_target(lane.pool)),
-            Mode::Sequential => {
-                let ids: HashSet<&str> = lane.pool.iter().map(|item| item.id.as_str()).collect();
-                let target = ids.len().min(1);
-                Some((ids, target))
+    let mut needs: Vec<(HashSet<&str>, usize, HashSet<&str>)> = Vec::new();
+    for lane in lanes {
+        match lane.mode {
+            Mode::Shuffle => needs.push({
+                let (ids, target) = cooling_target(lane.items());
+                (ids, target, HashSet::new())
+            }),
+            Mode::Weighted => {
+                for entry in &lane.sources {
+                    let (ids, target) = cooling_target(entry.items.iter());
+                    needs.push((ids, target, HashSet::new()));
+                }
             }
-            Mode::Weighted => None,
-        })
-        .map(|(ids, target)| (ids, target, HashSet::new()))
-        .collect();
-    let total: usize = lanes.iter().map(|lane| lane.pool.len()).sum();
+            Mode::Sequential => {
+                let ids: HashSet<&str> = lane.items().map(|item| item.id.as_str()).collect();
+                let target = ids.len().min(1);
+                needs.push((ids, target, HashSet::new()));
+            }
+        }
+    }
+    let total: usize = lanes.iter().map(|lane| lane.items().count()).sum();
     let page = u32::try_from(total.saturating_mul(2).max(1)).unwrap_or(u32::MAX);
     let mut recent = Vec::new();
     let mut bound = before_ms;

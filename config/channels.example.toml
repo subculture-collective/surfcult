@@ -35,7 +35,7 @@ mode = "sequential"
 # between; this channel has none, so that time would be dead air.
 # sign_off = { at = "23:30", pool = "anthem", clip = "anthem.mp4", until = "06:00" }
 
-# mode = "blocks": time-of-day windows, each with its own source and mode.
+# mode = "blocks": time-of-day windows, each with its own source (or sources) and mode.
 # Times are HH:MM in the time zone above and do not cross midnight (use
 # "24:00" for the end of the day). Omit `days` for every day. Blocks on the
 # same channel must not overlap. Time no block covers plays `default` if it is
@@ -53,14 +53,21 @@ end = "12:00"
 source = { jellyfin_collection = "Cartoons" }
 mode = "shuffle"
 
+# mode = "weighted" lists `sources` instead of `source`, each with a `weight`:
+# a whole number of at least 1 that is 1 when left out. Each program first
+# picks a source with probability proportional to its weight, then an item
+# from that source that has not played lately (its shuffle cooldown, counted
+# per source). Here Comedy plays three times as often as the shorts. A fixed
+# channel, a block and `default` all take this form; the other modes take one
+# `source`.
 [[channel.block]]
 start = "12:00"
 end = "24:00"
-source = { jellyfin_genre = "Comedy" }
+sources = [
+  { jellyfin_genre = "Comedy", weight = 3 },
+  { jellyfin_collection = "Cartoon Shorts" },
+]
 mode = "weighted"
-# mode = "weighted": items whose title is a key play that many times as often
-# as the rest, which weigh 1. Weights are whole numbers of at least 1.
-weights = { "Groundhog Day" = 3 }
 
 # Display filters (optional). The defaults are shown.
 #   filters          on everything on screen: programs, clips, static and the

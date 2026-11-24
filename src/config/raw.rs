@@ -3,16 +3,17 @@
 //! Values that can be wrong in ways worth naming (modes, durations, times, the
 //! time zone) stay strings here so each problem is reported against its key.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 
 use super::duration::{parse_duration, parse_minute_of_day};
 use super::{
     Block, Breaks, Channel, Config, Day, Display, Filter, InterstitialPool, Lineup, Mode, Plan,
-    Problem, Rotation, SignOff, Source, Tz, Weights,
+    Problem, Rotation, SignOff, Source, Tz, WeightedSource,
 };
 
 #[derive(Deserialize)]
@@ -41,12 +42,11 @@ struct RawChannel {
     number: u32,
     name: String,
     source: Option<Source>,
+    sources: Option<Vec<RawWeightedSource>>,
     mode: String,
     grid: Option<String>,
     breaks: Option<RawBreaks>,
     filler: Option<String>,
-    #[serde(default)]
-    weights: BTreeMap<String, i64>,
     default: Option<RawLineup>,
     #[serde(default)]
     block: Vec<RawBlock>,
@@ -78,19 +78,83 @@ struct RawBlock {
     days: Vec<String>,
     start: String,
     end: String,
-    source: Source,
+    source: Option<Source>,
+    sources: Option<Vec<RawWeightedSource>>,
     mode: String,
-    #[serde(default)]
-    weights: BTreeMap<String, i64>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawLineup {
-    source: Source,
+    source: Option<Source>,
+    sources: Option<Vec<RawWeightedSource>>,
     mode: String,
-    #[serde(default)]
-    weights: BTreeMap<String, i64>,
+}
+
+/// One entry of `sources`: a source key with its value, as in `source`, and an
+/// optional `weight`, for example `{ jellyfin_series = "Name", weight = 2 }`.
+/// Read by hand so that a key that is neither is a parse error with its line.
+struct RawWeightedSource {
+    source: Source,
+    weight: Option<i64>,
+}
+
+impl<'de> Deserialize<'de> for RawWeightedSource {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// Keeps in step with [`Source`]'s variants, in snake case.
+        const KEYS: &[&str] = &[
+            "jellyfin_library",
+            "jellyfin_collection",
+            "jellyfin_tag",
+            "jellyfin_genre",
+            "jellyfin_series",
+            "weight",
+        ];
+
+        struct EntryVisitor;
+
+        impl<'de> Visitor<'de> for EntryVisitor {
+            type Value = RawWeightedSource;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a source with an optional weight, such as { jellyfin_series = \"Name\", weight = 2 }")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut source: Option<Source> = None;
+                let mut weight: Option<i64> = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "weight" {
+                        if weight.is_some() {
+                            return Err(de::Error::duplicate_field("weight"));
+                        }
+                        weight = Some(map.next_value()?);
+                        continue;
+                    }
+                    let make: fn(String) -> Source = match key.as_str() {
+                        "jellyfin_library" => Source::JellyfinLibrary,
+                        "jellyfin_collection" => Source::JellyfinCollection,
+                        "jellyfin_tag" => Source::JellyfinTag,
+                        "jellyfin_genre" => Source::JellyfinGenre,
+                        "jellyfin_series" => Source::JellyfinSeries,
+                        _ => return Err(de::Error::unknown_field(&key, KEYS)),
+                    };
+                    let parsed = make(map.next_value()?);
+                    if source.replace(parsed).is_some() {
+                        return Err(de::Error::custom(
+                            "an entry names one source; use one entry per source",
+                        ));
+                    }
+                }
+                let source = source.ok_or_else(|| {
+                    de::Error::custom("an entry needs a source, such as jellyfin_series = \"Name\"")
+                })?;
+                Ok(RawWeightedSource { source, weight })
+            }
+        }
+
+        deserializer.deserialize_map(EntryVisitor)
+    }
 }
 
 #[derive(Deserialize)]
@@ -331,20 +395,25 @@ impl RawChannel {
                 );
                 return None;
             }
-            if !self.weights.is_empty() {
+            if self.sources.is_some() {
                 problems.add(
-                    at("weights"),
-                    "not allowed with mode \"blocks\"; set weights on a block or on default",
+                    at("sources"),
+                    "not allowed with mode \"blocks\"; set sources on each block",
                 );
             }
             let default = self.default.as_ref().and_then(|raw| {
-                let at = |key: &str| format!("channel[{i}].default.{key}");
-                let mode = block_mode(&raw.mode, &at("mode"), problems);
-                let weights = check_weights(&raw.weights, mode, &at("weights"), problems);
+                let prefix = format!("channel[{i}].default");
+                let mode = block_mode(&raw.mode, &format!("{prefix}.mode"), problems);
+                let sources = check_lineup(
+                    &prefix,
+                    raw.source.as_ref(),
+                    raw.sources.as_deref(),
+                    mode,
+                    problems,
+                );
                 Some(Lineup {
-                    source: raw.source.clone(),
+                    sources,
                     mode: mode?,
-                    weights,
                 })
             });
             let blocks = check_blocks(&self.block, i, problems)?;
@@ -358,19 +427,17 @@ impl RawChannel {
             problems.add(at("default"), "a default needs mode = \"blocks\"");
         }
         let mode = parse_mode(&self.mode, &at("mode"), problems);
-        let weights = check_weights(&self.weights, mode, &at("weights"), problems);
-        match (&self.source, mode) {
-            (Some(source), Some(mode)) => Some(Plan::Fixed {
-                source: source.clone(),
-                mode,
-                weights,
-            }),
-            (None, _) => {
-                problems.add(at("source"), "missing; a channel needs a source");
-                None
-            }
-            _ => None,
-        }
+        let sources = check_lineup(
+            &format!("channel[{i}]"),
+            self.source.as_ref(),
+            self.sources.as_deref(),
+            mode,
+            problems,
+        );
+        Some(Plan::Fixed {
+            sources,
+            mode: mode?,
+        })
     }
 }
 
@@ -483,34 +550,113 @@ fn block_mode(text: &str, field: &str, problems: &mut Problems) -> Option<Mode> 
     parse_mode(text, field, problems)
 }
 
-/// Checks `weights` for a lineup in `mode`. Weights are only allowed with
-/// `weighted` and must be whole numbers from 1 to 4294967295. `mode` is `None`
-/// when it was already reported as wrong; then only the values are checked.
-fn check_weights(
-    raw: &BTreeMap<String, i64>,
+/// Checks the `source` or `sources` of a lineup in `mode`, where `prefix` is
+/// the lineup's field path: `channel[0]`, `channel[0].block[1]` or
+/// `channel[0].default`. A `weighted` lineup takes `sources`, at least one,
+/// each with an optional `weight` of 1 to 4294967295 (1 when left out). Any
+/// other mode takes one `source` and gives it weight 1. `mode` is `None` when
+/// it was already reported as wrong; then only what is present is checked.
+fn check_lineup(
+    prefix: &str,
+    source: Option<&Source>,
+    sources: Option<&[RawWeightedSource]>,
     mode: Option<Mode>,
-    field: &str,
     problems: &mut Problems,
-) -> Weights {
-    if raw.is_empty() {
-        return Weights::new();
-    }
-    if mode.is_some_and(|mode| mode != Mode::Weighted) {
-        problems.add(field, "only used with mode \"weighted\"");
-    }
-    let mut weights = Weights::new();
-    for (title, &weight) in raw {
-        match u32::try_from(weight) {
-            Ok(weight) if weight >= 1 => {
-                weights.insert(title.clone(), weight);
+) -> Vec<WeightedSource> {
+    let field = |key: &str| format!("{prefix}.{key}");
+    match mode {
+        Some(Mode::Weighted) => {
+            if source.is_some() {
+                problems.add(
+                    field("source"),
+                    "not used with mode \"weighted\"; list the sources, each with its weight, in `sources`",
+                );
             }
-            _ => problems.add(
-                format!("{field}.{title:?}"),
-                format!("{weight} is not a weight; use a whole number of at least 1"),
-            ),
+            match sources {
+                Some(list) if !list.is_empty() => {
+                    check_weighted_sources(list, &field("sources"), problems)
+                }
+                _ => {
+                    problems.add(
+                        field("sources"),
+                        "mode \"weighted\" needs at least one source, such as sources = [{ jellyfin_series = \"Name\", weight = 2 }]",
+                    );
+                    Vec::new()
+                }
+            }
+        }
+        Some(_) => {
+            if sources.is_some() {
+                problems.add(
+                    field("sources"),
+                    "only used with mode \"weighted\"; other modes take one `source`",
+                );
+            }
+            match source {
+                Some(source) => vec![WeightedSource::new(source.clone())],
+                None => {
+                    if sources.is_none() {
+                        problems.add(field("source"), "missing; name the source to play");
+                    }
+                    Vec::new()
+                }
+            }
+        }
+        None => {
+            match sources {
+                Some(list) => {
+                    check_weighted_sources(list, &field("sources"), problems);
+                }
+                None if source.is_none() => {
+                    problems.add(field("source"), "missing; name the source to play");
+                }
+                None => {}
+            }
+            Vec::new()
         }
     }
-    weights
+}
+
+/// The entries of a weighted lineup's `sources` at `field`, each with its
+/// weight. An entry with a bad weight or a repeated source is a problem and
+/// is left out.
+fn check_weighted_sources(
+    list: &[RawWeightedSource],
+    field: &str,
+    problems: &mut Problems,
+) -> Vec<WeightedSource> {
+    let mut checked = Vec::new();
+    for (j, entry) in list.iter().enumerate() {
+        if let Some(first) = list[..j]
+            .iter()
+            .position(|other| other.source == entry.source)
+        {
+            problems.add(
+                format!("{field}[{j}]"),
+                format!("is the same source as {field}[{first}]; list it once and add the weights"),
+            );
+        }
+        let weight = match entry.weight {
+            None => Some(1),
+            Some(weight) => match u32::try_from(weight) {
+                Ok(weight) if weight >= 1 => Some(weight),
+                _ => {
+                    problems.add(
+                        format!("{field}[{j}].weight"),
+                        format!("{weight} is not a weight; use a whole number of at least 1"),
+                    );
+                    None
+                }
+            },
+        };
+        if let Some(weight) = weight {
+            checked.push(WeightedSource {
+                source: entry.source.clone(),
+                weight,
+            });
+        }
+    }
+    checked
 }
 
 fn positive_duration(text: &str, field: &str, problems: &mut Problems) -> Option<Duration> {
@@ -589,7 +735,13 @@ fn check_blocks(raw: &[RawBlock], channel: usize, problems: &mut Problems) -> Op
         }
 
         let mode = block_mode(&block.mode, &at("mode"), problems);
-        let weights = check_weights(&block.weights, mode, &at("weights"), problems);
+        let sources = check_lineup(
+            &format!("channel[{channel}].block[{j}]"),
+            block.source.as_ref(),
+            block.sources.as_deref(),
+            mode,
+            problems,
+        );
 
         if let (Some(start), Some(end), Some(mode)) = (start, end, mode)
             && end > start
@@ -598,9 +750,8 @@ fn check_blocks(raw: &[RawBlock], channel: usize, problems: &mut Problems) -> Op
                 days,
                 start_minute: start,
                 end_minute: end,
-                source: block.source.clone(),
+                sources,
                 mode,
-                weights,
             };
             if let Some(earlier) = blocks.iter().position(|other| overlaps(other, &candidate)) {
                 problems.add(
