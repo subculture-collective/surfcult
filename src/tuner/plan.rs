@@ -13,7 +13,8 @@ pub(super) struct Target {
     pub offset_ms: u64,
 }
 
-fn millis(clip: &Clip) -> u64 {
+/// The clip's length in milliseconds; saturates at `u64::MAX`.
+pub(super) fn millis(clip: &Clip) -> u64 {
     u64::try_from(clip.duration.as_millis()).unwrap_or(u64::MAX)
 }
 

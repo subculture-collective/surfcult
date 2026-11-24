@@ -117,7 +117,7 @@ use crate::player::{Player, PlayerError, PlayerEvent};
 use crate::store::Store;
 use crate::timeline::{Event, EventKind, Lookup, lookup};
 
-use plan::{Target, choose_clip, program_at};
+use plan::{Target, choose_clip, millis, program_at};
 
 /// How far past the end of the clip the tuner reads the schedule. It covers a
 /// whole break after the clip and the live-position lookup when the program
@@ -390,8 +390,7 @@ impl<P: Player, S: ScheduleSource, M: MediaSource> Tuner<P, S, M> {
     /// for a clip that starts at `now_ms`. Sends nothing to the player.
     fn plan_clip(&self, channel: u32, now_ms: i64, start_cost_ms: u64) -> Result<Planned, Reason> {
         let clip = choose_clip(&self.tune_in, start_cost_ms).ok_or(Reason::NoTuneInClip)?;
-        let clip_ms = i64::try_from(clip.duration.as_millis()).unwrap_or(i64::MAX);
-        let ends_at_ms = now_ms.saturating_add(clip_ms);
+        let ends_at_ms = now_ms.saturating_add_unsigned(millis(clip));
         let events = self
             .schedule
             .events_between(
