@@ -22,10 +22,10 @@
 //!
 //! # Sequential
 //!
-//! Items play in the pool's order. A run continues after the cursor item, which is the media id of the last item
-//! the previous run scheduled, and wraps from the last item to the first. With
-//! no cursor it starts at the first item. If the cursor item is no longer in
-//! the pool it starts at the first item and says so with
+//! Items play in the pool's order. A run continues after the cursor item, the
+//! media id of the last program already stored, and wraps from the last item
+//! to the first. With no cursor it starts at the first item. If the cursor
+//! item is no longer in the pool it starts at the first item and says so with
 //! [`Note::CursorNotInPool`]; that restarts the order, which is better than
 //! guessing a position.
 //!

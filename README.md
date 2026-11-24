@@ -11,6 +11,7 @@ A self-hosted, offline-first television channel simulator for Raspberry Pi and L
 - `.github/workflows/pr-ci.yml`: the `PR CI` workflow; runs on every pull request and ends with the `CI gate` job
 - `.github/rulesets/main.json`: the ruleset applied to `main`; it requires pull requests and `CI gate`
 - `.github/ISSUE_TEMPLATE/`, `.github/pull_request_template.md`: bug, feature and task forms and the pull request template
+- `CONTEXT.md`: a glossary of the domain terms the code uses
 - `docs/`: the product idea, plus folders for decision records, references, research notes and runbooks
 - `CONTRIBUTING.md`, `SECURITY.md`, `AGENTS.md`: contribution, security and coding-agent guidance
 

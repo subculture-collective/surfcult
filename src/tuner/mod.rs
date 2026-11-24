@@ -16,9 +16,10 @@
 //! ```
 //!
 //! The program is queued rather than preloaded paused, because one MPV process
-//! cannot hold a second file paused (ADR 0001, decision 5). The offset comes
-//! from [`look_ahead`](crate::timeline::look_ahead)'s lookup, so it is correct
-//! for when the clip ends, not for when the key was pressed.
+//! cannot hold a second file paused (ADR 0001, decision 5). The program and
+//! its offset come from [`program_from`](crate::timeline::program_from) at the
+//! moment the clip ends, not when the key was pressed. If a break is on then,
+//! the program after the break is queued at its event's `media_offset_ms`.
 //!
 //! # No clock, no I/O of its own
 //!
