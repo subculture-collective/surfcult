@@ -113,8 +113,19 @@ impl FakePlayer {
 
     /// Tells the player the queued program started at `position_ms`.
     pub fn program_started(&mut self, position_ms: u64) {
-        self.events
-            .push_back(PlayerEvent::ProgramStarted { position_ms });
+        self.events.push_back(PlayerEvent::ProgramStarted {
+            position_ms,
+            duration_ms: 0,
+        });
+    }
+
+    /// Tells the player a program started at `position_ms` and has a real
+    /// duration of `duration_ms`.
+    pub fn program_started_with_duration(&mut self, position_ms: u64, duration_ms: u64) {
+        self.events.push_back(PlayerEvent::ProgramStarted {
+            position_ms,
+            duration_ms,
+        });
     }
 
     /// Tells the player its video player was restarted.
@@ -288,7 +299,8 @@ mod tests {
         assert_eq!(
             player.poll_event(),
             Some(PlayerEvent::ProgramStarted {
-                position_ms: 12_000
+                position_ms: 12_000,
+                duration_ms: 0,
             })
         );
         assert_eq!(player.poll_event(), Some(PlayerEvent::Restarted));

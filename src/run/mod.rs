@@ -54,7 +54,7 @@ use crate::store::Store;
 use crate::tuner::{State, Timing, Tuner};
 
 pub use clock::{CLOCK_ENV, trusted as clock_trusted};
-use driver::{Context, Driver};
+use driver::{Context, Driver, ProgramStartContext};
 pub use now::now_lines;
 pub use streams::{JellyfinResolver, Streams, Transcodes, jellyfin as jellyfin_streams};
 
@@ -295,7 +295,7 @@ impl<P: Player, I: Input> Tv<P, I> {
 
     /// Hands the player's events to the tuner and the driver, then ticks the
     /// tuner.
-    fn pump(&mut self, now_ms: i64, store: &Store) {
+    fn pump(&mut self, now_ms: i64, store: &mut Store) {
         while let Some(event) = self.tuner.player_mut().poll_event() {
             match event {
                 PlayerEvent::Restarted => {
@@ -305,9 +305,25 @@ impl<P: Player, I: Input> Tv<P, I> {
                     self.banner_pending = false;
                     self.banner_until_ms = None;
                 }
-                PlayerEvent::ProgramStarted { position_ms } if self.driver.following() => {
+                PlayerEvent::ProgramStarted {
+                    position_ms,
+                    duration_ms,
+                } if self.driver.following() => {
+                    let filler: Vec<Clip> = self
+                        .channel
+                        .and_then(|number| self.config.channels.iter().find(|c| c.number == number))
+                        .and_then(|channel| channel.filler.as_deref())
+                        .and_then(|pool| self.clips.pool(pool))
+                        .map(|pool| pool.clips().to_vec())
+                        .unwrap_or_default();
+                    let mut cx = ProgramStartContext {
+                        player: self.tuner.player_mut(),
+                        clips: &self.clips,
+                        store,
+                        filler: &filler,
+                    };
                     self.driver
-                        .program_started(now_ms, position_ms, self.tuner.player_mut());
+                        .program_started(now_ms, position_ms, duration_ms, &mut cx);
                 }
                 _ => {}
             }

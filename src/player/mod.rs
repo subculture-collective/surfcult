@@ -62,7 +62,7 @@ pub enum PlayerEvent {
     /// The clip that was playing reached its end.
     ClipEnded,
     /// The queued program is on screen, at this position in the media.
-    ProgramStarted { position_ms: u64 },
+    ProgramStarted { position_ms: u64, duration_ms: u64 },
     /// The video player stopped working and was started again. The screen
     /// is blank, nothing is queued and no overlay is shown.
     Restarted,

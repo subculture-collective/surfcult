@@ -414,7 +414,19 @@ impl Session {
                     Ok(_) | Err(IpcError::Rejected(_)) => fallback,
                     Err(lost) => return Err(lost),
                 };
-                Ok(Some(PlayerEvent::ProgramStarted { position_ms }))
+                let duration_ms = match self.command(json!(["get_property", "duration"])) {
+                    Ok(Value::Number(n)) => n
+                        .as_f64()
+                        .filter(|s| *s >= 0.0)
+                        .map(|s| (s * 1000.0).round() as u64)
+                        .unwrap_or(0),
+                    Ok(_) | Err(IpcError::Rejected(_)) => 0,
+                    Err(lost) => return Err(lost),
+                };
+                Ok(Some(PlayerEvent::ProgramStarted {
+                    position_ms,
+                    duration_ms: duration_ms.saturating_add(offset),
+                }))
             }
             _ => Ok(None),
         }
