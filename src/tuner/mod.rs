@@ -388,7 +388,7 @@ impl<P: Player> Tuner<P> {
     pub fn handle(&mut self, event: PlayerEvent, now_ms: i64) {
         match event {
             PlayerEvent::ClipEnded => self.clip_ended(),
-            PlayerEvent::ProgramStarted { position_ms } => {
+            PlayerEvent::ProgramStarted { position_ms, .. } => {
                 self.program_started(now_ms, position_ms)
             }
             PlayerEvent::Restarted => self.restarted(now_ms),

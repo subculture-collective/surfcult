@@ -170,6 +170,7 @@ impl Rig {
             name = "SEVEN"
             source = {{ jellyfin_collection = "Cartoons" }}
             mode = "sequential"
+            filler = "filler"
             [[channel]]
             number = 3
             name = "THREE"

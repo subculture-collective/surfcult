@@ -381,7 +381,7 @@ fn jellyfin_urls_play_in_mpv() {
             });
             let (event, _) =
                 started.unwrap_or_else(|| panic!("{} {id}: the program never started", case.name));
-            let PlayerEvent::ProgramStarted { position_ms } = event else {
+            let PlayerEvent::ProgramStarted { position_ms, .. } = event else {
                 unreachable!()
             };
             let to_picture = queued.elapsed();

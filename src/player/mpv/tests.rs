@@ -313,7 +313,8 @@ fn a_program_can_replace_the_screen_and_a_clip_can_be_queued() {
         drain(&mut session),
         [
             PlayerEvent::ProgramStarted {
-                position_ms: 61_200
+                position_ms: 61_200,
+                duration_ms: 0,
             },
             PlayerEvent::ClipEnded
         ]
@@ -511,7 +512,8 @@ fn a_stream_that_begins_at_an_offset_starts_and_seeks_relative_to_it() {
     assert_eq!(
         drain(&mut session),
         [PlayerEvent::ProgramStarted {
-            position_ms: 601_500
+            position_ms: 601_500,
+            duration_ms: 600_000,
         }]
     );
     session.seek(610_000).unwrap();
@@ -719,7 +721,8 @@ fn the_queued_program_reports_its_start_once_with_its_position() {
         [
             PlayerEvent::ClipEnded,
             PlayerEvent::ProgramStarted {
-                position_ms: 125_042
+                position_ms: 125_042,
+                duration_ms: 0,
             }
         ]
     );
@@ -736,7 +739,10 @@ fn a_program_start_without_a_position_reports_the_requested_start() {
     fake.event(restart());
     assert_eq!(
         drain(&mut session),
-        [PlayerEvent::ProgramStarted { position_ms: 7_000 }]
+        [PlayerEvent::ProgramStarted {
+            position_ms: 7_000,
+            duration_ms: 0,
+        }]
     );
 }
 
@@ -1173,7 +1179,7 @@ mod real {
         });
         let [
             PlayerEvent::ClipEnded,
-            PlayerEvent::ProgramStarted { position_ms },
+            PlayerEvent::ProgramStarted { position_ms, .. },
         ] = events[..]
         else {
             panic!("unexpected events {events:?}");
@@ -1228,7 +1234,7 @@ mod real {
         player.show_banner(&banner).unwrap();
         let events = wait_for(&mut player, 15, |e| *e == PlayerEvent::ClipEnded);
         let [
-            PlayerEvent::ProgramStarted { position_ms },
+            PlayerEvent::ProgramStarted { position_ms, .. },
             PlayerEvent::ClipEnded,
         ] = events[..]
         else {

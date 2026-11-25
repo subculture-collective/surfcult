@@ -48,7 +48,7 @@ use crate::clips::{Clip, ClipLibrary};
 use crate::library::profile::needs_transcode;
 use crate::library::{MediaId, MediaSource};
 use crate::player::Player;
-use crate::schedule::clip_media_id;
+use crate::schedule::{clip_media_id, fit, record_fit};
 use crate::store::Store;
 use crate::timeline::{Event, EventKind, Lookup, lookup, program_from};
 use crate::tuner::Timing;
@@ -108,6 +108,13 @@ pub(super) struct Context<'a, P> {
     pub store: &'a mut Store,
     pub clips: &'a ClipLibrary,
     pub streams: &'a mut dyn Streams,
+}
+
+pub(super) struct ProgramStartContext<'a, 'b, P> {
+    pub(super) player: &'a mut P,
+    pub(super) clips: &'b ClipLibrary,
+    pub(super) store: &'a mut Store,
+    pub(super) filler: &'b [Clip],
 }
 
 pub(super) struct Driver {
@@ -183,7 +190,8 @@ impl Driver {
         &mut self,
         now_ms: i64,
         position_ms: u64,
-        player: &mut impl Player,
+        duration_ms: u64,
+        cx: &mut ProgramStartContext<'_, '_, impl Player>,
     ) {
         let Some(f) = self.following.as_mut() else {
             return;
@@ -196,13 +204,42 @@ impl Driver {
         } = lookup(&f.events, now_ms)
             && event.kind == EventKind::Program
             && event.media_id == media
-            && offset_ms > position_ms.saturating_add(self.timing.late_tolerance_ms)
-            && let Err(e) = player.seek(offset_ms)
         {
-            eprintln!(
-                "surfcult: channel {}: cannot seek to the live position: {e}",
-                f.channel
-            );
+            if offset_ms > position_ms.saturating_add(self.timing.late_tolerance_ms)
+                && let Err(e) = cx.player.seek(offset_ms)
+            {
+                eprintln!(
+                    "surfcult: channel {}: cannot seek to the live position: {e}",
+                    f.channel
+                );
+            }
+            if duration_ms > 0 {
+                let fitted = fit(event, duration_ms, cx.filler);
+                if let Err(e) = record_fit(cx.store, f.channel, event, fitted.fit, now_ms) {
+                    eprintln!(
+                        "surfcult: channel {}: cannot record program fit: {e}",
+                        f.channel
+                    );
+                }
+                if fitted.events.len() > 1 {
+                    if let Some(index) = f.events.iter().position(|stored| stored == event) {
+                        f.events
+                            .splice(index..index + 1, fitted.events.iter().cloned());
+                    }
+                    if let Some(filler_event) =
+                        fitted.events.iter().find(|e| e.kind == EventKind::Filler)
+                        && let Some(clip) = clip_for(cx.clips, &filler_event.media_id)
+                    {
+                        match cx.player.queue_clip(&clip.path) {
+                            Ok(()) => f.queued = Some(filler_event.clone()),
+                            Err(e) => eprintln!(
+                                "surfcult: channel {}: cannot queue filler: {e}",
+                                f.channel
+                            ),
+                        }
+                    }
+                }
+            }
         }
     }
 
