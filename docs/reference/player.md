@@ -1,6 +1,6 @@
 # Player
 
-The `Player` trait in `src/player/` is the screen as the tuner and the run loop see it: show static or the stand-by card, play or queue a local clip, play or queue a program, seek, stop, show or clear an overlay, and show or clear the channel banner. `MpvPlayer` also applies the display filters. `FakePlayer` records these for tests. `MpvPlayer` in `src/player/mpv/` sends them to a real MPV process over its JSON IPC socket.
+The `Player` trait in `src/player/` is the screen as the tuner and the run loop see it: show static, the stand-by card or a slate, play or queue a local clip, play or queue a program, seek, stop, show or clear an overlay, and show or clear the channel banner. `MpvPlayer` also applies the display filters. `FakePlayer` records these for tests. `MpvPlayer` in `src/player/mpv/` sends them to a real MPV process over its JSON IPC socket.
 
 ## Starting MPV
 
@@ -55,7 +55,9 @@ The band and text are an ASS subtitle file, `standby.ass`, that the player write
 
 The default text is drawn as vector outlines (`\p3` drawings, a quarter-pixel grid) in `assets/standby/text.drawing`. They are derived from the Oswald typeface, weight interpolated between Regular and Bold per letter and fitted to the reference, so the Pi needs no font for them. The white overlap is the red copy clipped to the cyan one (`\clip` with a drawing), which only works with drawings. `tools/standby/gen.py` makes the drawing and the bars from `tools/standby/fit.json`; `tools/standby/README.md` says how to run it. Oswald is licensed under the SIL Open Font License 1.1, and the outlines are derived from it, so the licence and the Oswald copyright line are kept in `tools/standby/OFL.txt`.
 
-A `standby_text` other than `PLEASE STANDBY` cannot use those outlines. It is set in DejaVu Sans Bold narrowed to 80 %, 200 pixels, centred on the band, as a cyan copy 8 pixels left, a red copy 8 pixels right and a white copy on top. The Pi has DejaVu; a system without it gets libass's fallback font. A long text can run past the band. Braces, backslashes and line breaks in the text are escaped, so the text cannot change the drawing or start another event.
+A `standby_text` other than `PLEASE STANDBY` cannot use those outlines. It is set in DejaVu Sans Bold narrowed to 80 %, 200 pixels, centred on the band, as a cyan copy 8 pixels left, a red copy 8 pixels right and a white copy on top. A text longer than 14 characters, as many as `PLEASE STANDBY` has, is set smaller in proportion (`TECHNICAL DIFFICULTIES` at 127 pixels) so it stays inside the band; a text with line breaks is counted as one line. The Pi has DejaVu; a system without it gets libass's fallback font. Braces, backslashes and line breaks in the text are escaped, so the text cannot change the drawing or start another event.
+
+`Player::show_slate(slate)` shows the same card with the slate's text: `TECHNICAL DIFFICULTIES` (`Slate::TechnicalDifficulties`) while Jellyfin is unreachable, and `SETTING THE CLOCK` (`Slate::ClockNotSet`) until the clock is trusted ([run.md](run.md#failures)). The glitch redraws whichever text is up, and `show_standby` brings back `standby_text`.
 
 If the card's file cannot be written, or MPV refuses the shaders or the `loadfile`, `MpvPlayer` shows static in its place and returns the error, so the screen never shows bars without their text. The tuner records a `Player` failure and static stays up. MPV loads the subtitle file after `loadfile` returns; a file it cannot read would leave the bars without text, but the player writes it just before and checks that the write succeeded.
 
@@ -137,9 +139,12 @@ The headers cannot be the playlist entry's own option. With `--prefetch-playlist
 | --- | --- |
 | `end-file` with reason `eof` for a clip | `ClipEnded` |
 | the first `playback-restart` of a program | `ProgramStarted { position_ms }`, from `time-pos` plus the stream offset, or the requested start if `time-pos` is unavailable |
+| `end-file` with reason `error` for the clip or program on screen | `Failed` |
 | (watchdog) | `Restarted` |
 
-`end-file` for static, the stand-by card or a program, with any other reason (`stop`, `redirect`, `error`), or for an entry a later command replaced, reports nothing. Later `playback-restart` events of a program come from seeks and are dropped. A program that fails to load reports nothing; giving up on it is issue #34.
+`end-file` for static or the stand-by card, with any other reason (`stop`, `redirect`), for an entry that never started, or for an entry a later command replaced, reports nothing. Later `playback-restart` events of a program come from seeks and are dropped.
+
+A `PlayerError` says whether the program source did not answer (`PlayerError::unreachable`, `is_unreachable`): every program would fail the same way until it does. `run::JellyfinResolver` returns one when Jellyfin's `PlaybackInfo` request fails to connect or times out, or answers 502, 503 or 504; any other refusal is about the one item.
 
 ## The watchdog
 

@@ -629,8 +629,9 @@ fn player_with(
         .use_shaders(global_shaders.clone(), standby_shaders.clone())
         .unwrap();
     MpvPlayer {
+        card_text: config.standby_text.clone(),
         config,
-        resolver: |_: &MediaId, _: u64| Err(PlayerError("no programs here".into())),
+        resolver: |_: &MediaId, _: u64| Err(PlayerError::new("no programs here")),
         child: Some(child),
         session: Some(session),
         last_start: Instant::now(),
@@ -715,6 +716,29 @@ fn only_clips_report_clip_ended() {
     fake.event(end_file(3, "eof"));
     fake.event(end_file(3, "redirect"));
     fake.event(end_file(2, "error"));
+    assert_eq!(drain(&mut session), []);
+}
+
+#[test]
+fn a_clip_or_program_that_errors_on_screen_reports_failed() {
+    let fake = FakeMpv::new();
+    let mut session = fake.connect();
+    session.play_clip(Path::new("/clips/gone.mp4")).unwrap();
+    session.queue_program(&keyed_stream(), 0).unwrap();
+    fake.event(start_file(1));
+    fake.event(end_file(1, "error"));
+    fake.event(start_file(2));
+    fake.event(end_file(2, "error"));
+    assert_eq!(
+        drain(&mut session),
+        [PlayerEvent::Failed, PlayerEvent::Failed]
+    );
+    // The card is never reported.
+    session
+        .show_standby("av://lavfi:smptehdbars", "/run/card.ass")
+        .unwrap();
+    fake.event(start_file(3));
+    fake.event(end_file(3, "error"));
     assert_eq!(drain(&mut session), []);
 }
 
@@ -946,7 +970,7 @@ fn a_rejected_card_falls_back_to_static() {
     let error = player.show_standby().unwrap_err();
     assert_eq!(
         error,
-        PlayerError("MPV rejected loadfile: invalid parameter".into())
+        PlayerError::new("MPV rejected loadfile: invalid parameter")
     );
     assert_eq!(
         fake.commands(),
@@ -971,7 +995,9 @@ fn a_card_that_cannot_be_written_falls_back_to_static() {
     fs::create_dir(dir.path().join("standby.ass")).unwrap();
     let error = player.show_standby().unwrap_err();
     assert!(
-        error.0.starts_with("cannot write the stand-by card"),
+        error
+            .to_string()
+            .starts_with("cannot write the stand-by card"),
         "{error:?}"
     );
     assert_eq!(
@@ -989,7 +1015,7 @@ fn a_restart_gives_the_new_mpv_the_global_shaders() {
         ..MpvConfig::new(&run)
     };
     let crt = run.join("crt.glsl");
-    let resolver = |_: &MediaId, _: u64| Err(PlayerError("no programs here".into()));
+    let resolver = |_: &MediaId, _: u64| Err(PlayerError::new("no programs here"));
     let mut player = MpvPlayer::start(config, resolver).unwrap();
     let list = [crt.to_str().unwrap()];
     assert_eq!(fake.commands(), [shaders(&list)]);
@@ -1273,7 +1299,7 @@ mod real {
         }
         let dir = tempfile::tempdir().unwrap();
         let clip = make_clip(dir.path(), "clip.mp4", 1);
-        let resolver = |_: &MediaId, _: u64| Err(PlayerError("no programs here".into()));
+        let resolver = |_: &MediaId, _: u64| Err(PlayerError::new("no programs here"));
         let mut player = MpvPlayer::start(headless(&dir.path().join("run")), resolver).unwrap();
         player.show_standby().unwrap();
 
@@ -1350,7 +1376,7 @@ mod real {
         let dir = tempfile::tempdir().unwrap();
         let clip = make_clip(dir.path(), "clip.mp4", 1);
         let long = make_clip(dir.path(), "long.mp4", 30);
-        let resolver = |_: &MediaId, _: u64| Err(PlayerError("no programs here".into()));
+        let resolver = |_: &MediaId, _: u64| Err(PlayerError::new("no programs here"));
         let mut player = MpvPlayer::start(headless(&dir.path().join("run")), resolver).unwrap();
         player.play_clip(&long).unwrap();
         let first = player.pid().unwrap();
@@ -1377,7 +1403,7 @@ mod real {
         }
         let dir = tempfile::tempdir().unwrap();
         let long = make_clip(dir.path(), "long.mp4", 30);
-        let resolver = |_: &MediaId, _: u64| Err(PlayerError("no programs here".into()));
+        let resolver = |_: &MediaId, _: u64| Err(PlayerError::new("no programs here"));
         let config = MpvConfig {
             command_timeout: Duration::from_millis(500),
             ..headless(&dir.path().join("run"))
@@ -1404,7 +1430,7 @@ mod real {
         }
         let dir = tempfile::tempdir().unwrap();
         let run = dir.path().join("run");
-        let resolver = |_: &MediaId, _: u64| Err(PlayerError("no programs here".into()));
+        let resolver = |_: &MediaId, _: u64| Err(PlayerError::new("no programs here"));
         let mut player = MpvPlayer::start(headless(&run), resolver).unwrap();
         let crt = run.join("crt.glsl").to_str().unwrap().to_owned();
         let property = |player: &mut MpvPlayer<_>, name: &str| -> Value {

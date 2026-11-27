@@ -506,6 +506,24 @@ fn a_break_followed_by_a_gap_or_nothing_ends_on_the_standby_card() {
     assert_eq!(rig.commands(), [Command::ShowStatic, Command::ShowStandby]);
 }
 
+#[test]
+fn a_clip_or_program_the_player_cannot_play_ends_the_sequence() {
+    let mut rig = Rig::new(long_program(), vec![direct("show")], tune_in_clips());
+    rig.tune(CHANNEL, T);
+    rig.at(T + 500);
+    rig.tuner.player_mut().failed();
+    rig.at(T + 600);
+    assert!(matches!(rig.failed_with(), Some(Reason::Player(_))));
+    // A failure once the program is live is the driver's business.
+    rig.tune(CHANNEL, T + 10_000);
+    rig.at(T + 10_500);
+    rig.tuner.player_mut().clip_ended();
+    rig.tuner.player_mut().program_started(101_700);
+    rig.tuner.player_mut().failed();
+    rig.at(T + 12_000);
+    assert_eq!(rig.tuner.state(), &State::Live { channel: CHANNEL });
+}
+
 // Late start
 
 #[test]

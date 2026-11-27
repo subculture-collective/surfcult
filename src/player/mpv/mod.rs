@@ -40,6 +40,8 @@
 //! before the shaders run, so the CRT shader covers them too. The file is
 //! the subtitle track of the card's playlist entry only, so it leaves with
 //! the card. If the card cannot be shown, the player shows static instead.
+//! [`Player::show_slate`] shows the same card with the slate's text in
+//! place of `standby_text`.
 //!
 //! # Display filters
 //!
@@ -58,6 +60,9 @@
 //!   [`PlayerEvent::ClipEnded`]. Static, the stand-by card and programs
 //!   never produce one, and nor does an entry that a later command replaced
 //!   or stopped.
+//! - `end-file` with reason `error` for the clip or program on screen (a
+//!   missing file, a stream that would not open or broke off) becomes
+//!   [`PlayerEvent::Failed`].
 //! - The first `playback-restart` of a program becomes
 //!   [`PlayerEvent::ProgramStarted`], with MPV's `time-pos` plus the stream's
 //!   offset. Later ones come from seeks and are dropped.
@@ -98,7 +103,7 @@ use std::time::{Duration, Instant};
 
 use super::{
     DEFAULT_GLITCH_EVERY, DEFAULT_STANDBY_FILTERS, Filter, Overlay, Player, PlayerError,
-    PlayerEvent, standby_filters,
+    PlayerEvent, Slate, standby_filters,
 };
 use crate::config::Display;
 use crate::library::MediaId;
@@ -291,7 +296,7 @@ impl MpvConfig {
             .map(|path| {
                 path.into_os_string()
                     .into_string()
-                    .map_err(|_| PlayerError("the runtime directory is not UTF-8".into()))
+                    .map_err(|_| PlayerError::new("the runtime directory is not UTF-8"))
             })
             .collect()
     }
@@ -363,6 +368,9 @@ pub struct MpvPlayer<R> {
     standby_shaders: Vec<String>,
     /// The stand-by card's glitch, when the card has it.
     glitch: Option<Glitch>,
+    /// The text of the card shown last: [`MpvConfig::standby_text`] or a
+    /// slate's.
+    card_text: String,
 }
 
 impl<R> MpvPlayer<R> {
@@ -390,12 +398,12 @@ impl<R> MpvPlayer<R> {
     fn write_card(&self, flicker: Option<&Flicker>) -> Result<String, PlayerError> {
         let file = self.config.standby_file(flicker.is_some());
         let partial = file.with_extension("partial");
-        fs::write(&partial, card::card_ass(&self.config.standby_text, flicker))
+        fs::write(&partial, card::card_ass(&self.card_text, flicker))
             .and_then(|()| fs::rename(&partial, &file))
-            .map_err(|e| PlayerError(format!("cannot write the stand-by card: {e}")))?;
+            .map_err(|e| PlayerError::new(format!("cannot write the stand-by card: {e}")))?;
         file.into_os_string()
             .into_string()
-            .map_err(|_| PlayerError("the runtime directory is not UTF-8".into()))
+            .map_err(|_| PlayerError::new("the runtime directory is not UTF-8"))
     }
 }
 
@@ -405,7 +413,7 @@ impl<R: StreamResolver> MpvPlayer<R> {
         prepare_runtime_dir(&config.runtime_dir)?;
         let socket = config.socket();
         if socket.as_os_str().len() > MAX_SOCKET_PATH {
-            return Err(PlayerError(format!(
+            return Err(PlayerError::new(format!(
                 "the MPV socket path {} is longer than {MAX_SOCKET_PATH} bytes",
                 socket.display()
             )));
@@ -413,9 +421,10 @@ impl<R: StreamResolver> MpvPlayer<R> {
         let (global_shaders, standby_shaders, glitch) = config.filters_setup()?;
         if let Some(file) = config.shader_file(Filter::Crt) {
             fs::write(&file, CRT_SHADER)
-                .map_err(|e| PlayerError(format!("cannot write the CRT shader: {e}")))?;
+                .map_err(|e| PlayerError::new(format!("cannot write the CRT shader: {e}")))?;
         }
         let mut player = Self {
+            card_text: config.standby_text.clone(),
             config,
             resolver,
             child: None,
@@ -435,7 +444,7 @@ impl<R: StreamResolver> MpvPlayer<R> {
         let socket = self.config.socket();
         match fs::remove_file(&socket) {
             Err(e) if e.kind() != ErrorKind::NotFound => {
-                return Err(PlayerError(format!(
+                return Err(PlayerError::new(format!(
                     "cannot remove the old MPV socket: {e}"
                 )));
             }
@@ -448,7 +457,7 @@ impl<R: StreamResolver> MpvPlayer<R> {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| {
-                PlayerError(format!(
+                PlayerError::new(format!(
                     "cannot start {}: {e}",
                     self.config.binary.display()
                 ))
@@ -456,14 +465,14 @@ impl<R: StreamResolver> MpvPlayer<R> {
         let deadline = Instant::now() + self.config.start_timeout;
         let mut session = loop {
             if let Ok(Some(status)) = child.try_wait() {
-                return Err(PlayerError(format!("MPV exited at start: {status}")));
+                return Err(PlayerError::new(format!("MPV exited at start: {status}")));
             }
             match Session::connect(&socket, self.config.command_timeout) {
                 Ok(session) => break session,
                 Err(e) if Instant::now() >= deadline => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    return Err(PlayerError(format!("cannot connect to MPV: {e}")));
+                    return Err(PlayerError::new(format!("cannot connect to MPV: {e}")));
                 }
                 Err(_) => std::thread::sleep(Duration::from_millis(20)),
             }
@@ -473,7 +482,7 @@ impl<R: StreamResolver> MpvPlayer<R> {
         if let Err(e) = session.use_shaders(shaders.0, shaders.1) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(PlayerError(format!(
+            return Err(PlayerError::new(format!(
                 "cannot set MPV's shaders: {}",
                 e.message()
             )));
@@ -494,15 +503,15 @@ impl<R: StreamResolver> MpvPlayer<R> {
         f: impl FnOnce(&mut Session) -> Result<T, IpcError>,
     ) -> Result<T, PlayerError> {
         let Some(session) = self.session.as_mut() else {
-            return Err(PlayerError(
-                "MPV is not running; it is being restarted".into(),
+            return Err(PlayerError::new(
+                "MPV is not running; it is being restarted",
             ));
         };
         f(session).map_err(|e| {
             if matches!(e, IpcError::Lost(_)) {
                 self.shut_down();
             }
-            PlayerError(e.message().to_owned())
+            PlayerError::new(e.message().to_owned())
         })
     }
 
@@ -521,6 +530,32 @@ impl<R: StreamResolver> MpvPlayer<R> {
             eprintln!("surfcult: MPV is not answering ({why}); restarting it");
             self.shut_down();
         }
+    }
+
+    /// Shows the stand-by card with `card_text` across it, or static if MPV
+    /// refuses part of it.
+    fn show_card(&mut self) -> Result<(), PlayerError> {
+        let source = self.config.standby_source.clone();
+        let result = self
+            .write_card(None)
+            .and_then(|file| self.with_session(|s| s.show_standby(&source, &file)));
+        match &result {
+            Ok(()) => {
+                if let Some(glitch) = self.glitch.as_mut() {
+                    glitch.arm(Instant::now());
+                }
+            }
+            // The card's file could not be written, or MPV answered but
+            // refused part of the card, which may have left bars without
+            // their text. Static replaces them.
+            Err(_) if self.session.is_some() => {
+                if let Err(e) = self.show_static() {
+                    eprintln!("surfcult: cannot show static after the stand-by card failed: {e}");
+                }
+            }
+            Err(_) => {}
+        }
+        result
     }
 
     /// Starts or ends a flicker of the stand-by card when one is due. A
@@ -597,27 +632,13 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
     }
 
     fn show_standby(&mut self) -> Result<(), PlayerError> {
-        let source = self.config.standby_source.clone();
-        let result = self
-            .write_card(None)
-            .and_then(|file| self.with_session(|s| s.show_standby(&source, &file)));
-        match &result {
-            Ok(()) => {
-                if let Some(glitch) = self.glitch.as_mut() {
-                    glitch.arm(Instant::now());
-                }
-            }
-            // The card's file could not be written, or MPV answered but
-            // refused part of the card, which may have left bars without
-            // their text. Static replaces them.
-            Err(_) if self.session.is_some() => {
-                if let Err(e) = self.show_static() {
-                    eprintln!("surfcult: cannot show static after the stand-by card failed: {e}");
-                }
-            }
-            Err(_) => {}
-        }
-        result
+        self.card_text.clone_from(&self.config.standby_text);
+        self.show_card()
+    }
+
+    fn show_slate(&mut self, slate: Slate) -> Result<(), PlayerError> {
+        slate.text().clone_into(&mut self.card_text);
+        self.show_card()
     }
 
     fn play_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
@@ -662,10 +683,10 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
         let partial = file.with_extension("partial");
         fs::write(&partial, &overlay.bgra)
             .and_then(|()| fs::rename(&partial, &file))
-            .map_err(|e| PlayerError(format!("cannot write the overlay bitmap: {e}")))?;
+            .map_err(|e| PlayerError::new(format!("cannot write the overlay bitmap: {e}")))?;
         let file = file
             .to_str()
-            .ok_or_else(|| PlayerError("the runtime directory is not UTF-8".into()))?
+            .ok_or_else(|| PlayerError::new("the runtime directory is not UTF-8"))?
             .to_owned();
         self.with_session(|s| {
             s.overlay_add(
@@ -681,7 +702,9 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
 
     fn clear_overlay(&mut self, id: u8) -> Result<(), PlayerError> {
         if id > 63 {
-            return Err(PlayerError(format!("overlay layer {id} is not 0 to 63")));
+            return Err(PlayerError::new(format!(
+                "overlay layer {id} is not 0 to 63"
+            )));
         }
         self.with_session(|s| s.overlay_remove(id))
     }
@@ -728,7 +751,7 @@ fn args(config: &MpvConfig, socket: &Path) -> Vec<OsString> {
 
 fn prepare_runtime_dir(dir: &Path) -> Result<(), PlayerError> {
     let error = |e: std::io::Error| {
-        PlayerError(format!(
+        PlayerError::new(format!(
             "cannot use the runtime directory {}: {e}",
             dir.display()
         ))
@@ -740,7 +763,7 @@ fn prepare_runtime_dir(dir: &Path) -> Result<(), PlayerError> {
         .map_err(error)?;
     let mode = fs::metadata(dir).map_err(error)?.permissions().mode();
     if mode & 0o077 != 0 {
-        return Err(PlayerError(format!(
+        return Err(PlayerError::new(format!(
             "the runtime directory {} is open to other users (mode {:o}); it must be 700",
             dir.display(),
             mode & 0o777
@@ -751,11 +774,13 @@ fn prepare_runtime_dir(dir: &Path) -> Result<(), PlayerError> {
 
 fn check_overlay(id: u8, overlay: &Overlay) -> Result<(), PlayerError> {
     if id > 63 {
-        return Err(PlayerError(format!("overlay layer {id} is not 0 to 63")));
+        return Err(PlayerError::new(format!(
+            "overlay layer {id} is not 0 to 63"
+        )));
     }
     let expected = u64::from(overlay.width) * u64::from(overlay.height) * 4;
     if overlay.width == 0 || overlay.height == 0 || overlay.bgra.len() as u64 != expected {
-        return Err(PlayerError(format!(
+        return Err(PlayerError::new(format!(
             "an overlay of {}x{} needs {expected} bytes of BGRA, not {}",
             overlay.width,
             overlay.height,

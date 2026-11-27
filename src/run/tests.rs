@@ -1,6 +1,6 @@
 //! The loop and the playback driver, driven by hand with a virtual clock: a
-//! `FakePlayer` (wrapped so single programs can fail as a Jellyfin error
-//! would), a `FakeInput`, an in-memory `Store` whose library cache is the
+//! `FakePlayer` (wrapped so single programs, or all of them, can fail as a
+//! Jellyfin error or outage would), a `FakeInput`, an in-memory `Store` whose library cache is the
 //! media source, as in production, and clip pools scanned from a temporary
 //! directory with a fake prober. Nothing sleeps and nothing needs MPV,
 //! Jellyfin or ffprobe.
@@ -19,8 +19,8 @@ use crate::config::Tz;
 use crate::input::FakeInput;
 use crate::library::{AudioStream, Collection, MediaId, MediaKind, VideoStream};
 use crate::overlay::{Banner, clock};
-use crate::player::{Command, FakePlayer, Overlay, PlayerError, VirtualClock};
-use crate::store::LibraryEntry;
+use crate::player::{Command, FakePlayer, Overlay, PlayerError, Slate, VirtualClock};
+use crate::store::{LibraryEntry, Substitution};
 use crate::timeline::{Event, EventKind};
 
 const T: i64 = 1_800_000_000_000;
@@ -28,16 +28,20 @@ const MIN: i64 = 60_000;
 const TUNE_IN_MS: i64 = 1_200;
 
 /// A `FakePlayer` whose programs in `broken` fail to load, as when Jellyfin
-/// cannot play them. Nothing is recorded for a failed command.
+/// cannot play them, and whose programs all fail as unreachable while
+/// `down` is set. Nothing is recorded for a failed command.
 struct TestPlayer {
     fake: FakePlayer,
     broken: HashSet<MediaId>,
+    down: bool,
 }
 
 impl TestPlayer {
     fn check(&self, media: &MediaId) -> Result<(), PlayerError> {
-        if self.broken.contains(media) {
-            Err(PlayerError(format!("Jellyfin cannot play {media}")))
+        if self.down {
+            Err(PlayerError::unreachable("Jellyfin is unreachable"))
+        } else if self.broken.contains(media) {
+            Err(PlayerError::new(format!("Jellyfin cannot play {media}")))
         } else {
             Ok(())
         }
@@ -50,6 +54,9 @@ impl Player for TestPlayer {
     }
     fn show_standby(&mut self) -> Result<(), PlayerError> {
         self.fake.show_standby()
+    }
+    fn show_slate(&mut self, slate: Slate) -> Result<(), PlayerError> {
+        self.fake.show_slate(slate)
     }
     fn play_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
         self.fake.play_clip(path)
@@ -153,8 +160,8 @@ impl Rig {
     /// Channels 7, 3 and 5 (in that config order), all playing the
     /// collection `Cartoons`, except that `five_source` replaces channel 5's
     /// source. The library has `show` and `movie` (direct play) and `tc`
-    /// (a transcode); `Cartoons` holds `show`. The clock is not trusted, so
-    /// nothing writes schedules unless a test says so.
+    /// (a transcode); `Cartoons` holds `show`. The clock is trusted, so
+    /// startup extends the schedules written before it.
     fn new() -> Self {
         Self::with_five("jellyfin_collection = \"Cartoons\"")
     }
@@ -222,9 +229,10 @@ impl Rig {
         let player = TestPlayer {
             fake: FakePlayer::new(clock.clone()),
             broken: HashSet::new(),
+            down: false,
         };
         let stops = Rc::new(Cell::new(0));
-        let trusted = Rc::new(Cell::new(false));
+        let trusted = Rc::new(Cell::new(true));
         let trust = trusted.clone();
         let tv = Tv::new(
             config,
@@ -644,7 +652,7 @@ fn a_tune_into_a_gap_shows_the_card_with_off_the_air_and_follows_on() {
 }
 
 #[test]
-fn a_program_jellyfin_cannot_play_shows_the_card_and_the_loop_goes_on() {
+fn an_unplayable_program_without_filler_shows_the_card_and_the_loop_goes_on() {
     let mut rig = Rig::new();
     rig.write(
         3,
@@ -663,6 +671,13 @@ fn a_program_jellyfin_cannot_play_shows_the_card_and_the_loop_goes_on() {
     rig.step(T + MIN);
     assert_eq!(rig.take(), [Command::ShowStandby]);
     assert_eq!(rig.history(3)[1], ("tc".into(), T + MIN, "failed".into()));
+    let substitution = Substitution {
+        channel: 3,
+        media_id: MediaId::new("tc"),
+        scheduled_ms: T + MIN,
+        replacement: None,
+    };
+    assert_eq!(rig.store.substitutions(3).unwrap(), [substitution]);
     // The next event plays as usual, and keys still work.
     rig.step(T + 2 * MIN);
     assert_eq!(rig.take(), [play("movie", 0)]);
@@ -741,22 +756,174 @@ fn startup_skips_a_channel_whose_source_cannot_be_resolved() {
 }
 
 #[test]
-fn a_schedule_written_once_the_clock_is_trusted_starts_playing() {
+fn an_untrusted_clock_shows_the_slate_and_writes_nothing_until_it_is_trusted() {
     let mut rig = Rig::new();
+    // Events stored before a reboot are not played at an untrusted time.
+    hour_everywhere(&mut rig);
+    rig.trusted.set(false);
     rig.start();
-    rig.step(T + 500);
-    assert!(rig.take().contains(&Command::ShowStandby));
-    assert_eq!(rig.store.schedule_end_ms(3).unwrap(), None);
-    // The clock synchronizes; the next minute's check writes the schedules
-    // and the driver plays what is on now, without a tune-in clip.
-    rig.trusted.set(true);
-    rig.step(T + 30_000);
-    assert_eq!(rig.take(), [Command::ClearBanner]);
-    assert_eq!(rig.store.schedule_end_ms(3).unwrap(), None);
+    assert_eq!(rig.take(), [Command::ShowSlate(Slate::ClockNotSet)]);
+    let stored = rig.store.schedule_end_ms(3).unwrap();
+    // Channel keys do nothing; the minute's check finds it still untrusted.
+    rig.press(Key::Next, T + 10_000);
     rig.step(T + MIN);
-    assert!(rig.store.schedule_end_ms(3).unwrap().is_some());
-    rig.step(T + MIN + 20);
-    assert_eq!(rig.take(), [play("show", 20)]);
+    assert_eq!(rig.take(), []);
+    assert_eq!(rig.tv.channel(), None);
+    assert_eq!(rig.store.schedule_end_ms(3).unwrap(), stored);
+    // A restarted player gets the slate back.
+    rig.fake().restarted();
+    rig.step(T + MIN + 10_000);
+    assert_eq!(rig.take(), [Command::ShowSlate(Slate::ClockNotSet)]);
+    // The clock synchronizes: the next check writes the schedules and tunes
+    // the lowest channel.
+    rig.trusted.set(true);
+    rig.step(T + 2 * MIN);
+    assert!(rig.store.schedule_end_ms(3).unwrap() > stored);
+    assert_eq!(rig.take(), [Command::ShowStatic]);
+    assert_eq!(rig.tv.channel(), Some(3));
+    let live = rig.go_live(T + 2 * MIN);
+    assert!(live.contains(&queue("show", 12 * MIN + 500 + TUNE_IN_MS)));
+}
+
+/// Tunes channel 7, which has the filler pool, with `events` on it, and
+/// goes live on its first program.
+fn on_seven(rig: &mut Rig, events: &[Event]) {
+    rig.write(3, &[program(T - 10 * MIN, T + 50 * MIN, "show", 0)]);
+    rig.write(7, events);
+    rig.start();
+    rig.go_live(T);
+    rig.press(Key::Previous, T + 10_000);
+    rig.go_live(T + 10_000);
+    assert_eq!(rig.tv.channel(), Some(7));
+    rig.step(T + 30_000);
+    rig.take();
+}
+
+#[test]
+fn an_unplayable_program_is_replaced_by_filler_and_the_next_item_plays() {
+    let mut rig = Rig::new();
+    on_seven(
+        &mut rig,
+        &[
+            program(T - 10 * MIN, T + MIN, "show", 0),
+            program(T + MIN, T + 3 * MIN + 30_000, "tc", 0),
+            program(T + 3 * MIN + 30_000, T + 5 * MIN, "movie", 0),
+        ],
+    );
+    rig.tv.player_mut().broken.insert(MediaId::new("tc"));
+    let filler = rig.clip("filler.mp4");
+    // Jellyfin refuses `tc`: its time is filled with the 60 s filler clip,
+    // whole, then cut at the event's end.
+    rig.step(T + MIN);
+    assert_eq!(
+        rig.take(),
+        [
+            Command::PlayClip(filler.clone().into()),
+            Command::QueueClip(filler.clone().into())
+        ]
+    );
+    rig.step(T + 2 * MIN);
+    assert_eq!(rig.take(), [Command::QueueClip(filler.clone().into())]);
+    rig.step(T + 3 * MIN);
+    assert_eq!(rig.take(), []);
+    rig.step(T + 3 * MIN + 30_000);
+    assert_eq!(rig.take(), [play("movie", 0)]);
+    let history = rig.history(7);
+    assert_eq!(history[1], ("tc".into(), T + MIN, "failed".into()));
+    assert_eq!(history[2], (filler.clone(), T + MIN, "played".into()));
+    assert_eq!(
+        rig.store.substitutions(7).unwrap(),
+        [Substitution {
+            channel: 7,
+            media_id: MediaId::new("tc"),
+            scheduled_ms: T + MIN,
+            replacement: Some(MediaId::new(filler)),
+        }]
+    );
+}
+
+#[test]
+fn a_program_that_fails_twice_on_screen_is_replaced_by_filler() {
+    let mut rig = Rig::new();
+    on_seven(
+        &mut rig,
+        &[
+            program(T - 10 * MIN, T + MIN, "show", 0),
+            program(T + MIN, T + 3 * MIN, "movie", 0),
+        ],
+    );
+    rig.step(T + MIN);
+    assert_eq!(rig.take(), [play("movie", 0)]);
+    // The stream breaks off: it is tried once more at the live position.
+    rig.fake().failed();
+    rig.step(T + MIN + 5_000);
+    assert_eq!(rig.take(), [play("movie", 5_000)]);
+    // It fails again, so filler takes the rest of its time.
+    rig.fake().failed();
+    rig.step(T + MIN + 6_000);
+    let filler = rig.clip("filler.mp4");
+    assert_eq!(rig.take(), [Command::PlayClip(filler.into())]);
+    assert_eq!(rig.store.substitutions(7).unwrap().len(), 1);
+    // Reading the schedule again does not try it again.
+    rig.tv.synced(
+        T + MIN + 7_000,
+        &mut rig.store,
+        Ok(SyncReport {
+            items: 3,
+            collections: 1,
+            skipped: 0,
+            changes: LibraryChanges::default(),
+        }),
+    );
+    rig.step(T + MIN + 7_020);
+    assert_eq!(rig.take(), []);
+}
+
+#[test]
+fn with_jellyfin_unreachable_the_slate_shows_clips_play_and_programs_come_back() {
+    let mut rig = Rig::new();
+    let ad1 = rig.clip("ad1.mp4");
+    on_seven(
+        &mut rig,
+        &[
+            program(T - 10 * MIN, T + MIN, "show", 0),
+            program(T + MIN, T + 4 * MIN, "movie", 0),
+            event(T + 4 * MIN, T + 4 * MIN + 30_000, &ad1, 0, EventKind::Break),
+            program(T + 4 * MIN + 30_000, T + 10 * MIN, "movie", 3 * MIN as u64),
+        ],
+    );
+    rig.tv.player_mut().down = true;
+    rig.step(T + MIN);
+    assert_eq!(
+        rig.take(),
+        [Command::ShowSlate(Slate::TechnicalDifficulties)]
+    );
+    // A minute later it is tried again, quietly; still down.
+    rig.step(T + 2 * MIN);
+    assert_eq!(rig.take(), []);
+    // The break's clip is local and plays.
+    rig.step(T + 4 * MIN);
+    assert_eq!(rig.take(), [Command::PlayClip(ad1.clone().into())]);
+    rig.step(T + 4 * MIN + 30_000);
+    assert_eq!(
+        rig.take(),
+        [Command::ShowSlate(Slate::TechnicalDifficulties)]
+    );
+    // Jellyfin is back: the next retry plays the program at its live position.
+    rig.tv.player_mut().down = false;
+    rig.step(T + 5 * MIN + 30_000);
+    assert_eq!(rig.take(), [play("movie", 4 * MIN)]);
+    let outcomes: Vec<_> = rig.history(7).into_iter().skip(1).collect();
+    assert_eq!(
+        outcomes,
+        [
+            ("movie".into(), T + MIN, "failed".into()),
+            (ad1, T + 4 * MIN, "played".into()),
+            ("movie".into(), T + 4 * MIN + 30_000, "failed".into()),
+            ("movie".into(), T + 5 * MIN + 30_000, "played".into()),
+        ]
+    );
+    assert_eq!(rig.store.substitutions(7).unwrap(), []);
 }
 
 #[test]

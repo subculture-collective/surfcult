@@ -69,7 +69,7 @@ It leaves static up when:
 
 - the tune-in pool has no clip (`NoTuneInClip`);
 - the schedule cannot be read (`Schedule`);
-- the player rejects a command (`Player`). If the player rejects the stand-by card, the reason is `Player`, not the schedule reason, and `MpvPlayer` shows static in place of a card MPV refused in part.
+- the player rejects a command, or reports that the tune-in clip or the program could not be played (`PlayerEvent::Failed`) before the program started (`Player`). If the player rejects the stand-by card, the reason is `Player`, not the schedule reason, and `MpvPlayer` shows static in place of a card MPV refused in part.
 
 The card brings its display filters (by default the CRT shader and the glitch; see [player.md](player.md#display-filters)), so they apply in each of the cases above.
 
@@ -81,7 +81,7 @@ When the player reports `Restarted` (MPV died and the watchdog started a new one
 
 ## What it does not do
 
-- It does not wait for a slow program. A slow transcode keeps the state at `AwaitingProgram`; there is no timeout. Giving up and showing a slate is failure handling (issue #34).
+- It does not give up on a slow program. A slow transcode keeps the state at `AwaitingProgram`; there is no timeout. A program that fails ends the sequence, and the run loop's driver handles it ([run.md](run.md#failures)).
 - It does not leave the stand-by card when the schedule later has something to play. The run loop's playback driver does ([run.md](run.md#the-playback-driver)).
 - It does not build playback URLs or ask Jellyfin to transcode (issue #21).
 - It does not follow the schedule after the program has started. The playback driver moves to the next event ([run.md](run.md#the-playback-driver)).

@@ -41,19 +41,42 @@
 //!
 //! # Failures
 //!
-//! A player or Jellyfin error is logged, the stand-by card shows, and the
-//! driver moves on at the next boundary. Each started program and clip is
-//! recorded in the playback history as `played`, or `failed` when the player
-//! refused it.
+//! Each started program and clip is recorded in the playback history as
+//! `played`, or `failed` when it could not play. What shows instead depends
+//! on why:
+//!
+//! - **An unplayable program**: the player refused it (Jellyfin cannot play
+//!   the item) or reported it failed ([`PlayerEvent::Failed`]: a missing
+//!   file, a stream that would not open). A program that fails after the
+//!   player took it is tried once more at its live position first, since the
+//!   stream may have broken off; a second failure gives up. The rest of its
+//!   event is filled from the channel's filler pool, as
+//!   [`fit`](crate::schedule::fit) pads a short file, and the next event
+//!   starts on time. The event is recorded as a substitution with the first
+//!   filler clip as its replacement (none without a filler pool, when the
+//!   stand-by card shows instead). The stored schedule is not changed; an
+//!   event that gave up stays given up for this run, so reading the
+//!   schedule again does not retry it.
+//! - **Jellyfin unreachable**: a program whose stream Jellyfin did not answer
+//!   for ([`PlayerError::is_unreachable`]) shows the technical-difficulties
+//!   slate ([`Slate::TechnicalDifficulties`]). Break, filler and ident clips
+//!   are local files and play at their boundaries as usual. The program is
+//!   tried again every minute while its event lasts, and at the next program
+//!   boundary, so the channel comes back when Jellyfin does.
+//! - **A clip that cannot play**: one missing from the scanned pools, refused
+//!   by the player or reported failed shows the stand-by card until the next
+//!   boundary.
+//!
+//! [`PlayerEvent::Failed`]: crate::player::PlayerEvent::Failed
 
 use std::time::Duration;
 
 use crate::clips::{Clip, ClipLibrary};
 use crate::library::profile::needs_transcode;
 use crate::library::{MediaId, MediaSource};
-use crate::player::Player;
+use crate::player::{Player, PlayerError, Slate};
 use crate::schedule::{clip_media_id, fit, record_fit};
-use crate::store::Store;
+use crate::store::{Store, Substitution};
 use crate::timeline::{Event, EventKind, Lookup, lookup, program_from};
 use crate::tuner::Timing;
 
@@ -70,6 +93,10 @@ const REFRESH_AHEAD_MS: i64 = 60 * 60 * 1000;
 /// again this often, so a schedule written meanwhile starts playing.
 const RECHECK_MS: i64 = 60 * 1000;
 
+/// While the technical-difficulties slate stands in for a program, the
+/// program is tried again this often.
+const RETRY_MS: i64 = 60 * 1000;
+
 /// A clip that ends within this much of its event's end gets the next item
 /// queued behind it.
 pub(super) const QUEUE_TOLERANCE_MS: i64 = 1_000;
@@ -81,6 +108,8 @@ enum On {
     Event(Event),
     /// The stand-by card.
     Standby,
+    /// The technical-difficulties slate, in place of this program event.
+    Slate(Event),
     /// Something the schedule does not account for, such as a program the
     /// tuner started that is no longer on.
     Unknown,
@@ -104,6 +133,13 @@ struct Following {
     /// A program the driver started that has not reported its start.
     awaiting: Option<MediaId>,
     recheck_ms: i64,
+    /// When the program behind the slate is tried again.
+    retry_ms: i64,
+    /// The program event that failed once after the player took it and was
+    /// tried again.
+    retried: Option<Event>,
+    /// Program events given up as unplayable, whose time filler fills.
+    unplayable: Vec<Event>,
 }
 
 /// The things a step uses that the loop owns.
@@ -112,6 +148,8 @@ pub(super) struct Context<'a, P> {
     pub store: &'a mut Store,
     pub clips: &'a ClipLibrary,
     pub streams: &'a mut dyn Streams,
+    /// The tuned channel's filler pool, empty without one.
+    pub filler: &'a [Clip],
 }
 
 pub(super) struct ProgramStartContext<'a, 'b, P> {
@@ -265,6 +303,18 @@ impl Driver {
             }
             self.set_fire(&*cx.store);
         }
+        if let Some(f) = self.following.as_mut()
+            && let On::Slate(event) = &f.on
+            && now_ms >= f.retry_ms
+            && now_ms < event.end_ms
+            && let Lookup::On {
+                event, offset_ms, ..
+            } = lookup(&f.events, now_ms)
+        {
+            let event = event.clone();
+            f.show(event, offset_ms, now_ms, cx);
+            self.set_fire(&*cx.store);
+        }
         let due = self
             .following
             .as_ref()
@@ -273,6 +323,48 @@ impl Driver {
         if due {
             self.advance(now_ms, cx);
         }
+    }
+
+    /// The player could not play what is on screen. A program is tried once
+    /// more at its live position, then given up; a clip leaves the stand-by
+    /// card up until the next boundary. See the module documentation.
+    pub(super) fn item_failed(&mut self, now_ms: i64, cx: &mut Context<'_, impl Player>) {
+        let Some(f) = self.following.as_mut() else {
+            return;
+        };
+        let On::Event(event) = f.on.clone() else {
+            return;
+        };
+        f.queued = None;
+        f.awaiting = None;
+        let channel = f.channel;
+        if event.kind != EventKind::Program {
+            eprintln!(
+                "surfcult: channel {channel}: the clip {} failed",
+                event.media_id
+            );
+            record(cx.store, channel, &event.media_id, now_ms, "failed");
+            cx.streams.stop_all();
+            show_standby(channel, cx.player);
+            f.on = On::Standby;
+        } else if f.retried.as_ref() != Some(&event) {
+            eprintln!(
+                "surfcult: channel {channel}: {} failed; trying it once more",
+                event.media_id
+            );
+            f.retried = Some(event.clone());
+            f.on = On::Unknown;
+            if let Lookup::On {
+                event, offset_ms, ..
+            } = lookup(&f.events, now_ms)
+            {
+                let event = event.clone();
+                f.show(event, offset_ms, now_ms, cx);
+            }
+        } else {
+            f.give_up(event, "it failed twice", now_ms, cx);
+        }
+        self.set_fire(&*cx.store);
     }
 
     /// Moves the screen to what the schedule has at the boundary.
@@ -353,6 +445,9 @@ impl Following {
             queued: None,
             awaiting: None,
             recheck_ms: i64::MIN,
+            retry_ms: i64::MIN,
+            retried: None,
+            unplayable: Vec::new(),
         }
     }
 
@@ -397,20 +492,18 @@ impl Following {
             {
                 return;
             }
+            if self.unplayable.contains(&event) {
+                self.fill(event, now_ms, cx);
+                return;
+            }
             cx.streams.stop_all();
             match cx.player.play_program(&event.media_id, offset_ms) {
                 Ok(()) => {
                     self.awaiting = Some(event.media_id.clone());
                     record(cx.store, channel, &event.media_id, now_ms, "played");
                 }
-                Err(e) => {
-                    eprintln!(
-                        "surfcult: channel {channel}: cannot play {}: {e}",
-                        event.media_id
-                    );
-                    show_standby(channel, cx.player);
-                    record(cx.store, channel, &event.media_id, now_ms, "failed");
-                }
+                Err(e) if e.is_unreachable() => self.slate(event, previous, &e, now_ms, cx),
+                Err(e) => self.give_up(event, &e.to_string(), now_ms, cx),
             }
             return;
         }
@@ -440,6 +533,86 @@ impl Following {
                 eprintln!("surfcult: channel {channel}: {why}");
                 show_standby(channel, cx.player);
                 record(cx.store, channel, &event.media_id, now_ms, "failed");
+            }
+        }
+    }
+
+    /// Jellyfin did not answer for program `event`: shows the
+    /// technical-difficulties slate in its place and tries again in a
+    /// minute. A slate already up stays without a redraw, and a retry of
+    /// the same event is not recorded again.
+    fn slate(
+        &mut self,
+        event: Event,
+        previous: On,
+        error: &PlayerError,
+        now_ms: i64,
+        cx: &mut Context<'_, impl Player>,
+    ) {
+        let channel = self.channel;
+        self.retry_ms = now_ms.saturating_add(RETRY_MS);
+        if previous == On::Slate(event.clone()) {
+            self.on = previous;
+            return;
+        }
+        eprintln!("surfcult: channel {channel}: {error}; showing the technical-difficulties slate");
+        record(cx.store, channel, &event.media_id, now_ms, "failed");
+        if !matches!(previous, On::Slate(_))
+            && let Err(e) = cx.player.show_slate(Slate::TechnicalDifficulties)
+        {
+            eprintln!("surfcult: channel {channel}: cannot show the slate: {e}");
+        }
+        self.on = On::Slate(event);
+    }
+
+    /// Gives up program `event` as unplayable for `why`: records the
+    /// failure and the substitution, then fills its time ([`Self::fill`]).
+    fn give_up(&mut self, event: Event, why: &str, now_ms: i64, cx: &mut Context<'_, impl Player>) {
+        let channel = self.channel;
+        eprintln!(
+            "surfcult: channel {channel}: cannot play {}: {why}; filler takes its place",
+            event.media_id
+        );
+        record(cx.store, channel, &event.media_id, now_ms, "failed");
+        let substitution = Substitution {
+            channel,
+            media_id: event.media_id.clone(),
+            scheduled_ms: event.start_ms,
+            replacement: fit(&event, 0, cx.filler)
+                .events
+                .first()
+                .map(|e| e.media_id.clone()),
+        };
+        if let Err(e) = cx.store.record_substitution(&substitution, now_ms) {
+            eprintln!("surfcult: channel {channel}: cannot record the substitution: {e}");
+        }
+        self.unplayable.retain(|e| e.end_ms > now_ms);
+        self.unplayable.push(event.clone());
+        self.fill(event, now_ms, cx);
+    }
+
+    /// Replaces unplayable program `event` in the events read with filler
+    /// from the channel's pool for its whole time, and shows what that puts
+    /// on now: a filler clip, or the stand-by card without a filler pool.
+    fn fill(&mut self, event: Event, now_ms: i64, cx: &mut Context<'_, impl Player>) {
+        if let Some(index) = self.events.iter().position(|stored| *stored == event) {
+            self.events
+                .splice(index..index + 1, fit(&event, 0, cx.filler).events);
+        }
+        match lookup(&self.events, now_ms) {
+            Lookup::On {
+                event: on,
+                offset_ms,
+                ..
+            } if on.kind != EventKind::Program => {
+                let on = on.clone();
+                self.show(on, offset_ms, now_ms, cx);
+            }
+            _ => {
+                cx.streams.stop_all();
+                show_standby(self.channel, cx.player);
+                self.on = On::Standby;
+                self.until_ms = Some(event.end_ms);
             }
         }
     }
