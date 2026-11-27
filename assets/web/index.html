@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>surfcult</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/admin.css">
+</head>
+<body>
+<header class="bar">
+  <a class="brand" href="#guide"><img src="/mark.svg" alt="" width="34" height="34"><span>SURFCULT</span></a>
+  <nav aria-label="Admin">
+    <a href="#guide" data-view="guide">Guide</a>
+    <a href="#channels" data-view="channels">Channels</a>
+    <a href="#system" data-view="system">System</a>
+  </nav>
+  <span class="clock" id="clock" aria-label="The TV's time"></span>
+</header>
+
+<main id="view" aria-live="polite">
+  <p class="note">Loading…</p>
+</main>
+
+<section class="panel token" id="token" hidden>
+  <h2>Access token</h2>
+  <p>This surfcult asks for a token. It is the value of <code>SURFCULT_API_TOKEN</code> on the Pi. This browser keeps it until you clear it.</p>
+  <form id="token-form">
+    <label for="token-input">Token</label>
+    <input id="token-input" type="password" autocomplete="off" required>
+    <p class="error" id="token-error" hidden>That token was refused. Check it and try again.</p>
+    <button class="btn" type="submit">Save token</button>
+  </form>
+</section>
+
+<footer class="status" id="status"></footer>
+<script src="/admin.js"></script>
+</body>
+</html>

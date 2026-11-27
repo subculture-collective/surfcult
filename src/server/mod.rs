@@ -7,7 +7,7 @@
 //! `Authorization: Bearer <token>` or it gets `401`.
 //!
 //! Every route is a fixed `GET`. Nothing here runs a command, writes to the
-//! store or reads a file: channels come from the parsed [`Config`] and the
+//! store or reads a file at run time: channels come from the parsed [`Config`] and the
 //! rest from the [`Store`]. Any other method gets `405` and any other path
 //! `404`.
 //!
@@ -24,11 +24,16 @@
 //!
 //! `/xmltv.xml` exports the guide as XMLTV.
 //!
+//! `/` is the web admin, one compiled-in page that reads the API from the
+//! browser ([`web`]). The page and its files hold no data and need no token;
+//! `/guide`, the titled guide the page draws, does.
+//!
 //! Endpoints and JSON shapes are in `docs/reference/api.md`.
 
 mod settings;
 #[cfg(test)]
 mod tests;
+mod web;
 mod xmltv;
 
 use std::sync::{Arc, Mutex, PoisonError};
@@ -87,13 +92,17 @@ pub fn router(config: Config, store: Store, token: Option<ApiToken>, now: Clock)
         token: token.map(Arc::new),
         now,
     };
-    Router::new()
+    // The reads, and any unknown path, are behind the token; the admin
+    // page's files are not.
+    let reads = Router::new()
         .route("/channels", get(channels))
         .route("/schedule", get(schedule))
         .route("/xmltv.xml", get(xmltv::guide))
         .route("/health", get(health))
-        .layer(middleware::from_fn_with_state(state.clone(), require_token))
-        .with_state(state)
+        .route("/guide", get(web::guide))
+        .fallback(|| async { StatusCode::NOT_FOUND })
+        .layer(middleware::from_fn_with_state(state.clone(), require_token));
+    web::pages().merge(reads).with_state(state)
 }
 
 /// Serves the read API on `listener` until it fails. The caller binds the
