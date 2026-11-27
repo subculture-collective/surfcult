@@ -83,7 +83,7 @@ Remote keys arrive as Linux input events from the input device named `vc4-hdmi-0
 
 ## Run the TV
 
-`surfcult run` is the TV: remote, channel changes, schedules, MPV and the banner ([run reference](../reference/run.md)). Until the boot-time service exists (issue #36), start it by hand over SSH. Nothing else may hold the display: stop any MPV left from a test first.
+`surfcult run` is the TV: remote, channel changes, schedules, MPV and the banner ([run reference](../reference/run.md)). [Boot into surfcult](#boot-into-surfcult) below makes the Pi start it at power-on. This section is for a manual run over SSH, for example to test a change: stop the service first (`sudo systemctl stop surfcult`), because nothing else may hold the display. Stop any MPV left from a test too.
 
 1. Get the binary. The updater installs each `main` build as `/opt/surfcult/current/surfcult` (see Updates below). Without the updater, copy the `surfcult-aarch64` artifact of a `main` run to the Pi. Do not build on the Pi.
 2. Put a `channels.toml` and the clip pools on the Pi. Every `[[interstitial_pool]]` path must exist and hold clips, at least the tune-in pool (`tune_in_pool`, default `tune-in`). The example config uses `/var/lib/surfcult/clips/<pool>`. Check the file with `surfcult check-config`.
@@ -110,6 +110,48 @@ Check what the TV shows against the schedule from a second SSH session:
 ```
 
 Each line has the channel, the program on now, its start and end, and the position the TV should be at.
+
+## Boot into surfcult
+
+`deploy/pi/surfcult.service` starts `surfcult run` at boot as `patrick`, with MPV on the TV. (The issue asked for `packaging/systemd/`; the Pi's other units are in `deploy/pi/`, so this one is there too.)
+
+From a fresh Raspberry Pi OS Lite image (Debian 13, 64-bit) to a working TV:
+
+1. Flash the image, set the user `patrick` with the operator's key, and boot. See [The device](#the-device) and [Reach it](#reach-it).
+2. Install the packages in [What is installed](#what-is-installed): `sudo apt-get install mpv ffmpeg cec-utils socat jq` (and `git` to fetch this repository). Add `patrick` to the groups `video`, `render` and `input` (`audio` is already there): `sudo usermod -aG video,render,input patrick`. Log in again.
+3. Put the Jellyfin key in a file only `patrick` can read, for example `~/spike/.jf-key` with mode 600. See [Play from Jellyfin](#play-from-jellyfin).
+4. Put `channels.toml` and the clip pools in `~/surfcult/` and check it with `surfcult check-config` (see [Run the TV](#run-the-tv)). The service needs the binary, so do step 5 first if the updater is not yet running.
+5. Install the service and the updater from a checkout of this repository: `cd deploy/pi && sudo ./install.sh`. Add the updater's token as described in [Updates](#updates-the-pi-pulls-the-newest-main-build), then `sudo systemctl start surfcult-updater` to fetch the first build.
+6. Edit `/etc/surfcult/surfcult.env` if the Jellyfin address, the key file or the paths differ from the defaults. It is root-owned and world-readable, so it holds the key's path, never the key.
+7. Start it: `sudo systemctl start surfcult`. Reboot once to prove the boot path: the TV should show the clock slate or the stand-by card within about a minute, then a channel.
+
+What the unit does:
+
+- Runs `/opt/surfcult/current/surfcult run` with the config and database from `surfcult.env`, in `~/surfcult`, as `patrick`, with the groups `video render input audio`. MPV's files are in `/run/surfcult/surfcult` (a runtime directory the unit creates), so they do not depend on `/run/user/1000` existing.
+- Starts after `network-online.target` but does not wait for time sync. Until the clock is synchronized surfcult shows its own clock slate and writes no schedule ([the clock](../reference/run.md#schedules-and-the-clock)).
+- `Restart=always` after 5 s, including after a clean exit. After 10 failed starts in 5 minutes it gives up and stays failed (a bad config or missing key); fix it, then `sudo systemctl reset-failed surfcult && sudo systemctl start surfcult`.
+- Stops with SIGTERM, which surfcult handles: it stops the transcodes and MPV, then exits. Waiting for a library fetch can take up to 30 s, so the stop timeout is 45 s. `sudo systemctl stop surfcult` is therefore safe, and so are shutdown and reboot. The Q key on a USB keyboard also exits it, and the unit then restarts it after 5 s; stop the service to keep it down.
+
+The console. surfcult draws with MPV straight on the display (KMS), and the USB keyboard that works as a remote is also the keyboard of tty1. `install.sh` therefore masks `getty@tty1.service`: no login prompt runs on tty1, so a stray keyboard cannot reach a shell on the TV. Masking, not just `Conflicts=` in the unit, because logind starts `getty@tty1` on its own when the console is switched to, which would stop surfcult. MPV does not need the console: it ran over plain SSH before, and the unit gives it no terminal. To get a console back:
+
+- SSH in (the normal way to operate the Pi), or
+- press Ctrl-Alt-F2 on a USB keyboard for a login on tty2. logind still starts it, so a keyboard on the Pi can reach a login. If that is not acceptable, set `NAutoVTs=0` in `/etc/systemd/logind.conf.d/` (not done by `install.sh`), or
+- to restore tty1 fully: `sudo systemctl stop surfcult; sudo systemctl unmask getty@tty1.service; sudo systemctl start getty@tty1.service`.
+
+Operate:
+
+```bash
+systemctl status surfcult                   # running or not, last exit
+journalctl -u surfcult -f                   # logs; every line from surfcult starts "surfcult:"
+journalctl -u surfcult -b -p warning        # this boot, warnings and worse
+sudo systemctl restart surfcult
+sudo systemctl disable --now surfcult       # no start at boot, stop now
+sudo systemctl enable --now surfcult        # and back
+```
+
+Updates and rollback. The updater already restarts `surfcult.service` after it installs a build, waits 10 s and rolls back to `previous` if the unit is not active ([Updates](#updates-the-pi-pulls-the-newest-main-build)); it did nothing before because the unit did not exist, so no change to the updater was needed. A restart blanks the TV for a few seconds, and it is the price of the update. To avoid an update at a bad time, stop the timer. To go back by hand to the previous build: `sudo ln -sfn releases/$(basename $(readlink /opt/surfcult/previous)) /opt/surfcult/current && sudo systemctl restart surfcult`, and disable the timer so it does not reinstall the bad one. A build that failed on this Pi is not retried.
+
+Not checked on the Pi yet (the unit is written but not applied): a cold boot into the TV, `systemctl stop` during a transcode, and an update while a program plays. The owner checks these, then closes issue #36.
 
 ## Updates: the Pi pulls the newest main build
 
@@ -207,6 +249,7 @@ Run them one at a time (`--test-threads=1`): they share the TV. The Jellyfin che
 
 - Packages: `sudo apt-get remove mpv ffmpeg git cec-utils socat jq`, then `sudo apt-get autoremove`.
 - Sudo rule: see above.
+- Service: `sudo systemctl disable --now surfcult`, `sudo rm /etc/systemd/system/surfcult.service`, `sudo systemctl unmask getty@tty1.service`, `sudo systemctl daemon-reload`. Keep `/etc/surfcult/surfcult.env` if you will reinstall; otherwise `sudo rm -rf /etc/surfcult`.
 - Updater: `sudo systemctl disable --now surfcult-updater.timer`, then `sudo rm -rf /usr/local/sbin/surfcult-update /etc/systemd/system/surfcult-updater.* /opt/surfcult /etc/surfcult-updater` and `sudo systemctl daemon-reload`. Revoke the token on GitHub.
 - T3 and Tailscale: `t3 environment unlink surfcult` on the linking machine. On the Pi: `tailscale serve --https=443 off`, `tailscale serve --http=3775 off`, `t3 service uninstall`, `t3 uninstall`, `rm -rf ~/.t3 ~/.config/systemd/user/t3code.service.d`, `sudo loginctl disable-linger patrick`, `sudo tailscale logout`, `sudo apt-get remove tailscale nodejs npm`. Delete the `surfcult` machine in the Tailscale admin console.
-- Test media: `rm -rf ~/spike` on the Pi.
+- Test media: `rm -rf ~/spike` on the Pi. The default key file in `surfcult.env` is `~/spike/.jf-key`; move it first if the service is still in use.
