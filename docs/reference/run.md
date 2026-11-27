@@ -1,12 +1,13 @@
 # Running the TV
 
-`surfcult run` is the TV on the Pi: it reads the remote and keyboards, changes channels with the tuner, keeps the screen on each channel's schedule and shows the channel banner. `surfcult now` prints what each channel is showing, to check the TV against. The code is in `src/run/`, `src/input/` and `src/overlay/`; `src/main.rs` only parses the command line.
+`surfcult run` is the TV on the Pi: it reads the remote and keyboards, changes channels with the tuner, keeps the screen on each channel's schedule and shows the channel banner. `surfcult now` prints what each channel is showing, to check the TV against, and `surfcult schedule --day` prints each channel's next 24 hours. The code is in `src/run/`, `src/input/` and `src/overlay/`; `src/main.rs` only parses the command line.
 
 ## Commands
 
 ```bash
 surfcult run <channels.toml> <db>
 surfcult now <channels.toml> <db>
+surfcult schedule --day <channels.toml> <db>
 ```
 
 `run` opens the database read-write and creates it if needed. `now` opens it read-only, needs no Jellyfin, and prints one line per channel in config order:
@@ -19,6 +20,18 @@ surfcult now <channels.toml> <db>
 ```
 
 A program line has the title (`Series: Episode` for an episode), the local start and end of the whole program, breaks included, and the live position in the media. A break, filler or ident line has the clip's file name, the event's times and the position in the clip. `off the air until` gives the start of the next stored event; `nothing scheduled` means the store has no event for the next seven days. `run` and `now` read the same clock, so `now` run at the moment the TV changes channel shows what the TV should be showing.
+
+`schedule --day` is read-only like `now`: it prints the stored schedule, never a new draw, and needs no Jellyfin. Each channel in the config gets its number and name, then one indented line per program that overlaps the next 24 hours, with the program's local start and end (breaks included, as in the guide) and its title, or `nothing scheduled`:
+
+```
+   3  SATURDAY CARTOONS
+      19:00-19:30  The Simpsons: Bart the Genius
+      19:30-20:00  The Simpsons: Homer's Odyssey
+   6  NEWS
+      nothing scheduled
+```
+
+Every channel in the config is listed; the config has no way to disable one.
 
 ## Environment
 

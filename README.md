@@ -5,7 +5,7 @@ A self-hosted, offline-first television channel simulator for Raspberry Pi and L
 ## What it contains
 
 - `src/lib.rs`: declares the library modules
-- `src/main.rs`: the binary, `surfcult check-config <channels.toml>`, `surfcult serve <channels.toml> <db>` (the read API, see `docs/reference/api.md`), `surfcult run <channels.toml> <db>` (the TV) and `surfcult now <channels.toml> <db>` (what each channel shows now; see `docs/reference/run.md`)
+- `src/main.rs`: the binary, `surfcult check-config <channels.toml>`, `surfcult serve <channels.toml> <db>` (the read API, see `docs/reference/api.md`), `surfcult run <channels.toml> <db>` (the TV) and `surfcult now <channels.toml> <db>` (what each channel shows now) and `surfcult schedule --day <channels.toml> <db>` (each channel's next 24 hours; see `docs/reference/run.md`)
 - `Cargo.toml`, `Cargo.lock`: package metadata (edition 2024; axum, chrono, chrono-tz, rusqlite, serde, serde_json, tokio, toml and ureq; tempfile and tower for tests) and the lockfile
 - `Makefile`: `make verify` runs every check; `make help` lists the targets
 - `.github/workflows/pr-ci.yml`: the `PR CI` workflow; runs on every pull request and ends with the `CI gate` job

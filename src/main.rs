@@ -2,7 +2,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use surfcult::config::Config;
-use surfcult::run::{app, now_lines};
+use surfcult::run::{app, day_lines, now_lines};
 use surfcult::server::{self, ServerSettings};
 use surfcult::store::Store;
 
@@ -18,9 +18,10 @@ fn main() -> ExitCode {
         ["serve", config, db] => serve(Path::new(config), Path::new(db)),
         ["run", config, db] => run(Path::new(config), Path::new(db)),
         ["now", config, db] => now(Path::new(config), Path::new(db)),
+        ["schedule", "--day", config, db] => schedule_day(Path::new(config), Path::new(db)),
         _ => {
             eprintln!(
-                "usage: surfcult check-config <channels.toml>\n       surfcult serve <channels.toml> <db>\n       surfcult run <channels.toml> <db>\n       surfcult now <channels.toml> <db>"
+                "usage: surfcult check-config <channels.toml>\n       surfcult serve <channels.toml> <db>\n       surfcult run <channels.toml> <db>\n       surfcult now <channels.toml> <db>\n       surfcult schedule --day <channels.toml> <db>"
             );
             ExitCode::from(2)
         }
@@ -99,6 +100,20 @@ fn run(config_path: &Path, db_path: &Path) -> ExitCode {
 
 /// Prints what each channel is showing now, from the store, read-only.
 fn now(config_path: &Path, db_path: &Path) -> ExitCode {
+    print_from_store("now", config_path, db_path, now_lines)
+}
+
+/// Prints each channel's next 24 hours from the stored schedule, read-only.
+fn schedule_day(config_path: &Path, db_path: &Path) -> ExitCode {
+    print_from_store("schedule", config_path, db_path, day_lines)
+}
+
+fn print_from_store(
+    command: &str,
+    config_path: &Path,
+    db_path: &Path,
+    lines: fn(&Config, &Store, i64) -> Vec<String>,
+) -> ExitCode {
     let config = match Config::load(config_path) {
         Ok(config) => config,
         Err(err) => {
@@ -108,13 +123,13 @@ fn now(config_path: &Path, db_path: &Path) -> ExitCode {
     };
     match Store::open_read_only(db_path) {
         Ok(store) => {
-            for line in now_lines(&config, &store, app::now_ms()) {
+            for line in lines(&config, &store, app::now_ms()) {
                 println!("{line}");
             }
             ExitCode::SUCCESS
         }
         Err(err) => {
-            eprintln!("surfcult now: {}: {err}", db_path.display());
+            eprintln!("surfcult {command}: {}: {err}", db_path.display());
             ExitCode::FAILURE
         }
     }

@@ -1,4 +1,5 @@
-//! `surfcult now`: what each channel is showing, one line per channel.
+//! `surfcult now` and `surfcult schedule --day`: what each channel is
+//! showing, one line per channel, and what it shows over the next 24 hours.
 //!
 //! The owner's check against the TV: it reads the store read-only and never
 //! asks Jellyfin. For a program the line has its title, its local start and
@@ -26,6 +27,41 @@ pub fn now_lines(config: &Config, store: &Store, now_ms: i64) -> Vec<String> {
         })
         .collect()
 }
+
+/// The next 24 hours of every channel of `config`, in config order: the
+/// channel's line, then one indented line per program with its local start
+/// and end and its title. Reads only the stored schedule.
+pub fn day_lines(config: &Config, store: &Store, now_ms: i64) -> Vec<String> {
+    let window = Window {
+        from_ms: now_ms,
+        to_ms: now_ms.saturating_add(DAY_MS),
+    };
+    let tz = config.timezone;
+    let mut lines = Vec::new();
+    for channel in &config.channels {
+        lines.push(format!("{:>4}  {}", channel.number, channel.name));
+        match guide::build(store, store, &[channel.number], window) {
+            Ok(rows) => {
+                let cells = rows.first().map_or(&[][..], |row| &row.cells[..]);
+                if cells.is_empty() {
+                    lines.push("      nothing scheduled".into());
+                }
+                for cell in cells {
+                    lines.push(format!(
+                        "      {}-{}  {}",
+                        clock(cell.start_ms, tz),
+                        clock(cell.end_ms, tz),
+                        program_title(&cell.media_id, store)
+                    ));
+                }
+            }
+            Err(e) => lines.push(format!("      cannot read the schedule: {e}")),
+        }
+    }
+    lines
+}
+
+const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 
 fn on_now(channel: u32, store: &Store, now_ms: i64, tz: Tz) -> String {
     let events = match store.events_between(channel, now_ms, now_ms.saturating_add(1)) {
@@ -205,6 +241,72 @@ mod tests {
                 "   4  MOVIES  off the air until 23:00",
                 "   5  ADS  break ad.mp4  19:14-19:15  at 0:00:30",
                 "   6  EMPTY  nothing scheduled",
+            ]
+        );
+    }
+
+    #[test]
+    fn day_lists_each_channels_programs_in_the_next_24_hours() {
+        let config = Config::parse(
+            r#"
+            timezone = "UTC"
+            [[channel]]
+            number = 3
+            name = "CARTOONS"
+            source = { jellyfin_collection = "Cartoons" }
+            mode = "sequential"
+            [[channel]]
+            number = 6
+            name = "EMPTY"
+            source = { jellyfin_library = "Movies" }
+            mode = "sequential"
+            "#,
+        )
+        .unwrap();
+        let mut store = Store::open_in_memory().unwrap();
+        let item = MediaItem::new("show", "The Show", MediaKind::Movie, 1_320_000);
+        store
+            .replace_library(&[LibraryEntry { item, path: None }], &[], 0)
+            .unwrap();
+        store
+            .write_events(
+                3,
+                &[
+                    event(at(19, 0, 0), at(19, 11, 0), "show", 0, EventKind::Program),
+                    event(
+                        at(19, 11, 0),
+                        at(19, 13, 0),
+                        "/c/ad.mp4",
+                        0,
+                        EventKind::Break,
+                    ),
+                    event(
+                        at(19, 13, 0),
+                        at(19, 24, 0),
+                        "show",
+                        660_000,
+                        EventKind::Program,
+                    ),
+                    event(at(20, 0, 0), at(20, 22, 0), "gone", 0, EventKind::Program),
+                    event(
+                        at(19, 30, 0) + DAY_MS,
+                        at(19, 52, 0) + DAY_MS,
+                        "show",
+                        0,
+                        EventKind::Program,
+                    ),
+                ],
+            )
+            .unwrap();
+        let lines = day_lines(&config, &store, at(19, 14, 30));
+        assert_eq!(
+            lines,
+            [
+                "   3  CARTOONS",
+                "      19:00-19:24  The Show",
+                "      20:00-20:22  UNKNOWN PROGRAM",
+                "   6  EMPTY",
+                "      nothing scheduled",
             ]
         );
     }
