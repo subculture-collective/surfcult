@@ -24,7 +24,7 @@ Environment=XDG_RUNTIME_DIR=/run/surfcult
 ExecStart=/opt/surfcult/current/surfcult run ${SURFCULT_CONFIG} ${SURFCULT_DB}
 Restart=always
 RestartSec=5
-# SIGTERM makes surfcult stop its transcodes and MPV, then exit. It may wait up to 30 s for a library fetch.
+# SIGTERM makes surfcult stop its transcodes and MPV, then exit, within a few seconds.
 # mixed: the signal goes to surfcult alone, and anything left behind is killed after it exits.
 KillSignal=SIGTERM
 KillMode=mixed
