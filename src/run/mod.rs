@@ -55,7 +55,7 @@ use crate::tuner::{State, Timing, Tuner};
 
 pub use clock::{CLOCK_ENV, trusted as clock_trusted};
 use driver::{Context, Driver, ProgramStartContext};
-pub use now::now_lines;
+pub use now::{day_lines, now_lines};
 pub use streams::{JellyfinResolver, Streams, Transcodes, jellyfin as jellyfin_streams};
 
 /// A channel's program pools, one per source, as `schedule::extend` takes
