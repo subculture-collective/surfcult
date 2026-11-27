@@ -1488,3 +1488,57 @@ fn the_web_admin_tunes_known_channels_and_sets_the_crt_filter() {
         Some("light")
     );
 }
+
+#[test]
+fn a_channel_changed_in_the_web_admin_is_regenerated_after_the_freeze() {
+    let mut rig = Rig::new();
+    rig.start();
+    let before = rig.store.events_between(3, T, i64::MAX).unwrap();
+    let seven = rig.store.events_between(7, T, i64::MAX).unwrap();
+
+    let mut config = rig.tv.config.clone();
+    let three = config.channels.iter_mut().find(|c| c.number == 3).unwrap();
+    three.name = "TRES".into();
+    three.grid = Some(Duration::from_secs(90 * 60));
+    rig.tv.admin(
+        AdminCommand::Reconfigure(Box::new(config)),
+        T + MIN,
+        &mut rig.store,
+    );
+
+    assert_eq!(rig.tv.channel_config(3).unwrap().name, "TRES");
+    let after = rig.store.events_between(3, T, i64::MAX).unwrap();
+    // The program on screen is frozen; from the freeze on the grid applies.
+    assert_eq!(after[0], before[0]);
+    assert_ne!(after, before);
+    assert!(
+        after[1..]
+            .iter()
+            .filter(|e| e.kind == EventKind::Program)
+            .all(|e| e.start_ms % (90 * MIN) == 0),
+        "{after:?}"
+    );
+    // A channel that did not change keeps its schedule, extended as usual.
+    let seven_after = rig.store.events_between(7, T, i64::MAX).unwrap();
+    assert_eq!(seven_after[..seven.len()], seven[..]);
+    assert!(rig.tv.upkeep.reconfigured.is_empty());
+}
+
+#[test]
+fn a_change_made_before_the_clock_is_trusted_waits_for_it() {
+    let mut rig = Rig::new();
+    rig.start();
+    let before = rig.store.events_between(3, T, i64::MAX).unwrap();
+    rig.trusted.set(false);
+    let mut config = rig.tv.config.clone();
+    config.channels[1].grid = Some(Duration::from_secs(90 * 60));
+    rig.tv.admin(
+        AdminCommand::Reconfigure(Box::new(config)),
+        T + MIN,
+        &mut rig.store,
+    );
+    assert_eq!(rig.store.events_between(3, T, i64::MAX).unwrap(), before);
+    rig.trusted.set(true);
+    rig.tv.step(T + 2 * MIN, &mut rig.store);
+    assert_ne!(rig.store.events_between(3, T, i64::MAX).unwrap(), before);
+}

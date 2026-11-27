@@ -98,7 +98,11 @@ pub fn run(config_path: &Path, db_path: &Path) -> Result<(), String> {
         channel: None,
         crt: settings.crt,
     }));
-    start_admin(&config, db_path, Control::new(commands, status.clone()));
+    start_admin(
+        &config,
+        db_path,
+        Control::new(commands, status.clone(), config_path.to_path_buf()),
+    );
 
     let keys = config.keys.clone();
     let mut tv = Tv::new(

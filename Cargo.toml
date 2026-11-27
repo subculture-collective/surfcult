@@ -15,6 +15,7 @@ signal-hook = { version = "0.4.6", default-features = false }
 tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "simd"] }
 tokio = { version = "1.54.1", features = ["net", "rt", "time"] }
 toml = "1.2.2"
+toml_edit = { version = "0.25.21", default-features = false, features = ["parse", "display"] }
 ttf-parser = { version = "0.25.1", default-features = false, features = ["std"] }
 ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
 

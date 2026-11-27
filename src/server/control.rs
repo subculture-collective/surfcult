@@ -6,6 +6,7 @@
 //! [`TvStatus`] the loop keeps up to date, which the server reads. Standalone
 //! `surfcult serve` has no TV, so its control routes answer `503`.
 
+use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -16,15 +17,19 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 
 use super::{ApiError, AppState};
+use crate::config::Config;
 use crate::paint::Crt;
 
 /// What the web admin asks the TV to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AdminCommand {
     /// Change to this channel, as the remote would.
     Tune(u32),
     /// Use this CRT filter and store it, as the Picture menu would.
     SetCrt(Crt),
+    /// `channels.toml` was rewritten with this config, which differs from
+    /// the running one only in its channels' settings.
+    Reconfigure(Box<Config>),
 }
 
 /// What the TV is doing, as the run loop last wrote it.
@@ -39,11 +44,25 @@ pub struct TvStatus {
 pub struct Control {
     commands: Sender<AdminCommand>,
     status: Arc<Mutex<TvStatus>>,
+    /// The `channels.toml` the TV runs, which the admin rewrites.
+    pub(super) config_path: PathBuf,
+    /// Held while `channels.toml` is read, changed and written, so two edits
+    /// cannot lose one another.
+    pub(super) writing: Arc<Mutex<()>>,
 }
 
 impl Control {
-    pub fn new(commands: Sender<AdminCommand>, status: Arc<Mutex<TvStatus>>) -> Self {
-        Self { commands, status }
+    pub fn new(
+        commands: Sender<AdminCommand>,
+        status: Arc<Mutex<TvStatus>>,
+        config_path: PathBuf,
+    ) -> Self {
+        Self {
+            commands,
+            status,
+            config_path,
+            writing: Arc::default(),
+        }
     }
 
     fn status(&self) -> TvStatus {
@@ -104,7 +123,7 @@ pub(super) async fn tune(
 ) -> Result<StatusCode, ApiError> {
     let Json(body) = body.map_err(|r| ApiError::new(r.status(), r.body_text()))?;
     if !state
-        .config
+        .config()
         .channels
         .iter()
         .any(|c| c.number == body.channel)
@@ -134,7 +153,7 @@ pub(super) async fn crt(
 
 /// Hands `command` to the TV. `202`: the run loop carries it out at its next
 /// step, within a few tens of milliseconds.
-fn send(state: &AppState, command: AdminCommand) -> Result<StatusCode, ApiError> {
+pub(super) fn send(state: &AppState, command: AdminCommand) -> Result<StatusCode, ApiError> {
     let control = state.control.as_ref().ok_or_else(|| {
         ApiError::new(
             StatusCode::SERVICE_UNAVAILABLE,

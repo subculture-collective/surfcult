@@ -121,7 +121,7 @@ pub(super) async fn guide(
         ));
     }
     let channels: Vec<(u32, String)> = state
-        .config
+        .config()
         .channels
         .iter()
         .map(|c| (c.number, c.name.clone()))
@@ -168,7 +168,7 @@ pub(super) async fn guide(
         from_ms,
         to_ms,
         now_ms,
-        timezone: state.config.timezone.name().to_string(),
+        timezone: state.config().timezone.name().to_string(),
         channels,
     }))
 }

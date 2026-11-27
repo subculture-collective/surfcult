@@ -5,6 +5,7 @@
 //! against Jellyfin elsewhere.
 
 mod duration;
+pub mod edit;
 mod raw;
 
 use std::fmt;
