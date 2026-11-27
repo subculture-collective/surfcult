@@ -1,5 +1,5 @@
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::Duration;
 
 use super::client::{FetchedLibrary, JellyfinClient, JellyfinError};
@@ -15,14 +15,16 @@ type Fetched = Result<FetchedLibrary, JellyfinError>;
 /// store.
 ///
 /// The thread, named `jellyfin-sync`, fetches as soon as it starts and then
-/// once per interval. Dropping the worker stops the thread and waits for it to
-/// end: at once if it is between fetches, or once the fetch in progress
-/// finishes (the HTTP transport bounds how long that takes).
+/// once per interval. Dropping the worker tells the thread to stop and returns
+/// without waiting: the thread ends at once if it is between fetches, or once
+/// the fetch in progress finishes. A whole fetch can take minutes on a large
+/// library, and the thread never touches the store, so nothing waits for it;
+/// if the process exits first, the fetch is simply abandoned.
 pub struct SyncWorker {
     results: Receiver<Fetched>,
-    /// Dropped to stop the thread; the thread waits on the other end.
-    stop: Option<Sender<()>>,
-    thread: Option<JoinHandle<()>>,
+    /// Dropped with the worker to stop the thread; the thread waits on the
+    /// other end.
+    _stop: Sender<()>,
 }
 
 impl SyncWorker {
@@ -31,7 +33,7 @@ impl SyncWorker {
     pub fn spawn(client: JellyfinClient, every: Duration) -> std::io::Result<Self> {
         let (results_tx, results) = mpsc::channel();
         let (stop, stop_rx) = mpsc::channel::<()>();
-        let thread = thread::Builder::new()
+        thread::Builder::new()
             .name("jellyfin-sync".to_string())
             .spawn(move || {
                 loop {
@@ -46,8 +48,7 @@ impl SyncWorker {
             })?;
         Ok(Self {
             results,
-            stop: Some(stop),
-            thread: Some(thread),
+            _stop: stop,
         })
     }
 
@@ -94,17 +95,6 @@ impl SyncWorker {
             (Some(Err(write_error)), _) => Some(Err(write_error)),
             (_, Some(fetch_error)) => Some(Err(fetch_error)),
             (written, None) => written,
-        }
-    }
-}
-
-impl Drop for SyncWorker {
-    /// Stops the thread and joins it. A panic on the worker thread is ignored
-    /// here, so dropping the worker never panics the owner.
-    fn drop(&mut self) {
-        drop(self.stop.take());
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
         }
     }
 }

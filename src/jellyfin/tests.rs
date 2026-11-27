@@ -1676,9 +1676,6 @@ fn apply_with_nothing_pending_returns_none_and_writes_nothing() {
         serve_fixtures(path, 500, ITEMS)
     });
     let worker = SyncWorker::spawn(client(&http), HOUR).unwrap();
-    // Declared after `worker`, so a failed assertion drops it first and the
-    // fetch can finish before the worker's drop joins the thread.
-    let release = release;
     let mut store = Store::open_in_memory().unwrap();
 
     assert!(worker.apply(&mut store, SYNCED_AT).is_none());
@@ -1703,6 +1700,33 @@ fn dropping_a_worker_does_not_wait_for_the_next_interval() {
         "drop took {:?}",
         started.elapsed()
     );
+}
+
+#[test]
+fn dropping_a_worker_does_not_wait_for_a_fetch_in_progress() {
+    // The fetch blocks for up to 5 s, so a drop that waits for it fails the
+    // assertion instead of hanging the test.
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let gate = Mutex::new(gate);
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    let started_tx = Mutex::new(started_tx);
+    let http = FakeHttp::new(move |path| {
+        let _ = started_tx.lock().unwrap().send(());
+        let _ = gate.lock().unwrap().recv_timeout(Duration::from_secs(5));
+        serve_fixtures(path, 500, ITEMS)
+    });
+    let worker = SyncWorker::spawn(client(&http), HOUR).unwrap();
+    started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    let started = std::time::Instant::now();
+    drop(worker);
+
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "drop took {:?}",
+        started.elapsed()
+    );
+    drop(release);
 }
 
 #[test]

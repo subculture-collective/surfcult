@@ -126,7 +126,7 @@ Number entry: a digit starts a channel number, and each digit adds to it. The ch
 
 Only a press counts; a held key changes the channel once. Left and right do nothing yet.
 
-SIGINT, SIGTERM and SIGHUP quit too. Quitting stops the transcodes, stops MPV and waits for a library fetch in progress (at most 30 s).
+SIGINT, SIGTERM and SIGHUP quit too. Quitting stops the transcodes and MPV, then exits without waiting for a library fetch in progress; the next start fetches again.
 
 ## Changing channel
 
