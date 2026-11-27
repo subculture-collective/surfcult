@@ -5,6 +5,7 @@ pub mod input;
 pub mod jellyfin;
 pub mod library;
 pub mod overlay;
+pub mod paint;
 pub mod player;
 pub mod run;
 pub mod schedule;
