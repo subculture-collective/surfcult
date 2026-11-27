@@ -11,16 +11,34 @@
 //! viewer's chosen [`Crt`] level before showing it. It only ever touches the
 //! interface, never the video.
 //!
+//! [`mark`] is the surfcult mark as a path, and [`watermark`] draws the
+//! SCTV station bug from it. [`fade`] scales a finished overlay to an
+//! opacity.
+//!
 //! The colours are the design's tokens, in [`palette`].
 
 mod canvas;
 pub mod crt;
 mod font;
+pub mod mark;
 pub mod palette;
+pub mod watermark;
 
 pub use canvas::{Canvas, Rgba, Shadow};
 pub use crt::Crt;
 pub use font::Font;
+
+use crate::player::Overlay;
+
+/// Scales every pixel of `overlay` by `opacity`, from 0 (transparent) to 1
+/// (as drawn). The pixels are premultiplied, so colour and alpha scale
+/// together.
+pub fn fade(overlay: &mut Overlay, opacity: f32) {
+    let factor = (opacity.clamp(0.0, 1.0) * 256.0).round() as u32;
+    for byte in &mut overlay.bgra {
+        *byte = ((u32::from(*byte) * factor + 128) >> 8).min(255) as u8;
+    }
+}
 
 #[cfg(test)]
 mod tests;

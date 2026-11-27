@@ -315,3 +315,81 @@ fn preview() {
         .unwrap();
     }
 }
+
+#[test]
+fn the_mark_fills_its_grid_box() {
+    let b = mark::shapes().bounds();
+    assert_eq!((b.left(), b.top()), (mark::LEFT, mark::TOP));
+    assert_eq!((b.width(), b.height()), (mark::WIDTH, mark::HEIGHT));
+}
+
+#[test]
+fn the_watermark_sits_96_from_the_right_and_86_from_the_top() {
+    use super::watermark::{Form, MARGIN, draw};
+    for (form, height) in [(Form::Beside, 72), (Form::Under, 100)] {
+        let o = draw(form);
+        let m = MARGIN as i32;
+        // The bitmap is the bug, its 3-pixel shadow and the glow margin.
+        let bug = o.height as i32 - 3 - 2 * m;
+        assert!((bug - height).abs() <= 2, "{form:?}: {bug}");
+        assert_eq!(o.y + m, 86);
+        assert_eq!(o.x + o.width as i32 - m, 1920 - 96);
+        assert!(premultiplied(&o));
+        // The margin is left clear for the glow.
+        let top = (o.width * MARGIN * 4) as usize;
+        assert!(o.bgra[..top].iter().all(|&b| b == 0));
+    }
+    assert!(draw(Form::Beside).width > draw(Form::Under).width);
+}
+
+#[test]
+fn fade_scales_colour_and_alpha_together() {
+    let mut o = opaque(2, 1, [200, 100, 50, 255]);
+    fade(&mut o, 0.5);
+    assert_eq!(at(&o, 0, 0), [100, 50, 25, 128]);
+    fade(&mut o, 0.0);
+    assert!(o.bgra.iter().all(|&b| b == 0));
+}
+
+/// Writes both watermark forms over a sample picture to
+/// `SURFCULT_PAINT_PREVIEW`, at the opacity they are shown at.
+#[test]
+fn preview_watermark() {
+    use super::watermark::{Form, OPACITY, draw};
+    let Some(dir) = std::env::var_os("SURFCULT_PAINT_PREVIEW") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    for (name, form) in [("beside", Form::Beside), ("under", Form::Under)] {
+        for (level_name, level) in [("heavy", Crt::Heavy), ("off", Crt::Off)] {
+            let mut bug = draw(form);
+            crt::apply(&mut bug, level);
+            fade(&mut bug, OPACITY);
+            // A sunset-coloured picture behind the corner of the screen.
+            let (w, h) = (bug.width + 80, bug.height + 40);
+            let mut scene = Canvas::new(w, h);
+            let (top, bottom) = (Rgba::hex(0xff9a5a), Rgba::hex(0x1f5f8f));
+            scene.fill_gradient(0.0, 0.0, w as f32, h as f32, top, bottom);
+            let mut rgba = scene.to_overlay(0, 0).bgra;
+            for y in 0..bug.height {
+                for x in 0..bug.width {
+                    let s = ((y * bug.width + x) * 4) as usize;
+                    let d = (((y + 20) * w + x + 40) * 4) as usize;
+                    let a = u32::from(bug.bgra[s + 3]);
+                    for c in 0..3 {
+                        let under = u32::from(rgba[d + c]) * (255 - a) / 255;
+                        rgba[d + c] = (u32::from(bug.bgra[s + c]) + under) as u8;
+                    }
+                }
+            }
+            rgba.as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .for_each(|p| p.swap(0, 2));
+            let size = tiny_skia::IntSize::from_wh(w, h).unwrap();
+            let png = tiny_skia::Pixmap::from_vec(rgba, size).unwrap();
+            let file = dir.join(format!("watermark-{name}-{level_name}.png"));
+            std::fs::write(file, png.encode_png().unwrap()).unwrap();
+        }
+    }
+}

@@ -176,6 +176,14 @@ impl Driver {
         self.following.is_some()
     }
 
+    /// Whether a break or filler event is on screen.
+    pub(super) fn on_break(&self) -> bool {
+        matches!(
+            self.following.as_ref().map(|f| &f.on),
+            Some(On::Event(event)) if matches!(event.kind, EventKind::Break | EventKind::Filler)
+        )
+    }
+
     /// Stops following. The caller has started a new tune.
     pub(super) fn leave(&mut self) {
         self.following = None;

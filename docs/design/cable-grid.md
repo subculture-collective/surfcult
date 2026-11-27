@@ -2,7 +2,7 @@
 
 This is the design for surfcult's TV screens and web admin. The owner chose it on November 27, 2026 after four review rounds, recorded in the Studio study `studio/studies/2026-11-27-surfcult-screen-directions/` in `subcult-tv`.
 
-It is a specification. Only the drawing layer and the CRT pass are built ([paint.md](../reference/paint.md)): today's banner is ASS text in DejaVu Sans (see [run.md](../reference/run.md#the-banner)), and the guide has data but no drawing ([guide.md](../reference/guide.md)).
+It is a specification. The drawing layer, the CRT pass and the SCTV watermark are built ([paint.md](../reference/paint.md), [run.md](../reference/run.md#the-watermark)). The rest is not: today's banner is ASS text in DejaVu Sans (see [run.md](../reference/run.md#the-banner)), and the guide has data but no drawing ([guide.md](../reference/guide.md)).
 
 ## Decisions
 
