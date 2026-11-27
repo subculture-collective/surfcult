@@ -58,6 +58,8 @@ fn single(items: &[MediaItem]) -> [SourcePool<'_>; 1] {
 fn params(mode: Mode) -> Params<'static> {
     Params {
         channel: 3,
+        grid_ms: None,
+        filler: &[],
         mode,
         breaks: None,
     }
@@ -331,6 +333,8 @@ fn a_shuffle_differs_by_channel() {
     let order = |channel: u32| {
         let params = Params {
             channel,
+            grid_ms: None,
+            filler: &[],
             mode: Mode::Shuffle,
             breaks: None,
         };
@@ -873,6 +877,8 @@ fn plan<'a>(every_min: u64, length_s: u64, clips: &'a [Clip], pad: &'a [Clip]) -
 fn with_breaks(mode: Mode, breaks: BreakPlan<'_>) -> Params<'_> {
     Params {
         channel: 3,
+        grid_ms: None,
+        filler: &[],
         mode,
         breaks: Some(breaks),
     }
@@ -1401,6 +1407,8 @@ fn order_rotation_walks_the_pool_and_shuffle_draws_a_new_order_per_break() {
     );
     let other = Params {
         channel: 4,
+        grid_ms: None,
+        filler: &[],
         ..shuffle
     };
     let elsewhere = generate(&other, &single(&items), &Resume::default(), 0, 1).unwrap();
@@ -1646,6 +1654,8 @@ impl Trio {
 fn weighted_params(channel: u32) -> Params<'static> {
     Params {
         channel,
+        grid_ms: None,
+        filler: &[],
         mode: Mode::Weighted,
         breaks: None,
     }
@@ -2131,6 +2141,7 @@ fn a_weighted_block_extended_twice_matches_one_unbroken_run_across_dst() {
     let end = later + HORIZON_MS;
     let layout = Layout {
         channel: 3,
+        grid_ms: None,
         breaks: Some(plan(11, 120, clips[0].clips(), clips[1].clips())),
         spans: spans(blocks, CHICAGO, now, end).unwrap(),
         lanes: blocks
@@ -2241,6 +2252,7 @@ fn layout<'a>(
 ) -> Layout<'a> {
     Layout {
         channel: 3,
+        grid_ms: None,
         breaks: None,
         spans: spans(blocks, CHICAGO, start, end).unwrap(),
         lanes,
@@ -2544,6 +2556,7 @@ fn a_blocks_extend_twice_matches_one_unbroken_run_across_dst() {
     let end = later + HORIZON_MS;
     let layout = Layout {
         channel: 3,
+        grid_ms: None,
         breaks: Some(plan(11, 120, clips[0].clips(), clips[1].clips())),
         spans: spans(blocks, CHICAGO, now, end).unwrap(),
         lanes,
@@ -2605,6 +2618,7 @@ fn a_blocks_extend_with_break_settings_matches_one_unbroken_run() {
         };
         let layout = Layout {
             channel: 3,
+            grid_ms: None,
             breaks: Some(plan),
             spans: spans(blocks, CHICAGO, now, end).unwrap(),
             lanes,
@@ -2632,6 +2646,7 @@ fn a_break_clip_cut_off_by_a_block_end_does_not_count_toward_repeat_after() {
     let cut = 11 * MINUTE + 30_000;
     let layout = Layout {
         channel: 3,
+        grid_ms: None,
         breaks: Some(with_rotation(
             Rotation::Order,
             Some(15 * MINUTE),
@@ -3233,4 +3248,5 @@ fn clip_events_are_never_fitted() {
     assert_eq!((fitted.fit, fitted.events), (Fit::Exact, vec![event]));
 }
 
+mod grid;
 mod sign_off;

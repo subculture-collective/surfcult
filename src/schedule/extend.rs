@@ -138,6 +138,7 @@ pub(super) fn fill(
     };
     let last_break = aired.first().cloned();
     let filler = channel.filler.as_deref().map_or(&[][..], clips_of);
+    let grid = channel.grid.map(millis);
 
     // The nights off the air and the clip that starts each. Where the last
     // stored event ends, and what it is, tells a run that starts in the gap
@@ -175,6 +176,8 @@ pub(super) fn fill(
                     channel: n,
                     mode: *mode,
                     breaks,
+                    grid_ms: grid,
+                    filler,
                 };
                 generate(&params, &lane.sources, &resume, from_ms, horizon_ms)?
             } else {
@@ -183,6 +186,7 @@ pub(super) fn fill(
                 let layout = Layout {
                     channel: n,
                     breaks,
+                    grid_ms: grid,
                     lanes: vec![lane],
                     default: None,
                     spans: vec![Span {
@@ -210,6 +214,7 @@ pub(super) fn fill(
             let layout = Layout {
                 channel: n,
                 breaks,
+                grid_ms: grid,
                 spans: spans(blocks, timezone, from_ms, horizon_ms)?,
                 lanes,
                 default,

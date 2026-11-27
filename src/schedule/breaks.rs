@@ -208,25 +208,7 @@ impl Rotation {
     /// left, one pad piece covers it: from the ident pool if it has a clip,
     /// else from the filler pool.
     pub(super) fn fill(&mut self, start_ms: i64) -> (Vec<Piece>, bool) {
-        let mut pieces = Vec::new();
-        let mut left = self.length_ms;
-        let mut at = start_ms;
-        for i in self.walk(start_ms) {
-            let (id, ms) = &self.clips[i];
-            if *ms > left || self.cooling(i, at) {
-                continue;
-            }
-            left -= ms;
-            self.last = Some((i, at));
-            self.aired[i].push(at);
-            at = at.saturating_add(i64::try_from(*ms).unwrap_or(i64::MAX));
-            pieces.push(Piece {
-                media_id: id.clone(),
-                length_ms: *ms,
-                media_duration_ms: *ms,
-                kind: EventKind::Break,
-            });
-        }
+        let (mut pieces, left) = self.place(start_ms, self.length_ms);
         if left == 0 {
             return (pieces, false);
         }
@@ -245,6 +227,31 @@ impl Rotation {
             }
             None => (pieces, true),
         }
+    }
+
+    /// The whole break-pool clips that fill `length_ms` from `start_ms`, as
+    /// `fill` places them, and the time they leave.
+    pub(super) fn place(&mut self, start_ms: i64, length_ms: u64) -> (Vec<Piece>, u64) {
+        let mut pieces = Vec::new();
+        let mut left = length_ms;
+        let mut at = start_ms;
+        for i in self.walk(start_ms) {
+            let (id, ms) = &self.clips[i];
+            if *ms > left || self.cooling(i, at) {
+                continue;
+            }
+            left -= ms;
+            self.last = Some((i, at));
+            self.aired[i].push(at);
+            at = at.saturating_add(i64::try_from(*ms).unwrap_or(i64::MAX));
+            pieces.push(Piece {
+                media_id: id.clone(),
+                length_ms: *ms,
+                media_duration_ms: *ms,
+                kind: EventKind::Break,
+            });
+        }
+        (pieces, left)
     }
 
     /// The indexes into `clips` a break that starts at `start_ms` tries, in
@@ -293,4 +300,51 @@ fn pad_clip(pool: &[(MediaId, u64)], left: u64) -> Option<&(MediaId, u64)> {
         // `max_by_key` keeps the last of equal maxima; reverse for the first.
         pool.iter().rev().max_by_key(|(_, ms)| *ms)
     })
+}
+
+/// The pieces that fill a grid gap of `gap_ms` from `start_ms`: whole clips
+/// from the break pool (when the channel has one), then whole idents, then
+/// whole filler clips, each pool walked once in order and a clip placed only if
+/// it fits in the time left. Time still left is one piece, as long as that
+/// time, from the shortest ident at least that long (the longest if none is),
+/// else the same from the filler pool: a single clip repeated as a last
+/// resort. With no clip at all the list is empty.
+pub(super) fn fill_gap(
+    rotation: Option<&mut Rotation>,
+    idents: &[(MediaId, u64)],
+    filler: &[(MediaId, u64)],
+    start_ms: i64,
+    gap_ms: u64,
+) -> Vec<Piece> {
+    let (mut pieces, mut left) = match rotation {
+        Some(rotation) => rotation.place(start_ms, gap_ms),
+        None => (Vec::new(), gap_ms),
+    };
+    for (pool, kind) in [(idents, EventKind::Ident), (filler, EventKind::Filler)] {
+        for (id, ms) in pool {
+            if *ms <= left {
+                left -= ms;
+                pieces.push(Piece {
+                    media_id: id.clone(),
+                    length_ms: *ms,
+                    media_duration_ms: *ms,
+                    kind,
+                });
+            }
+        }
+    }
+    if left > 0 {
+        let pad = pad_clip(idents, left)
+            .map(|clip| (clip, EventKind::Ident))
+            .or_else(|| pad_clip(filler, left).map(|clip| (clip, EventKind::Filler)));
+        if let Some(((id, ms), kind)) = pad {
+            pieces.push(Piece {
+                media_id: id.clone(),
+                length_ms: left,
+                media_duration_ms: *ms,
+                kind,
+            });
+        }
+    }
+    pieces
 }

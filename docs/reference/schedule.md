@@ -1,6 +1,6 @@
 # Schedule generator
 
-The code is in `src/schedule/`. It turns pools of media items into `timeline::Event`s for one channel: `sequential`, `shuffle` and `weighted` channels and `blocks` channels, programs back to back with commercial breaks, seven days ahead, with an optional nightly sign-off, and regenerates the future after a change. Grids are not done yet.
+The code is in `src/schedule/`. It turns pools of media items into `timeline::Event`s for one channel: `sequential`, `shuffle` and `weighted` channels and `blocks` channels, programs back to back with commercial breaks, seven days ahead, with an optional nightly sign-off and an optional grid, and regenerates the future after a change.
 
 ## Two layers
 
@@ -18,9 +18,20 @@ The resume point comes from the stored events, not from a separate cursor. The c
 - The events cover the whole window with no gap and no overlap. The last program may end after the window. A program cut by breaks is written whole, so a run always ends on a program's last segment.
 - An item with a runtime of 0 is skipped. An id that appears twice in the pool is used once.
 - A pool with nothing playable gives no events and `Note::NoPlayableItems`. Nothing is written, so the resume point stays as it was.
-- A `grid` setting on the channel is ignored for now.
+- A channel with a `grid` differs: programs start on grid lines and the gaps are filled. See Grids.
 
 A blocks channel differs in two ways: a program still on at the end of its block is cut there, and time with nothing to play has no events. See Blocks. A channel with a sign-off has no events while it is off the air, and none in the gap before the sign-off when it has no filler. See Sign-off.
+
+## Grids
+
+A channel with `grid` (for example `grid = "30m"`) starts every program on a multiple of the grid, counted in epoch time. Where the last event ends off a grid line, because the program was shorter than its slot or the run started off the grid, the time to the next line is a gap. The gap is filled before the next program, and it is cut where its block or stretch ends. A channel without `grid` is not changed.
+
+- First come whole clips from the break pool, placed as a break's clips are: in the pool's `rotation` order, skipping a clip that does not fit in the time left or that `repeat_after` holds back. They are `Break` events and advance the rotation and the repeat limit like any break.
+- Then whole clips from the `breaks.pad` pool (idents), in pool order, each placed if it fits in the time left, as `Ident` events. Then whole clips from the channel's `filler` pool the same way, as `Filler` events. Each pool is walked once.
+- Time still left is one event as long as that time. It plays the shortest ident at least that long, or the longest ident if none is, else the same from the filler pool. This is the last resort: one clip, repeated to the next grid line.
+- With no clip in any of the three pools the gap has no events and counts in `Note::DeadAir { ms }`. The next program still starts on the grid line.
+- A program that runs past a grid line is not cut; the next one starts on the first line after it ends. Channels with long, irregular programs such as movies should leave `grid` off.
+- Grid lines are in epoch time, not local time, so a grid lines up with the local clock only in a time zone whose offset is a multiple of it (a `30m` grid does in every zone but Nepal's).
 
 ## Sequential
 
