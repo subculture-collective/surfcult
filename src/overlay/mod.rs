@@ -5,8 +5,9 @@
 //! [`Store`] and returns a [`Banner`]: the channel's number and name, the
 //! program on now with its local start and end time, or `OFF THE AIR` and
 //! `NO SCHEDULE` when nothing is. How it is drawn is the player's business
-//! ([`Player::show_banner`](crate::player::Player::show_banner)); MPV draws it
-//! as ASS text.
+//! ([`Player::show_banner`](crate::player::Player::show_banner));
+//! [`MpvPlayer`](crate::player::MpvPlayer) draws it in the Cable Grid design
+//! with [`paint::banner`](crate::paint::banner).
 
 use chrono::{TimeZone, Timelike};
 
@@ -32,6 +33,8 @@ pub struct Banner {
     /// Local start and end of that program, such as `19:00–19:30`, the time
     /// the channel comes back on (`BACK AT 06:00`), or empty.
     pub times: String,
+    /// The local time of day when the banner was made, `HH:MM`.
+    pub clock: String,
 }
 
 /// The banner for `channel` at `now_ms`, with times in `timezone`.
@@ -50,6 +53,7 @@ pub fn banner(channel: &Channel, store: &Store, now_ms: i64, timezone: Tz) -> Ba
         name: channel.name.clone(),
         title,
         times,
+        clock: clock(now_ms, timezone),
     }
 }
 

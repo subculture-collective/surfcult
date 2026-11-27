@@ -393,3 +393,77 @@ fn preview_watermark() {
         }
     }
 }
+
+fn sample_banner(title: &str) -> crate::overlay::Banner {
+    crate::overlay::Banner {
+        number: 4,
+        name: "MATINEE".into(),
+        title: title.into(),
+        times: "20:30–22:25".into(),
+        clock: "21:16".into(),
+    }
+}
+
+#[test]
+fn the_banner_sits_across_the_bottom_inside_the_safe_area() {
+    use super::banner::{BOTTOM, HEIGHT, LEFT, MARGIN, draw};
+    let o = draw(&sample_banner("The Long Coast"));
+    let m = MARGIN as i32;
+    assert_eq!(o.x + m, LEFT as i32);
+    assert_eq!(o.y + m + HEIGHT as i32, 1080 - BOTTOM as i32);
+    assert_eq!(o.width as i32 - 2 * m - 3, 1920 - 2 * LEFT as i32);
+    assert!(premultiplied(&o));
+    // The band itself is opaque; the margin is clear.
+    assert_eq!(at(&o, MARGIN + 40, MARGIN + 40)[3], 255);
+    assert_eq!(at(&o, 2, 2)[3], 0);
+}
+
+#[test]
+fn a_long_title_is_cut_with_an_ellipsis() {
+    let font = Font::archivo();
+    let long = "The Extremely Long Title of a Film That Goes On and On Past the Edge of the Panel";
+    let cut = font.fit(long, 64.0, 0.0, 600.0);
+    assert!(cut.ends_with('…'), "{cut}");
+    assert!(font.width(&cut, 64.0, 0.0) <= 600.0);
+    assert_eq!(font.fit("Short", 64.0, 0.0, 600.0), "Short");
+    // It still draws.
+    super::banner::draw(&sample_banner(long));
+}
+
+/// Writes the banner over a sample picture to `SURFCULT_PAINT_PREVIEW`,
+/// with the pass at Heavy and Off.
+#[test]
+fn preview_banner() {
+    let Some(dir) = std::env::var_os("SURFCULT_PAINT_PREVIEW") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    for (name, level) in [("heavy", Crt::Heavy), ("off", Crt::Off)] {
+        let mut o = super::banner::draw(&sample_banner("The Long Coast (1987)"));
+        crt::apply(&mut o, level);
+        let (w, h) = (o.width, o.height + 60);
+        let mut scene = Canvas::new(w, h);
+        let (top, bottom) = (Rgba::hex(0xffcf7a), Rgba::hex(0x1f5f8f));
+        scene.fill_gradient(0.0, 0.0, w as f32, h as f32, top, bottom);
+        let mut rgba = scene.to_overlay(0, 0).bgra;
+        for y in 0..o.height {
+            for x in 0..o.width {
+                let s = ((y * o.width + x) * 4) as usize;
+                let d = (((y + 30) * w + x) * 4) as usize;
+                let a = u32::from(o.bgra[s + 3]);
+                for c in 0..3 {
+                    let under = u32::from(rgba[d + c]) * (255 - a) / 255;
+                    rgba[d + c] = (u32::from(o.bgra[s + c]) + under) as u8;
+                }
+            }
+        }
+        rgba.as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .for_each(|p| p.swap(0, 2));
+        let size = tiny_skia::IntSize::from_wh(w, h).unwrap();
+        let png = tiny_skia::Pixmap::from_vec(rgba, size).unwrap();
+        let file = dir.join(format!("banner-{name}.png"));
+        std::fs::write(file, png.encode_png().unwrap()).unwrap();
+    }
+}

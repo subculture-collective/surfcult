@@ -71,6 +71,7 @@ pub fn run(config_path: &Path, db_path: &Path) -> Result<(), String> {
         .map_err(|e| format!("cannot start the sync thread: {e}"))?;
     let (resolver, transcodes) = jellyfin_streams(&jellyfin);
     let mut mpv = MpvConfig::new(runtime_dir()?).with_display(&config.display);
+    mpv.crt = settings.crt;
     if let Some(device) = std::env::var(AUDIO_DEVICE_ENV)
         .ok()
         .filter(|device| !device.trim().is_empty())

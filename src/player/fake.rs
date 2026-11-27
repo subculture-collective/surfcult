@@ -262,6 +262,7 @@ mod tests {
             name: "CARTOONS".into(),
             title: "Show".into(),
             times: "19:00–19:30".into(),
+            clock: "19:05".into(),
         };
         player.show_banner(&banner).unwrap();
         player.clear_banner().unwrap();

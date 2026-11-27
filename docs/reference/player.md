@@ -40,12 +40,12 @@ Hardware decoding: `--hwdec=drm,v4l2m2m` asks for the Pi's H.265 decoder, then i
 | `stop` | `stop` |
 | `show_overlay(id, overlay)` | writes the BGRA pixels to `overlay-<id>.bgra` in the runtime directory, then `overlay-add <id> <x> <y> <file> 0 bgra <w> <h> <w*4>` |
 | `clear_overlay(id)` | `overlay-remove <id>` |
-| `show_banner(banner)` | `osd-overlay` id 1, format `ass-events`, `res_x` 1920, `res_y` 1080, with the banner's ASS events (`src/player/mpv/banner.rs`) |
-| `clear_banner` | `osd-overlay` id 1 with format `none`, only when the banner is up |
+| `show_banner(banner)` | draws the banner with `paint::banner`, runs the CRT pass at `MpvConfig::crt` (Heavy by default), writes it to `overlay-63.bgra` and sends `overlay-add 63 ...` |
+| `clear_banner` | `overlay-remove 63`, only when the banner is up |
 
-`replace` empties MPV's playlist, so static, the stand-by card, a clip and `play_program` drop anything queued. Those four and `stop` also remove the banner; queueing leaves it up. The banner is OSD, drawn after the display filters, in DejaVu Sans; see [run.md](run.md#the-banner). `loop-file=inf` only matters for a configured source that ends; the default sources are `lavfi` generators that never end, so nothing loops and there is no seam. A program is appended behind the clip and opened early by the playlist prefetch. It is not preloaded paused, because one MPV process cannot hold a second file paused (ADR 0001, decision 5).
+`replace` empties MPV's playlist, so static, the stand-by card, a clip and `play_program` drop anything queued. Those four and `stop` also remove the banner; queueing leaves it up. The banner is a bitmap in overlay layer 63, drawn after the display filters; `show_overlay` and `clear_overlay` refuse that layer. See [run.md](run.md#the-banner). `loop-file=inf` only matters for a configured source that ends; the default sources are `lavfi` generators that never end, so nothing loops and there is no seam. A program is appended behind the clip and opened early by the playlist prefetch. It is not preloaded paused, because one MPV process cannot hold a second file paused (ADR 0001, decision 5).
 
-Overlay layers are numbered 0 to 63. The pixels are blue, green, red and alpha bytes, with the colour already multiplied by alpha, and there must be exactly `width * height * 4` of them. Overlays stay up when the item on screen changes.
+Overlay layers are numbered 0 to 62 for callers; 63 is the banner's. The pixels are blue, green, red and alpha bytes, with the colour already multiplied by alpha, and there must be exactly `width * height * 4` of them. Overlays stay up when the item on screen changes.
 
 ## The stand-by card
 
