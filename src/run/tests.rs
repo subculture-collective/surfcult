@@ -968,3 +968,96 @@ fn a_sync_that_changes_a_scheduled_runtime_regenerates_after_the_freeze() {
     );
     assert_eq!(after[1].media_duration_ms, 30 * MIN as u64);
 }
+
+#[test]
+fn one_digit_tunes_when_no_second_digit_comes() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    assert_eq!(rig.tv.channel(), Some(3));
+    rig.press(Key::Digit(5), T + 10_000);
+    rig.step(T + 11_999);
+    assert_eq!(rig.tv.channel(), Some(3));
+    rig.step(T + 12_000);
+    assert_eq!(rig.tv.channel(), Some(5));
+}
+
+#[test]
+fn two_digits_tune_at_once() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.press(Key::Digit(0), T + 10_000);
+    assert_eq!(rig.tv.channel(), Some(3));
+    rig.press(Key::Digit(7), T + 11_000);
+    assert_eq!(rig.tv.channel(), Some(7));
+    // The entry is over: a later wait tunes nothing else.
+    rig.step(T + 20_000);
+    assert_eq!(rig.tv.channel(), Some(7));
+}
+
+#[test]
+fn each_digit_restarts_the_wait() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    // 1 then 5 is channel 15, which does not exist: nothing changes.
+    rig.press(Key::Digit(1), T + 10_000);
+    rig.press(Key::Digit(5), T + 11_500);
+    rig.step(T + 20_000);
+    assert_eq!(rig.tv.channel(), Some(3));
+    // The wait starts again at each digit.
+    rig.press(Key::Digit(0), T + 30_000);
+    rig.step(T + 31_999);
+    assert_eq!(rig.tv.channel(), Some(3));
+    rig.press(Key::Digit(5), T + 32_500);
+    assert_eq!(rig.tv.channel(), Some(5));
+}
+
+#[test]
+fn an_unknown_channel_number_is_ignored() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.step(T + 9_000);
+    rig.take();
+    rig.press(Key::Digit(9), T + 10_000);
+    rig.step(T + 13_000);
+    assert_eq!(rig.tv.channel(), Some(3));
+    assert_eq!(rig.take(), []);
+}
+
+#[test]
+fn a_channel_key_ends_number_entry() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.press(Key::Digit(7), T + 10_000);
+    rig.press(Key::Next, T + 10_500);
+    assert_eq!(rig.tv.channel(), Some(5));
+    rig.step(T + 13_000);
+    assert_eq!(rig.tv.channel(), Some(5));
+}
+
+#[test]
+fn keys_without_a_use_yet_do_nothing() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.step(T + 9_000);
+    rig.take();
+    for key in [
+        Key::Back,
+        Key::Menu,
+        Key::Guide,
+        Key::Mute,
+        Key::VolumeUp,
+        Key::VolumeDown,
+    ] {
+        rig.press(key, T + 10_000);
+    }
+    assert_eq!(rig.tv.channel(), Some(3));
+    assert_eq!(rig.take(), []);
+}

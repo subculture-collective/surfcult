@@ -20,7 +20,7 @@ use std::io::{ErrorKind, Read};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
-use super::{Input, Key};
+use super::{Input, Key, KeyMap};
 
 /// The size of one `struct input_event`.
 #[cfg(target_pointer_width = "64")]
@@ -44,15 +44,6 @@ const O_NONBLOCK: i32 = 0o4000;
 
 /// How often the device list is read again, for hotplug.
 const RESCAN_MS: i64 = 3_000;
-
-const KEY_ENTER: u16 = 28;
-const KEY_I: u16 = 23;
-const KEY_Q: u16 = 16;
-const KEY_UP: u16 = 103;
-const KEY_DOWN: u16 = 108;
-const KEY_OK: u16 = 352;
-const KEY_CHANNELUP: u16 = 402;
-const KEY_CHANNELDOWN: u16 = 403;
 
 /// One `struct input_event`, without its time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,16 +140,13 @@ pub fn parse_events(bytes: &[u8]) -> (Vec<RawEvent>, usize) {
 
 /// The [`Key`] an event from a device of `origin` means, if any. Only key
 /// presses count; releases and auto-repeats do not.
-pub fn key_for(origin: Origin, event: RawEvent) -> Option<Key> {
+pub fn key_for(map: &KeyMap, origin: Origin, event: RawEvent) -> Option<Key> {
     if event.kind != EV_KEY || event.value != PRESS {
         return None;
     }
-    match event.code {
-        KEY_UP | KEY_CHANNELUP => Some(Key::Next),
-        KEY_DOWN | KEY_CHANNELDOWN => Some(Key::Previous),
-        KEY_OK | KEY_ENTER | KEY_I => Some(Key::Banner),
-        KEY_Q if origin == Origin::Keyboard => Some(Key::Quit),
-        _ => None,
+    match map.key(event.code)? {
+        Key::Quit if origin != Origin::Keyboard => None,
+        key => Some(key),
     }
 }
 
@@ -172,6 +160,7 @@ struct Open {
 /// The remote and keyboards, read from `/dev/input`. See the module
 /// documentation.
 pub struct EvdevInput {
+    keys: KeyMap,
     devices_file: PathBuf,
     dev_dir: PathBuf,
     /// Open devices by node name (`event0`).
@@ -184,13 +173,14 @@ pub struct EvdevInput {
 impl EvdevInput {
     /// Reads `/proc/bus/input/devices` and `/dev/input`. Devices are opened
     /// on the first poll.
-    pub fn new() -> Self {
-        Self::at("/proc/bus/input/devices", "/dev/input")
+    pub fn new(keys: KeyMap) -> Self {
+        Self::at(keys, "/proc/bus/input/devices", "/dev/input")
     }
 
     /// The same with other paths, for tests.
-    pub fn at(devices_file: impl Into<PathBuf>, dev_dir: impl Into<PathBuf>) -> Self {
+    pub fn at(keys: KeyMap, devices_file: impl Into<PathBuf>, dev_dir: impl Into<PathBuf>) -> Self {
         Self {
+            keys,
             devices_file: devices_file.into(),
             dev_dir: dev_dir.into(),
             open: BTreeMap::new(),
@@ -268,7 +258,7 @@ impl EvdevInput {
 
 impl Default for EvdevInput {
     fn default() -> Self {
-        Self::new()
+        Self::new(KeyMap::default())
     }
 }
 
@@ -299,7 +289,11 @@ impl Input for EvdevInput {
             }
             let (events, used) = parse_events(&open.pending);
             open.pending.drain(..used);
-            keys.extend(events.into_iter().filter_map(|e| key_for(open.origin, e)));
+            keys.extend(
+                events
+                    .into_iter()
+                    .filter_map(|e| key_for(&self.keys, open.origin, e)),
+            );
         }
         for (node, why) in gone {
             if let Some(open) = self.open.remove(&node) {
@@ -313,6 +307,17 @@ impl Input for EvdevInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const KEY_ENTER: u16 = 28;
+    const KEY_I: u16 = 23;
+    const KEY_Q: u16 = 16;
+    const KEY_5: u16 = 6;
+    const KEY_UP: u16 = 103;
+    const KEY_PAGEUP: u16 = 104;
+    const KEY_DOWN: u16 = 108;
+    const KEY_OK: u16 = 352;
+    const KEY_CHANNELUP: u16 = 402;
+    const KEY_CHANNELDOWN: u16 = 403;
 
     const DEVICES: &str = r#"I: Bus=0019 Vendor=0000 Product=0000 Version=0000
 N: Name="vc4-hdmi-0"
@@ -403,7 +408,8 @@ H: Handlers=event3
             code,
             value: PRESS,
         };
-        let remote = |code| key_for(Origin::Remote, press(code));
+        let map = KeyMap::default();
+        let remote = |code| key_for(&map, Origin::Remote, press(code));
         assert_eq!(remote(KEY_UP), Some(Key::Next));
         assert_eq!(remote(KEY_CHANNELUP), Some(Key::Next));
         assert_eq!(remote(KEY_DOWN), Some(Key::Previous));
@@ -412,16 +418,21 @@ H: Handlers=event3
         assert_eq!(remote(KEY_ENTER), Some(Key::Banner));
         assert_eq!(remote(KEY_I), Some(Key::Banner));
         assert_eq!(remote(105), None); // KEY_LEFT
+        assert_eq!(remote(KEY_PAGEUP), Some(Key::Next));
+        assert_eq!(remote(KEY_5), Some(Key::Digit(5)));
         // Q quits from a keyboard only.
         assert_eq!(remote(KEY_Q), None);
-        assert_eq!(key_for(Origin::Keyboard, press(KEY_Q)), Some(Key::Quit));
+        assert_eq!(
+            key_for(&map, Origin::Keyboard, press(KEY_Q)),
+            Some(Key::Quit)
+        );
         for value in [0, 2] {
             let event = RawEvent {
                 kind: EV_KEY,
                 code: KEY_UP,
                 value,
             };
-            assert_eq!(key_for(Origin::Remote, event), None);
+            assert_eq!(key_for(&KeyMap::default(), Origin::Remote, event), None);
         }
         // A key code in another event type (EV_MSC) is not a key.
         let msc = RawEvent {
@@ -429,7 +440,7 @@ H: Handlers=event3
             code: KEY_UP,
             value: 1,
         };
-        assert_eq!(key_for(Origin::Remote, msc), None);
+        assert_eq!(key_for(&KeyMap::default(), Origin::Remote, msc), None);
     }
 
     #[test]
@@ -443,7 +454,7 @@ H: Handlers=event3
         bytes.extend(raw(EV_KEY, KEY_DOWN, 2));
         bytes.extend(raw(EV_KEY, KEY_DOWN, 0));
         std::fs::write(dir.path().join("event2"), &bytes).unwrap();
-        let mut input = EvdevInput::at(&list, dir.path());
+        let mut input = EvdevInput::at(KeyMap::default(), &list, dir.path());
         assert_eq!(input.poll(0), [Key::Previous]);
         // Its file ended, so it was dropped; with the file gone it stays so.
         assert!(input.devices().is_empty());

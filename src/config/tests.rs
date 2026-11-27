@@ -889,3 +889,35 @@ fn a_tune_in_pool_must_name_an_interstitial_pool() {
         }]
     );
 }
+
+#[test]
+fn without_a_keys_table_the_default_keys_apply() {
+    let config = Config::parse(&with_channel(PLAIN)).unwrap();
+    assert_eq!(config.keys, KeyMap::default());
+}
+
+#[test]
+fn the_keys_table_overrides_the_named_actions() {
+    let config = Config::parse(
+        "timezone = \"UTC\"\n[keys]\nchannel_up = [\"KEY_RIGHT\"]\ndigit_1 = [\"KEY_A\"]\n",
+    )
+    .unwrap();
+    assert_eq!(config.keys.key(106), Some(crate::input::Key::Next));
+    assert_eq!(config.keys.key(103), None);
+    assert_eq!(config.keys.key(30), Some(crate::input::Key::Digit(1)));
+    assert_eq!(config.keys.key(108), Some(crate::input::Key::Previous));
+}
+
+#[test]
+fn rejects_unknown_actions_and_key_names_naming_the_field() {
+    let text = "timezone = \"UTC\"\n[keys]\nzap = [\"KEY_UP\"]\nguide = [\"KEY_G\", \"KEY_WAT\"]\nmenu = [\"KEY_G\"]\n";
+    assert_eq!(fields(text), ["keys.guide[1]", "keys.menu[0]", "keys.zap"]);
+}
+
+#[test]
+fn rejects_keys_that_are_not_lists_of_names() {
+    assert!(matches!(
+        Config::parse("timezone = \"UTC\"\n[keys]\nguide = \"KEY_G\"\n"),
+        Err(ConfigError::Parse(_))
+    ));
+}
