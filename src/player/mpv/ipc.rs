@@ -400,11 +400,16 @@ impl Session {
             }
             Some("end-file") => {
                 let entry = entry_id.and_then(|id| self.entries.remove(&id));
-                if self.current == entry_id {
+                let on_screen = self.current == entry_id;
+                if on_screen {
                     self.current = None;
                 }
-                let eof = event.get("reason").and_then(Value::as_str) == Some("eof");
-                Ok((eof && entry == Some(Entry::Clip)).then_some(PlayerEvent::ClipEnded))
+                let playable = matches!(entry, Some(Entry::Clip | Entry::Program { .. }));
+                Ok(match event.get("reason").and_then(Value::as_str) {
+                    Some("eof") if entry == Some(Entry::Clip) => Some(PlayerEvent::ClipEnded),
+                    Some("error") if on_screen && playable => Some(PlayerEvent::Failed),
+                    _ => None,
+                })
             }
             // Playback (re)started after a load or a seek. Only the first one
             // of a program is its start.

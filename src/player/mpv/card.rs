@@ -44,6 +44,9 @@ const HEIGHT: i32 = 1080;
 /// to either side of the white one, in pixels.
 const TEXT_CENTRE: (i32, i32) = (960, 365);
 const TEXT_OFFSET: i32 = 8;
+/// The most characters of a custom text that fit the band at full size, as
+/// many as PLEASE STANDBY has.
+const FITS_AT_FULL_SIZE: usize = 14;
 
 /// ASS colours are `&HBBGGRR&`.
 const BLACK: &str = "000000";
@@ -83,6 +86,7 @@ pub(super) fn uses_drawing(text: &str) -> bool {
 /// moved by `flicker` when it is given.
 pub(super) fn card_ass(text: &str, flicker: Option<&Flicker>) -> String {
     let drawn = uses_drawing(text);
+    let size = text_size(text);
     let text = ass_escape(&text.to_uppercase());
     let spread = flicker.map_or(0, |f| f.spread as i32);
     let mut events = Vec::new();
@@ -127,7 +131,7 @@ pub(super) fn card_ass(text: &str, flicker: Option<&Flicker>) -> String {
             let (x, y) = (TEXT_CENTRE.0 + part.shift, TEXT_CENTRE.1);
             for (x, colour) in [(x - offset, CYAN), (x + offset, RED), (x, WHITE)] {
                 events.push(format!(
-                    r"{{\an5\pos({x},{y}){clip}\fnDejaVu Sans\b1\fs200\fscx80\bord0\shad0\1c&H{colour}&}}{text}"
+                    r"{{\an5\pos({x},{y}){clip}\fnDejaVu Sans\b1\fs{size}\fscx80\bord0\shad0\1c&H{colour}&}}{text}"
                 ));
             }
         }
@@ -137,6 +141,13 @@ pub(super) fn card_ass(text: &str, flicker: Option<&Flicker>) -> String {
         let _ = writeln!(ass, "Dialogue: {layer},{SHOWN},Card,,0,0,0,,{event}");
     }
     ass
+}
+
+/// The font size of a custom `text`: 200, or smaller for a text longer than
+/// [`FITS_AT_FULL_SIZE`] characters, so it stays inside the band.
+fn text_size(text: &str) -> usize {
+    let length = text.trim().chars().count().max(FITS_AT_FULL_SIZE);
+    200 * FITS_AT_FULL_SIZE / length
 }
 
 /// Rows of the screen drawn with one sideways shift, in pixels.
@@ -397,6 +408,13 @@ mod tests {
     }
 
     #[test]
+    fn a_long_custom_text_is_set_smaller_to_stay_inside_the_band() {
+        assert_eq!(text_size("NO SIGNAL"), 200);
+        assert_eq!(text_size(" PLEASE  WAIT! "), 200);
+        assert_eq!(text_size("TECHNICAL DIFFICULTIES"), 127);
+    }
+
+    #[test]
     fn a_custom_text_is_set_in_dejavu_and_cannot_inject_ass() {
         let ass = card_ass("off {\\p1} air\\n\nnow", None);
         let events = events(&ass);
@@ -404,7 +422,7 @@ mod tests {
         assert_eq!(
             events[2],
             format!(
-                r"2,{SHOWN},Card,,0,0,0,,{{\an5\pos(952,365)\fnDejaVu Sans\b1\fs200\fscx80\bord0\shad0\1c&HFFFF00&}}OFF \{{\{}P1\}} AIR\{}N\NNOW",
+                r"2,{SHOWN},Card,,0,0,0,,{{\an5\pos(952,365)\fnDejaVu Sans\b1\fs147\fscx80\bord0\shad0\1c&HFFFF00&}}OFF \{{\{}P1\}} AIR\{}N\NNOW",
                 '\u{2060}', '\u{2060}'
             )
         );

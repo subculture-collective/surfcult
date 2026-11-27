@@ -55,7 +55,7 @@ The key goes only into the `Authorization: MediaBrowser Token="..."` header, for
 2. Scan the clip pools with ffprobe. Skipped files are logged.
 3. Start the sync worker. It fetches the library at once and then every `SURFCULT_SYNC_MINUTES`, on its own thread.
 4. Start MPV with the Pi output flags and the `[display]` filters. The runtime directory is created with mode 700.
-5. Show the stand-by card, extend every channel's schedule (when the clock is trusted) and tune the lowest channel number.
+5. If the clock is not trusted, show the clock slate and wait for it (see [the clock](#schedules-and-the-clock)). Otherwise show the stand-by card, extend every channel's schedule and tune the lowest channel number.
 6. Loop every 20 ms: write a finished sync into the store, then run one step.
 
 A bad config, a missing Jellyfin address or key, or an MPV that does not start ends `run` with an error. Everything after startup is logged and the loop goes on.
@@ -89,6 +89,8 @@ Schedules are written only while the clock is trusted, so a Pi that has not sync
 
 While the clock is not trusted the check repeats every minute.
 
+Until the clock is trusted for the first time the TV shows the clock slate, the stand-by card with `SETTING THE CLOCK` in place of `PLEASE STANDBY`. It tunes nothing, plays no stored event (they would be read at the wrong time) and writes no schedule. Only the quit key works; a restarted MPV gets the slate again. Once a check finds the clock trusted, the TV starts as it would have at startup: schedules are filled and the lowest channel is tuned. A clock that loses its synchronization later does not bring the slate back; schedule upkeep just waits for it.
+
 ## Keys
 
 The remote is the Linux input device whose name contains `vc4-hdmi` (the Pi's CEC adapter). It is found by name because its event number changes between boots. Every device with the `kbd` handler is read as a keyboard. Devices are read from `/dev/input/eventN`, which needs the `input` group, and the device list is read again every 3 seconds, so a device plugged in later works. The devices are not grabbed.
@@ -113,7 +115,7 @@ A channel change stops the transcodes of the program on screen and runs the tune
 When the tuner's sequence is over the driver follows the channel's stored events. At each event boundary it shows what the schedule has then:
 
 - **Program**: its media at the live position. A program cut by breaks continues at the next segment's offset. A segment that continues the media on screen with no break between needs no command.
-- **Break, filler or ident**: the local clip whose canonical path is the event's media id. A clip shorter than its event, such as a break's pad that repeats one ident, loops until the event ends. A clip that is not in the scanned pools shows the stand-by card for the event.
+- **Break, filler or ident**: the local clip whose canonical path is the event's media id. A clip shorter than its event, such as a break's pad that repeats one ident, loops until the event ends. A clip that is not in the scanned pools, or that the player cannot play, shows the stand-by card for the rest of the event.
 - **No event** (a gap, dead air, or off the air after a sign-off): the stand-by card until the next event. A program after the card starts its expected start-up time early (1 s for direct play, 7 s for a transcode), so it is on screen when its event starts; a clip after the card starts on time.
 
 The position always comes from the schedule at the current time. Switching away and back never restarts a program, and never resumes where the viewer left.
@@ -146,22 +148,23 @@ MPV draws it as ASS text through `osd-overlay` (id 1) on a 1920x1080 layout, in 
 
 ## Playback history
 
-Each program and clip the driver starts gets a `playback_history` row with the outcome `played`, or `failed` when the player or Jellyfin refused it. The tuner's program is recorded as `played` when it starts. Tune-in clips are not recorded.
+Each program and clip the driver starts gets a `playback_history` row with the outcome `played`, or `failed` when the player or Jellyfin refused it or the player reported it failed. The tuner's program is recorded as `played` when it starts. Tune-in clips are not recorded.
 
 ## Failures
 
 No error stops the loop after startup:
 
-- A player command or a Jellyfin playback error is logged (`surfcult: channel N: ...`), the stand-by card shows, and the next boundary or key press goes on as usual.
-- A tune whose program the player refuses leaves the card up, and the driver tries the program once more without a tune-in clip.
+- **An unplayable program.** Jellyfin refuses the item (an error status other than 502 to 504, or no way to play it), or MPV reports that the file or stream would not open or broke off (`end-file` with reason `error`). A program MPV reports failed is first tried once more at its live position, in case the stream only broke off. Then the driver gives up on that event: it logs `cannot play ID: ...; filler takes its place`, records it as `failed`, and fills the rest of the event from the channel's filler pool, the clips in pool order as `schedule::fit` pads a short file. The next event starts on time. A substitution row records the event's item and start, with the first filler clip as the replacement. A channel with no filler pool shows the stand-by card instead, and the substitution has no replacement. The stored schedule is not changed. The driver remembers the event for the rest of the run, so reading the schedule again does not retry it; the same item at another time is tried as usual.
+- **Jellyfin unreachable.** When Jellyfin does not answer a program's `PlaybackInfo` request (a connection that fails or times out, or a 502, 503 or 504), the program's time shows the technical-difficulties slate, the stand-by card with `TECHNICAL DIFFICULTIES`. Break, filler and ident clips are local files and still play at their boundaries. The program is tried again every minute while its event lasts and at each later program boundary, and plays at its live position once Jellyfin answers. A retry that fails again changes nothing on screen and is not recorded again. Each attempt waits for the request's timeout (5 s to connect), and the loop does nothing else meanwhile.
+- A tune whose program the player refuses leaves the card up, and the driver tries the program once more without a tune-in clip. A tune-in clip or program that MPV reports failed ends the tune the same way.
 - A failed library sync is logged and the cache keeps the last good library.
 - A schedule that cannot be read is logged and read again a minute later.
 - MPV that dies or hangs is restarted by the player's watchdog, and the tuner tunes the channel again.
 
-Giving up on a program that never starts, and slates for long failures, are issue #34.
+A program that never starts and never fails, such as a transcode that hangs, keeps the screen as it is until the next boundary.
 
 ## Tests
 
-`src/run/tests.rs` drives the loop with a virtual clock, a `FakePlayer` wrapped so single programs can fail as a Jellyfin error would, a `FakeInput`, an in-memory store whose library cache is the media source, and clip pools scanned from a temporary directory with a fake prober. They cover wrapping channel changes, the commands of a tune, returning to a channel at its live position, a program cut by breaks, a stale queue, gaps and off-air time, the banner and its timeout, a Jellyfin error, a refused tune, a player restart, an unresolvable source at startup and a schedule written once the clock is trusted. `src/input/evdev.rs` tests parsing `input_event` bytes and `/proc/bus/input/devices`. The stream resolver is tested against recorded Jellyfin responses. A real MPV test (skipped without `mpv`) checks that MPV accepts `play_program`, `queue_clip` and the banner's `osd-overlay`.
+`src/run/tests.rs` drives the loop with a virtual clock, a `FakePlayer` wrapped so single programs can fail as a Jellyfin error would, or all of them as a Jellyfin outage would, a `FakeInput`, an in-memory store whose library cache is the media source, and clip pools scanned from a temporary directory with a fake prober. They cover wrapping channel changes, the commands of a tune, returning to a channel at its live position, a program cut by breaks, a stale queue, gaps and off-air time, the banner and its timeout, an unplayable program with and without a filler pool, a program that fails twice on screen, a Jellyfin outage with a break in it and its recovery, a refused tune, a player restart, an unresolvable source at startup and the clock slate until the clock is trusted. `src/input/evdev.rs` tests parsing `input_event` bytes and `/proc/bus/input/devices`. The stream resolver is tested against recorded Jellyfin responses. A real MPV test (skipped without `mpv`) checks that MPV accepts `play_program`, `queue_clip` and the banner's `osd-overlay`.
 
-Not tested here: the remote, the TV, Jellyfin and the look of the banner on the Pi. That is the owner's check: change channels across three channels and compare each with `surfcult now`.
+Not tested here: the remote, the TV, Jellyfin, the look of the banner and the slates on the Pi, and what MPV reports for a missing file or a Jellyfin that goes away mid-program. That is the owner's check: change channels across three channels and compare each with `surfcult now`.

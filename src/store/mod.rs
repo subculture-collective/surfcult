@@ -13,7 +13,8 @@
 //! - `playback_history`: one row each time the tuner starts something, with a
 //!   short outcome word. Read newest first.
 //! - `substitutions`: one row for each scheduled program a regeneration
-//!   replaced because its item left the library. See [`Substitution`].
+//!   replaced because its item left the library, or the playback driver
+//!   replaced because it could not be played. See [`Substitution`].
 //!
 //! - `library_*`: a copy of the Jellyfin library (items, chapters, streams,
 //!   libraries, tags, genres, series and collections), replaced as a whole by
@@ -76,16 +77,18 @@ pub struct PlaybackRecord {
     pub outcome: String,
 }
 
-/// A scheduled program that was replaced because its item left the library.
+/// A scheduled program that was replaced: a regeneration replaced it because
+/// its item left the library, or the driver filled its time because it could
+/// not be played.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Substitution {
     pub channel: u32,
-    /// The item that left the library.
+    /// The item that left the library or could not be played.
     pub media_id: MediaId,
     /// When its program was to start.
     pub scheduled_ms: i64,
-    /// The media of the event the new schedule has at that time, or `None`
-    /// when nothing is on then.
+    /// The media of the event the new schedule has at that time, or the
+    /// first filler clip that played instead; `None` when nothing is on then.
     pub replacement: Option<MediaId>,
 }
 

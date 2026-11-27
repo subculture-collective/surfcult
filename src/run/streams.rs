@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use crate::jellyfin::{JellyfinClient, JellyfinConfig, Playback, TranscodeSession};
+use crate::jellyfin::{JellyfinClient, JellyfinConfig, JellyfinError, Playback, TranscodeSession};
 use crate::library::MediaId;
 use crate::player::PlayerError;
 use crate::player::mpv::{Stream, StreamResolver};
@@ -44,7 +44,9 @@ pub(super) fn jellyfin_with(
 /// nowhere else: not in the URL, MPV's arguments or a log), and where the
 /// stream begins. A direct-play file begins at the start of the media, so
 /// MPV seeks; a transcode begins at the start position. A transcode's
-/// session is kept so [`Transcodes::stop_all`] can stop it.
+/// session is kept so [`Transcodes::stop_all`] can stop it. When Jellyfin
+/// does not answer, or answers 502, 503 or 504, the error is
+/// [`PlayerError::unreachable`]; any other refusal is about the one item.
 pub struct JellyfinResolver {
     client: Rc<JellyfinClient>,
     base_url: String,
@@ -54,10 +56,16 @@ pub struct JellyfinResolver {
 
 impl StreamResolver for JellyfinResolver {
     fn stream(&self, media: &MediaId, start_ms: u64) -> Result<Stream, PlayerError> {
-        let playback = self
-            .client
-            .playback(media, start_ms)
-            .map_err(|e| PlayerError(format!("Jellyfin cannot play {media}: {e}")))?;
+        let playback = self.client.playback(media, start_ms).map_err(|e| {
+            let message = format!("Jellyfin cannot play {media}: {e}");
+            match e {
+                // 502 to 504: Jellyfin is starting, or a proxy cannot reach it.
+                JellyfinError::Unreachable(_) | JellyfinError::Status(502..=504) => {
+                    PlayerError::unreachable(message)
+                }
+                _ => PlayerError::new(message),
+            }
+        })?;
         let mut stream = Stream::new(playback.url(&self.base_url));
         stream
             .headers
@@ -141,6 +149,46 @@ mod tests {
         let client = JellyfinClient::with_transport(key, fake.clone()).with_user_id("user");
         let (resolver, transcodes) = jellyfin_with(client, &config);
         (resolver, transcodes, fake)
+    }
+
+    /// Answers every request with one error.
+    struct Failing(HttpError);
+
+    impl JellyfinHttp for Failing {
+        fn get(&self, _: &str, _: &str) -> Result<String, HttpError> {
+            Err(self.0.clone())
+        }
+
+        fn post_json(&self, _: &str, _: &str, _: &str) -> Result<String, HttpError> {
+            Err(self.0.clone())
+        }
+
+        fn delete(&self, _: &str, _: &str) -> Result<(), HttpError> {
+            Err(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn no_answer_or_a_gateway_error_is_unreachable_and_other_refusals_are_not() {
+        let cases = [
+            (HttpError::Unreachable("connection refused".into()), true),
+            (HttpError::Status(503), true),
+            (HttpError::Status(500), false),
+            (HttpError::Status(404), false),
+        ];
+        for (error, unreachable) in cases {
+            let key = ApiKey::new(KEY).unwrap();
+            let config = JellyfinConfig {
+                base_url: "http://jellyfin:8096/".into(),
+                key: key.clone(),
+                user_id: Some("user".into()),
+            };
+            let client =
+                JellyfinClient::with_transport(key, Failing(error.clone())).with_user_id("user");
+            let (resolver, _) = jellyfin_with(client, &config);
+            let refused = resolver.stream(&MediaId::new(DIRECT_ID), 0).unwrap_err();
+            assert_eq!(refused.is_unreachable(), unreachable, "{error:?}");
+        }
     }
 
     #[test]

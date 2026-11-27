@@ -44,8 +44,9 @@
 //!
 //! [`Tuner::state`] says where the sequence is. A caller never has to wait for
 //! the program to start: a slow transcode just keeps the state at
-//! [`State::AwaitingProgram`]. Giving up on a program that never starts is
-//! left to failure handling (issue #34).
+//! [`State::AwaitingProgram`]. A clip or program the player reports as
+//! [`PlayerEvent::Failed`] ends the sequence with [`Reason::Player`]; a
+//! program that never starts and never fails keeps the state where it is.
 //!
 //! # Which clip
 //!
@@ -391,7 +392,20 @@ impl<P: Player> Tuner<P> {
             PlayerEvent::ProgramStarted { position_ms, .. } => {
                 self.program_started(now_ms, position_ms)
             }
+            PlayerEvent::Failed => self.failed(),
             PlayerEvent::Restarted => self.restarted(now_ms),
+        }
+    }
+
+    /// The clip or the program of the sequence could not be played. Ends the
+    /// sequence with [`Reason::Player`]; ignored once it is over.
+    pub fn failed(&mut self) {
+        if let State::ClipPlaying { channel } | State::AwaitingProgram { channel } = self.state {
+            self.plan = None;
+            self.state = State::Failed {
+                channel,
+                reason: Reason::Player("the clip or program could not be played".into()),
+            };
         }
     }
 

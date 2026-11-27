@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use super::{Overlay, Player, PlayerError, PlayerEvent};
+use super::{Overlay, Player, PlayerError, PlayerEvent, Slate};
 use crate::library::MediaId;
 use crate::overlay::Banner;
 
@@ -32,6 +32,7 @@ impl VirtualClock {
 pub enum Command {
     ShowStatic,
     ShowStandby,
+    ShowSlate(Slate),
     PlayClip(PathBuf),
     QueueProgram {
         media_id: MediaId,
@@ -130,6 +131,11 @@ impl FakePlayer {
         });
     }
 
+    /// Tells the player the item on screen could not be played.
+    pub fn failed(&mut self) {
+        self.events.push_back(PlayerEvent::Failed);
+    }
+
     /// Tells the player its video player was restarted.
     pub fn restarted(&mut self) {
         self.events.push_back(PlayerEvent::Restarted);
@@ -137,7 +143,7 @@ impl FakePlayer {
 
     fn record(&mut self, command: Command) -> Result<(), PlayerError> {
         if let Some(reason) = &self.failure {
-            return Err(PlayerError(reason.clone()));
+            return Err(PlayerError::new(reason.clone()));
         }
         self.issued.push(Issued {
             at_ms: self.clock.now(),
@@ -154,6 +160,10 @@ impl Player for FakePlayer {
 
     fn show_standby(&mut self) -> Result<(), PlayerError> {
         self.record(Command::ShowStandby)
+    }
+
+    fn show_slate(&mut self, slate: Slate) -> Result<(), PlayerError> {
+        self.record(Command::ShowSlate(slate))
     }
 
     fn play_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
@@ -321,10 +331,7 @@ mod tests {
     fn a_failing_player_returns_the_error_and_records_nothing() {
         let mut player = FakePlayer::new(VirtualClock::new(0));
         player.fail_commands("socket closed");
-        assert_eq!(
-            player.show_static(),
-            Err(PlayerError("socket closed".into()))
-        );
+        assert_eq!(player.show_static(), Err(PlayerError::new("socket closed")));
         assert!(player.issued().is_empty());
     }
 }

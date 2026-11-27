@@ -12,7 +12,8 @@
 //! The player keeps one item on screen and at most one queued behind it.
 //!
 //! - [`Player::show_static`], [`Player::show_standby`],
-//!   [`Player::play_clip`] and [`Player::play_program`] replace what is on
+//!   [`Player::show_slate`], [`Player::play_clip`] and
+//!   [`Player::play_program`] replace what is on
 //!   screen and drop anything queued. Calling `show_static` is how a sequence
 //!   is cancelled.
 //! - [`Player::queue_program`] and [`Player::queue_clip`] append an item
@@ -37,6 +38,10 @@
 //! because the tuner cannot tell such an event from the end of a newer clip.
 //! (For MPV, forward `end-file` with reason `eof` and drop `stop` and
 //! `redirect`.)
+//!
+//! An adapter reports [`PlayerEvent::Failed`] when the clip or program on
+//! screen could not be played: it would not open, or it broke off with an
+//! error. It reports nothing for static or the stand-by card.
 //!
 //! An adapter that restarts its video player reports
 //! [`PlayerEvent::Restarted`]. Everything was lost: the item on screen, the
@@ -63,9 +68,33 @@ pub enum PlayerEvent {
     ClipEnded,
     /// The queued program is on screen, at this position in the media.
     ProgramStarted { position_ms: u64, duration_ms: u64 },
+    /// The clip or program on screen could not be played: it would not
+    /// open, or it broke off with an error. Nothing plays until the next
+    /// command.
+    Failed,
     /// The video player stopped working and was started again. The screen
     /// is blank, nothing is queued and no overlay is shown.
     Restarted,
+}
+
+/// A message the stand-by card carries in place of its own
+/// ([`Player::show_slate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Slate {
+    /// The program source cannot be reached, so programs cannot play.
+    TechnicalDifficulties,
+    /// The system clock is not synchronized yet, so nothing is scheduled.
+    ClockNotSet,
+}
+
+impl Slate {
+    /// The text across the middle of the card.
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::TechnicalDifficulties => "TECHNICAL DIFFICULTIES",
+            Self::ClockNotSet => "SETTING THE CLOCK",
+        }
+    }
 }
 
 /// A bitmap drawn over the video, `width` by `height` pixels with its top
@@ -97,11 +126,37 @@ impl fmt::Debug for Overlay {
 
 /// A command the player could not carry out.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlayerError(pub String);
+pub struct PlayerError {
+    message: String,
+    unreachable: bool,
+}
+
+impl PlayerError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            unreachable: false,
+        }
+    }
+
+    /// The program source did not answer, so every program would fail the
+    /// same way until it does: a connection that failed or timed out, not
+    /// one item it refused.
+    pub fn unreachable(message: impl Into<String>) -> Self {
+        Self {
+            unreachable: true,
+            ..Self::new(message)
+        }
+    }
+
+    pub fn is_unreachable(&self) -> bool {
+        self.unreachable
+    }
+}
 
 impl fmt::Display for PlayerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.message)
     }
 }
 
@@ -119,6 +174,10 @@ pub trait Player {
     /// [`Player::show_overlay`] are not touched. A player that cannot show
     /// the whole card shows static instead and returns the error.
     fn show_standby(&mut self) -> Result<(), PlayerError>;
+
+    /// As [`Player::show_standby`], with `slate`'s text across the card in
+    /// place of the card's own.
+    fn show_slate(&mut self, slate: Slate) -> Result<(), PlayerError>;
 
     /// Replaces what is on screen with the local clip at `path`, and drops
     /// anything queued.

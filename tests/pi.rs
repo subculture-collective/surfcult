@@ -64,7 +64,7 @@ fn config(dir: &Path, filters: Vec<Filter>) -> MpvConfig {
 }
 
 fn nothing(_: &MediaId, _: u64) -> Result<Stream, PlayerError> {
-    Err(PlayerError("no programs in this test".into()))
+    Err(PlayerError::new("no programs in this test"))
 }
 
 /// A second connection to the player's MPV, to read properties.
@@ -347,7 +347,7 @@ fn jellyfin_urls_play_in_mpv() {
                 move |media: &MediaId, start_ms: u64| -> Result<Stream, PlayerError> {
                     let playback = client
                         .playback(media, start_ms)
-                        .map_err(|e| PlayerError(e.to_string()))?;
+                        .map_err(|e| PlayerError::new(e.to_string()))?;
                     let mut stream = Stream::new(playback.url(&base));
                     stream
                         .headers

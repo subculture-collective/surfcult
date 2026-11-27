@@ -20,6 +20,17 @@
 //! tests drive the loop with a virtual clock, a
 //! [`FakePlayer`](crate::player::FakePlayer) and a [`FakeInput`](crate::input::FakeInput).
 //!
+//! # The clock
+//!
+//! Until the system clock is trusted ([`clock_trusted`]) the TV shows the
+//! clock slate ([`Slate::ClockNotSet`]), tunes nothing and writes no
+//! schedule: a Pi without network time may think it is 1970, and both the
+//! stored events and a new week would be read at the wrong time. Only the
+//! quit key works. The clock is checked again every minute; once it is
+//! trusted the TV starts as it would have: schedules are filled and the
+//! lowest channel is tuned. A clock that later loses its synchronization
+//! does not bring the slate back; the schedules just wait for it.
+//!
 //! # Schedules
 //!
 //! Each channel's sources are resolved into program pools from the library
@@ -50,7 +61,7 @@ use crate::input::{Input, Key};
 use crate::jellyfin::{JellyfinError, SyncReport};
 use crate::library::{LibraryChanges, MediaItem, resolve_pool};
 use crate::overlay::{self, DEFAULT_BANNER_MS};
-use crate::player::{Player, PlayerEvent};
+use crate::player::{Player, PlayerEvent, Slate};
 use crate::schedule::{self, Extended};
 use crate::store::Store;
 use crate::tuner::{State, Timing, Tuner};
@@ -116,6 +127,8 @@ pub struct Tv<P, I> {
     banner_pending: bool,
     banner_until_ms: Option<i64>,
     upkeep: Upkeep,
+    /// The clock slate is up until the clock is trusted.
+    waiting_for_clock: bool,
     quit: bool,
 }
 
@@ -160,16 +173,32 @@ impl<P: Player, I: Input> Tv<P, I> {
             banner_pending: false,
             banner_until_ms: None,
             upkeep: Upkeep::default(),
+            waiting_for_clock: false,
             quit: false,
         }
     }
 
     /// Shows the stand-by card, fills the schedules and tunes the lowest
-    /// channel.
+    /// channel. While the clock is not trusted, shows the clock slate
+    /// instead and does the rest once it is.
     pub fn start(&mut self, now_ms: i64, store: &mut Store) {
+        if !(self.clock_trusted)() {
+            eprintln!(
+                "surfcult: the clock is not synchronized; showing the clock slate until it is"
+            );
+            self.show_clock_slate();
+            self.waiting_for_clock = true;
+            self.upkeep.due_ms = now_ms.saturating_add(self.settings.clock_retry_ms);
+            return;
+        }
         if let Err(e) = self.tuner.player_mut().show_standby() {
             eprintln!("surfcult: cannot show the stand-by card: {e}");
         }
+        self.begin(now_ms, store);
+    }
+
+    /// Fills the schedules and tunes the lowest channel.
+    fn begin(&mut self, now_ms: i64, store: &mut Store) {
         self.keep_schedules(now_ms, store);
         if let Some(&first) = self.numbers.first() {
             self.tune(first, now_ms);
@@ -180,6 +209,10 @@ impl<P: Player, I: Input> Tv<P, I> {
 
     /// Does what is due at `now_ms`. See the module documentation.
     pub fn step(&mut self, now_ms: i64, store: &mut Store) {
+        if self.waiting_for_clock {
+            self.wait_for_clock(now_ms, store);
+            return;
+        }
         for key in self.input.poll(now_ms) {
             self.key(key, now_ms);
         }
@@ -190,11 +223,43 @@ impl<P: Player, I: Input> Tv<P, I> {
             store,
             clips: &self.clips,
             streams: self.streams.as_mut(),
+            filler: filler(&self.config, &self.clips, self.channel),
         };
         self.driver.step(now_ms, &mut cx);
         self.banner(now_ms, store);
         if now_ms >= self.upkeep.due_ms {
             self.keep_schedules(now_ms, store);
+        }
+    }
+
+    /// A step while the clock slate is up: only the quit key works, and once
+    /// the clock is trusted the TV starts.
+    fn wait_for_clock(&mut self, now_ms: i64, store: &mut Store) {
+        for key in self.input.poll(now_ms) {
+            if key == Key::Quit {
+                self.quit = true;
+            }
+        }
+        while let Some(event) = self.tuner.player_mut().poll_event() {
+            if event == PlayerEvent::Restarted {
+                self.show_clock_slate();
+            }
+        }
+        if now_ms < self.upkeep.due_ms {
+            return;
+        }
+        if (self.clock_trusted)() {
+            eprintln!("surfcult: the clock is synchronized; starting");
+            self.waiting_for_clock = false;
+            self.begin(now_ms, store);
+        } else {
+            self.upkeep.due_ms = now_ms.saturating_add(self.settings.clock_retry_ms);
+        }
+    }
+
+    fn show_clock_slate(&mut self) {
+        if let Err(e) = self.tuner.player_mut().show_slate(Slate::ClockNotSet) {
+            eprintln!("surfcult: cannot show the clock slate: {e}");
         }
     }
 
@@ -323,21 +388,24 @@ impl<P: Player, I: Input> Tv<P, I> {
                     position_ms,
                     duration_ms,
                 } if self.driver.following() => {
-                    let filler: Vec<Clip> = self
-                        .channel
-                        .and_then(|number| self.config.channels.iter().find(|c| c.number == number))
-                        .and_then(|channel| channel.filler.as_deref())
-                        .and_then(|pool| self.clips.pool(pool))
-                        .map(|pool| pool.clips().to_vec())
-                        .unwrap_or_default();
                     let mut cx = ProgramStartContext {
                         player: self.tuner.player_mut(),
                         clips: &self.clips,
                         store,
-                        filler: &filler,
+                        filler: filler(&self.config, &self.clips, self.channel),
                     };
                     self.driver
                         .program_started(now_ms, position_ms, duration_ms, &mut cx);
+                }
+                PlayerEvent::Failed if self.driver.following() => {
+                    let mut cx = Context {
+                        player: self.tuner.player_mut(),
+                        store,
+                        clips: &self.clips,
+                        streams: self.streams.as_mut(),
+                        filler: filler(&self.config, &self.clips, self.channel),
+                    };
+                    self.driver.item_failed(now_ms, &mut cx);
                 }
                 _ => {}
             }
@@ -460,6 +528,15 @@ impl<P: Player, I: Input> Tv<P, I> {
         }
         self.driver.invalidate();
     }
+}
+
+/// The filler pool's clips of channel `number`, empty when it has none.
+fn filler<'a>(config: &Config, clips: &'a ClipLibrary, number: Option<u32>) -> &'a [Clip] {
+    number
+        .and_then(|number| config.channels.iter().find(|c| c.number == number))
+        .and_then(|channel| channel.filler.as_deref())
+        .and_then(|pool| clips.pool(pool))
+        .map_or(&[], |pool| pool.clips())
 }
 
 /// The program pool of each of `channel`'s sources, or every reason one
