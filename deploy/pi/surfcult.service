@@ -1,0 +1,35 @@
+[Unit]
+Description=surfcult TV
+Documentation=https://github.com/subculture-collective/surfcult/blob/main/docs/runbooks/raspberry-pi.md
+# Jellyfin is on the LAN, but surfcult copes without it (technical-difficulties slate), so only ask for the network.
+# It does not wait for time sync: it shows its own clock slate until the clock is trusted.
+After=network-online.target
+Wants=network-online.target
+# Stop retrying after 10 failed starts in 5 minutes, so a bad config does not loop forever.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=patrick
+# video: /dev/dri (MPV on KMS); render: /dev/dri/renderD*; input: the remote and keyboards; audio: HDMI sound.
+SupplementaryGroups=video render input audio
+WorkingDirectory=/home/patrick/surfcult
+# URL, key file path, config and database. The key itself is never in this file.
+EnvironmentFile=/etc/surfcult/surfcult.env
+# MPV's socket and files. The user's /run/user/<uid> exists only while patrick has a session or lingers.
+RuntimeDirectory=surfcult
+RuntimeDirectoryMode=0700
+Environment=XDG_RUNTIME_DIR=/run/surfcult
+ExecStart=/opt/surfcult/current/surfcult run ${SURFCULT_CONFIG} ${SURFCULT_DB}
+Restart=always
+RestartSec=5
+# SIGTERM makes surfcult stop its transcodes and MPV, then exit. It may wait up to 30 s for a library fetch.
+# mixed: the signal goes to surfcult alone, and anything left behind is killed after it exits.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=45
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
