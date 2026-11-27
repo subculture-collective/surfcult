@@ -209,7 +209,8 @@ pub trait Player {
     fn stop(&mut self) -> Result<(), PlayerError>;
 
     /// Draws `overlay` in layer `id`, 0 to 63, replacing what that layer
-    /// showed. Higher layers are drawn on top.
+    /// showed. Higher layers are drawn on top. `MpvPlayer` keeps layer 63
+    /// for the banner and refuses it here.
     fn show_overlay(&mut self, id: u8, overlay: &Overlay) -> Result<(), PlayerError>;
 
     /// Removes the overlay in layer `id`. Clearing an empty layer is not an

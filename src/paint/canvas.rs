@@ -45,6 +45,26 @@ impl Rgba {
     }
 }
 
+/// A paint with a vertical gradient from `top` at `y` to `bottom` at
+/// `y + h`.
+fn vertical(y: f32, h: f32, top: Rgba, bottom: Rgba) -> Paint<'static> {
+    let shader = LinearGradient::new(
+        Point::from_xy(0.0, y),
+        Point::from_xy(0.0, y + h),
+        vec![
+            GradientStop::new(0.0, top.color()),
+            GradientStop::new(1.0, bottom.color()),
+        ],
+        SpreadMode::Pad,
+        Transform::identity(),
+    );
+    Paint {
+        shader: shader.unwrap_or(Shader::SolidColor(top.color())),
+        anti_alias: true,
+        ..Paint::default()
+    }
+}
+
 /// A hard text shadow: the text again, `dx`, `dy` pixels away, in `color`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Shadow {
@@ -88,23 +108,24 @@ impl Canvas {
         let Some(rect) = Rect::from_xywh(x, y, w, h) else {
             return;
         };
-        let shader = LinearGradient::new(
-            Point::from_xy(x, y),
-            Point::from_xy(x, y + h),
-            vec![
-                GradientStop::new(0.0, top.color()),
-                GradientStop::new(1.0, bottom.color()),
-            ],
-            SpreadMode::Pad,
+        self.pixmap.fill_rect(
+            rect,
+            &vertical(y, h, top, bottom),
             Transform::identity(),
+            None,
         );
-        let paint = Paint {
-            shader: shader.unwrap_or(Shader::SolidColor(top.color())),
-            anti_alias: true,
-            ..Paint::default()
-        };
-        self.pixmap
-            .fill_rect(rect, &paint, Transform::identity(), None);
+    }
+
+    /// Fills `path` with a vertical gradient from `top` at height `y` to
+    /// `bottom` at `y + h`.
+    pub fn fill_path_gradient(&mut self, path: &Path, y: f32, h: f32, top: Rgba, bottom: Rgba) {
+        self.pixmap.fill_path(
+            path,
+            &vertical(y, h, top, bottom),
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
     }
 
     /// A bevelled cell: `fill`, with an `edge`-pixel light edge along the top

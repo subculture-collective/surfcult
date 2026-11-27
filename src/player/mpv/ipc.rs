@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::Stream;
-use super::banner::{BANNER_OSD_ID, RES};
+use super::banner::BANNER_LAYER;
 use crate::player::PlayerEvent;
 
 /// Why a command did not work.
@@ -283,18 +283,17 @@ impl Session {
         Ok(())
     }
 
-    /// Shows the ASS events `ass` as the banner, an `osd-overlay` on a
-    /// 1920x1080 layout that MPV scales to the screen.
-    pub(super) fn show_banner(&mut self, ass: &str) -> Result<(), IpcError> {
-        self.command(json!({
-            "name": "osd-overlay",
-            "id": BANNER_OSD_ID,
-            "format": "ass-events",
-            "data": ass,
-            "res_x": RES.0,
-            "res_y": RES.1,
-            "z": 10,
-        }))?;
+    /// Shows the BGRA bitmap in `file` as the banner, in its own overlay
+    /// layer, with its top left at `x`, `y`.
+    pub(super) fn show_banner(
+        &mut self,
+        file: &str,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> Result<(), IpcError> {
+        self.overlay_add(BANNER_LAYER, x, y, file, width, height)?;
         self.banner = true;
         Ok(())
     }
@@ -305,13 +304,7 @@ impl Session {
             return Ok(());
         }
         self.banner = false;
-        self.command(json!({
-            "name": "osd-overlay",
-            "id": BANNER_OSD_ID,
-            "format": "none",
-            "data": "",
-        }))
-        .map(drop)
+        self.overlay_remove(BANNER_LAYER)
     }
 
     /// Seeks the entry on screen to media position `position_ms`.

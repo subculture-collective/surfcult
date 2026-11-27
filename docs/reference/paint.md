@@ -1,6 +1,6 @@
 # Drawing the interface
 
-The code is in `src/paint/`. It draws the TV's interface in the Cable Grid design ([cable-grid.md](../design/cable-grid.md)) into bitmaps the player shows as overlays, and runs the CRT pass on them. The SCTV watermark draws with it; the banner and guide will.
+The code is in `src/paint/`. It draws the TV's interface in the Cable Grid design ([cable-grid.md](../design/cable-grid.md)) into bitmaps the player shows as overlays, and runs the CRT pass on them. The SCTV watermark and the channel banner draw with it; the guide will.
 
 ## Canvas
 
@@ -41,6 +41,18 @@ Colours are `Rgba` with straight alpha; the design's tokens are the constants in
 
 On the development Mac (Apple M3, release build) a full 1920x1080 pass takes about 29 ms, and a 260x140 watermark 0.5 ms. It has not been measured on the Pi 4B, which is several times slower; the pass runs only when the interface is redrawn, never per video frame.
 
+## The banner
+
+`paint::banner::draw(&banner)` returns the channel banner as an overlay across the bottom of a 1920x1080 screen, before the CRT pass. The band is 176 px tall, 96 px in from each side and 86 px up from the bottom (`banner::LEFT`, `BOTTOM`, `HEIGHT`), with a 16 px transparent margin (`banner::MARGIN`) for the glow.
+
+| Part | Contents |
+| --- | --- |
+| Channel cell, 276 px | The number with two digits at 108 px and the name at 34 px, yellow with the hard shadow, centred |
+| Main panel | The violet field; an ochre strip 56 px tall with a slanted right end, carrying `times` at 32 px in ochre ink; the title at 64 px in white |
+| Clock cell | `clock` in VCR OSD Mono at 46 px, centred |
+
+Text that does not fit is cut with an ellipsis (`Font::fit`).
+
 ## The mark
 
 `paint::mark::shapes()` is the Guide Wave with SC as its middle row, as one path on the 64-unit grid of `assets/brand/mark.svg`. The shapes run from (`mark::LEFT`, `mark::TOP`) = (9, 11) and are `mark::WIDTH` by `mark::HEIGHT` = 47 by 42 units.
@@ -60,4 +72,4 @@ Both are white with a black shadow at 50% alpha, 3 px right and down. The bug's 
 
 ## Tests
 
-`src/paint/tests.rs` checks the fonts, text placement and shadows, bevels, gradients, the overlay's byte order, and the pass: Off, transparency, the scanline rows and their phase, Heavy against Light, glow reach, the colour fringe and premultiplied output; the mark's bounds, the watermark's size, position and clear margin, and fading. With `SURFCULT_PAINT_PREVIEW=<dir>`, `cargo test --lib paint::tests::preview` also writes a sample drawing as `paint-flat.png`, `paint-heavy.png` and `paint-light.png` to look at, and `paint::tests::preview_watermark` writes both watermark forms over a sample picture with the pass at Heavy and Off.
+`src/paint/tests.rs` checks the fonts, text placement and shadows, bevels, gradients, the overlay's byte order, and the pass: Off, transparency, the scanline rows and their phase, Heavy against Light, glow reach, the colour fringe and premultiplied output; the mark's bounds, the watermark's size, position and clear margin, fading, the banner's place and a long title cut with an ellipsis. With `SURFCULT_PAINT_PREVIEW=<dir>`, `cargo test --lib paint::tests::preview` also writes a sample drawing as `paint-flat.png`, `paint-heavy.png` and `paint-light.png` to look at, and `paint::tests::preview_watermark` writes both watermark forms over a sample picture with the pass at Heavy and Off, and `paint::tests::preview_banner` writes the banner.

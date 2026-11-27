@@ -11,12 +11,13 @@
 //! viewer's chosen [`Crt`] level before showing it. It only ever touches the
 //! interface, never the video.
 //!
-//! [`mark`] is the surfcult mark as a path, and [`watermark`] draws the
+//! [`banner`] draws the channel banner. [`mark`] is the surfcult mark as a path, and [`watermark`] draws the
 //! SCTV station bug from it. [`fade`] scales a finished overlay to an
 //! opacity.
 //!
 //! The colours are the design's tokens, in [`palette`].
 
+pub mod banner;
 mod canvas;
 pub mod crt;
 mod font;

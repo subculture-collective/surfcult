@@ -108,6 +108,8 @@ use super::{
 use crate::config::Display;
 use crate::library::MediaId;
 use crate::overlay::Banner;
+use crate::paint::{self, Crt};
+use banner::BANNER_LAYER;
 use glitch::{Flicker, Glitch, Step};
 use ipc::{IpcError, Session};
 
@@ -218,6 +220,8 @@ pub struct MpvConfig {
     pub command_timeout: Duration,
     /// How long a new MPV may take to open its socket.
     pub start_timeout: Duration,
+    /// The CRT pass on the banner. It never touches the video.
+    pub crt: Crt,
 }
 
 impl MpvConfig {
@@ -236,6 +240,7 @@ impl MpvConfig {
             glitch_every: DEFAULT_GLITCH_EVERY,
             command_timeout: Duration::from_secs(5),
             start_timeout: Duration::from_secs(10),
+            crt: Crt::default(),
         }
     }
 
@@ -390,6 +395,20 @@ impl<R> MpvPlayer<R> {
 
     fn overlay_file(&self, id: u8) -> PathBuf {
         self.config.runtime_dir.join(format!("overlay-{id}.bgra"))
+    }
+
+    /// Writes `overlay`'s pixels to layer `id`'s file and returns its path.
+    /// MPV maps the file when the command runs. Writing a new file and
+    /// renaming it over the old one never shows a half-written bitmap.
+    fn write_overlay(&self, id: u8, overlay: &Overlay) -> Result<String, PlayerError> {
+        let file = self.overlay_file(id);
+        let partial = file.with_extension("partial");
+        fs::write(&partial, &overlay.bgra)
+            .and_then(|()| fs::rename(&partial, &file))
+            .map_err(|e| PlayerError::new(format!("cannot write the overlay bitmap: {e}")))?;
+        file.into_os_string()
+            .into_string()
+            .map_err(|_| PlayerError::new("the runtime directory is not UTF-8"))
     }
 
     /// Writes the stand-by card's subtitle file, or with `flicker` the
@@ -677,17 +696,7 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
 
     fn show_overlay(&mut self, id: u8, overlay: &Overlay) -> Result<(), PlayerError> {
         check_overlay(id, overlay)?;
-        // MPV maps the file when the command runs. Writing a new file and
-        // renaming it over the old one never shows a half-written bitmap.
-        let file = self.overlay_file(id);
-        let partial = file.with_extension("partial");
-        fs::write(&partial, &overlay.bgra)
-            .and_then(|()| fs::rename(&partial, &file))
-            .map_err(|e| PlayerError::new(format!("cannot write the overlay bitmap: {e}")))?;
-        let file = file
-            .to_str()
-            .ok_or_else(|| PlayerError::new("the runtime directory is not UTF-8"))?
-            .to_owned();
+        let file = self.write_overlay(id, overlay)?;
         self.with_session(|s| {
             s.overlay_add(
                 id,
@@ -706,12 +715,21 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
                 "overlay layer {id} is not 0 to 63"
             )));
         }
+        if id == BANNER_LAYER {
+            return Err(PlayerError::new(format!(
+                "overlay layer {id} is the banner's"
+            )));
+        }
         self.with_session(|s| s.overlay_remove(id))
     }
 
     fn show_banner(&mut self, banner: &Banner) -> Result<(), PlayerError> {
-        let ass = banner::banner_ass(banner);
-        self.with_session(|s| s.show_banner(&ass))
+        let mut overlay = paint::banner::draw(banner);
+        paint::crt::apply(&mut overlay, self.config.crt);
+        let file = self.write_overlay(BANNER_LAYER, &overlay)?;
+        self.with_session(|s| {
+            s.show_banner(&file, overlay.x, overlay.y, overlay.width, overlay.height)
+        })
     }
 
     fn clear_banner(&mut self) -> Result<(), PlayerError> {
@@ -776,6 +794,11 @@ fn check_overlay(id: u8, overlay: &Overlay) -> Result<(), PlayerError> {
     if id > 63 {
         return Err(PlayerError::new(format!(
             "overlay layer {id} is not 0 to 63"
+        )));
+    }
+    if id == BANNER_LAYER {
+        return Err(PlayerError::new(format!(
+            "overlay layer {id} is the banner's"
         )));
     }
     let expected = u64::from(overlay.width) * u64::from(overlay.height) * 4;

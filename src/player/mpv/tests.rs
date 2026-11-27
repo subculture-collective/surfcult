@@ -339,27 +339,39 @@ fn a_program_can_replace_the_screen_and_a_clip_can_be_queued() {
 }
 
 fn banner_shown(command: &Value) -> bool {
-    command["name"] == json!("osd-overlay") && command["format"] == json!("ass-events")
+    command[0] == json!("overlay-add") && command[1] == json!(63)
 }
 
 fn banner_removed(command: &Value) -> bool {
-    command["name"] == json!("osd-overlay") && command["format"] == json!("none")
+    *command == json!(["overlay-remove", 63])
 }
 
 #[test]
-fn the_banner_is_an_osd_overlay_of_ass_events() {
+fn the_banner_is_a_bitmap_in_overlay_layer_63() {
     let fake = FakeMpv::new();
     let mut session = fake.connect();
-    session.show_banner("{\\an7}3  CARTOONS").unwrap();
+    session
+        .show_banner("/run/overlay-63.bgra", 80, 802, 1763, 211)
+        .unwrap();
     session.hide_banner().unwrap();
     // Nothing is up any more, so a second clear sends nothing.
     session.hide_banner().unwrap();
     assert_eq!(
         fake.commands(),
         [
-            json!({ "name": "osd-overlay", "id": 1, "format": "ass-events",
-                    "data": "{\\an7}3  CARTOONS", "res_x": 1920, "res_y": 1080, "z": 10 }),
-            json!({ "name": "osd-overlay", "id": 1, "format": "none", "data": "" }),
+            json!([
+                "overlay-add",
+                63,
+                80,
+                802,
+                "/run/overlay-63.bgra",
+                0,
+                "bgra",
+                1763,
+                211,
+                7052
+            ]),
+            json!(["overlay-remove", 63]),
         ]
     );
 }
@@ -387,7 +399,7 @@ fn a_command_that_changes_the_screen_removes_the_banner_and_queueing_does_not() 
         ("stop", |s| s.stop().unwrap()),
     ];
     for (name, change) in changes {
-        session.show_banner("x").unwrap();
+        session.show_banner("/run/b.bgra", 0, 0, 1, 1).unwrap();
         fake.commands();
         change(&mut session);
         let commands = fake.commands();
@@ -396,7 +408,7 @@ fn a_command_that_changes_the_screen_removes_the_banner_and_queueing_does_not() 
         change(&mut session);
         assert!(!fake.commands().iter().any(banner_removed), "{name}");
     }
-    session.show_banner("x").unwrap();
+    session.show_banner("/run/b.bgra", 0, 0, 1, 1).unwrap();
     session.queue_clip(Path::new("/clips/a.mp4")).unwrap();
     session
         .queue_program(&Stream::new("http://jellyfin/x"), 0)
@@ -855,7 +867,7 @@ fn an_overlay_must_fit_its_pixels_and_layer() {
         bgra: vec![0; len],
     };
     assert!(check_overlay(0, &overlay(2, 3, 24)).is_ok());
-    assert!(check_overlay(63, &overlay(1, 1, 4)).is_ok());
+    assert!(check_overlay(62, &overlay(1, 1, 4)).is_ok());
     assert!(check_overlay(64, &overlay(1, 1, 4)).is_err());
     assert!(check_overlay(0, &overlay(2, 3, 23)).is_err());
     assert!(check_overlay(0, &overlay(0, 0, 0)).is_err());
@@ -1166,6 +1178,9 @@ mod real {
     fn headless(runtime_dir: &Path) -> MpvConfig {
         MpvConfig {
             output_args: vec!["--vo=null".into(), "--ao=null".into()],
+            // The pass is tested in `paint`; in a debug build it is slow enough
+            // to upset the timing these tests check.
+            crt: crate::paint::Crt::Off,
             ..MpvConfig::new(runtime_dir)
         }
     }
@@ -1273,6 +1288,7 @@ mod real {
             name: "CAR{TOONS}".into(),
             title: "The Show".into(),
             times: "19:00–19:30".into(),
+            clock: "19:05".into(),
         };
         player.show_banner(&banner).unwrap();
         let events = wait_for(&mut player, 15, |e| *e == PlayerEvent::ClipEnded);
@@ -1525,4 +1541,18 @@ mod real {
         assert!(!log.to_lowercase().contains("error"), "{log}");
         assert!(!log.to_lowercase().contains("fail"), "{log}");
     }
+}
+
+#[test]
+fn the_banner_layer_is_not_for_other_overlays() {
+    let overlay = Overlay {
+        x: 0,
+        y: 0,
+        width: 1,
+        height: 1,
+        bgra: vec![0; 4],
+    };
+    assert!(check_overlay(62, &overlay).is_ok());
+    let refused = check_overlay(63, &overlay).unwrap_err();
+    assert_eq!(refused.to_string(), "overlay layer 63 is the banner's");
 }

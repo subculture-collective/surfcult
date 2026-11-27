@@ -97,6 +97,7 @@ fn names_the_channel_and_the_program_on_now_with_its_whole_extent() {
             name: "CARTOONS".into(),
             title: "The Simpsons: Bart the Genius".into(),
             times: "19:00–19:30".into(),
+            clock: "19:05".into(),
         }
     );
     // A break inside the program is still the program.

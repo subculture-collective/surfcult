@@ -69,6 +69,23 @@ impl Font {
         width + tracking * count.saturating_sub(1) as f32
     }
 
+    /// `text`, or as much of it as fits in `max_width` followed by an
+    /// ellipsis.
+    pub fn fit(&self, text: &str, px: f32, tracking: f32, max_width: f32) -> String {
+        if self.width(text, px, tracking) <= max_width {
+            return text.to_string();
+        }
+        let mut cut: String = text.to_string();
+        while !cut.is_empty() {
+            cut.pop();
+            let candidate = format!("{}…", cut.trim_end());
+            if self.width(&candidate, px, tracking) <= max_width {
+                return candidate;
+            }
+        }
+        String::new()
+    }
+
     /// The outline of `text` at `px` with its baseline starting at `x`,
     /// `baseline`, or `None` when nothing in it has an outline (spaces only,
     /// or no character the font has).
