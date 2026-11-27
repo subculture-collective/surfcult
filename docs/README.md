@@ -9,6 +9,7 @@
 - `reference/clips.md`: local clip pools, ffprobe durations, what is skipped and why
 - `reference/schedule.md`: how the schedule generator orders items, resumes and persists
 - `reference/guide.md`: guide cells from the schedule: merging a program's segments, the window, progress
+- `reference/paint.md`: drawing the TV's interface: the canvas, the two fonts and the CRT pass
 - `reference/api.md`: the read API: endpoints, JSON shapes, the listen address and the bearer token
 - `reference/player.md`: the player and MPV: commands, the stand-by card, display filters (the CRT shader and the glitch), the Jellyfin key, events and the watchdog
 - `reference/run.md`: `surfcult run`, `surfcult now` and `surfcult schedule --day`: environment, startup, clock trust, keys, the playback driver, the banner and failure behaviour

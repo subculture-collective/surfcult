@@ -2,7 +2,7 @@
 
 This is the design for surfcult's TV screens and web admin. The owner chose it on November 27, 2026 after four review rounds, recorded in the Studio study `studio/studies/2026-11-27-surfcult-screen-directions/` in `subcult-tv`.
 
-It is a specification. None of it is built yet: today's banner is ASS text in DejaVu Sans (see [run.md](../reference/run.md#the-banner)), and the guide has data but no drawing ([guide.md](../reference/guide.md)).
+It is a specification. Only the drawing layer and the CRT pass are built ([paint.md](../reference/paint.md)): today's banner is ASS text in DejaVu Sans (see [run.md](../reference/run.md#the-banner)), and the guide has data but no drawing ([guide.md](../reference/guide.md)).
 
 ## Decisions
 
@@ -14,6 +14,7 @@ It is a specification. None of it is built yet: today's banner is ASS text in De
 | 2026-11-27 | Mark: Guide Wave with SC as the middle row. Watermarks: SCTV beside the mark and SCTV under the mark. |
 | 2026-11-27 | The watermark is semi-transparent, appears on landing on a channel, fades after a while, and stays on during commercials. |
 | 2026-11-27 | The owner states that the VCR OSD Mono licence is granted. |
+| 2026-11-27 | The guide starts scrolling after 5 seconds without a remote key. The watermark holds for 3 seconds after landing on a channel, then fades over 1 second. |
 
 Choices marked *proposed* below were made by the agent and are open to change.
 
@@ -42,7 +43,9 @@ Contrast before the CRT pass: white text is at least 5.9:1 on every cell colour,
 
 - **Archivo Narrow Bold** sets everything on the TV and the web's headings, buttons and labels. Mixed case for titles; capitals for channel IDs, headings and key hints.
 - **Archivo** (400 and 600) sets web body text and form fields.
-- **VCR OSD Mono** sets clocks and the footer line of TV menus. The font file is `vcr_osd_mono.zip` in the owner's research folder (not committed). When the renderer needs it, add it with a note of the owner's licence grant.
+- **VCR OSD Mono** sets clocks and the footer line of TV menus.
+
+Both TV fonts are in `assets/fonts/`, with their sources and licences.
 
 TV text is at least 28 px tall at 1920x1080 so it reads from the couch. TV text has a hard shadow 3 px right and 3 px down in `shadow`.
 
@@ -67,7 +70,7 @@ The mark is the guide's three rows: the top row curls over like a breaking wave,
 All TV interface is drawn by Rust into a 1920x1080 premultiplied BGRA bitmap and shown with `show_overlay`. MPV draws overlays after its shaders, so the video's own filters never touch the interface ([player.md](../reference/player.md#the-crt-shader)).
 
 - **Guide.** The top half: an info panel on the left (channel name, the title in quotes, day and channel number, centred) and the program in a window on the right. The bottom half: the grid. The clock cell (`VCR OSD Mono`) and three half-hour time cells head it, a date row sits under them, then channel rows of number over ID and program cells. Cells are bevelled; a program that continues past the grid edge gets a white arrow. The remote moves a yellow outline across the cells.
-- **Auto-scroll.** After the remote has been idle for a set time (*proposed*: 30 seconds), the rows scroll upward on their own and loop. Any remote key stops the scroll and puts the focus back where it was; the idle timer starts again. Scroll steps are whole multiples of 4 rows; see the CRT pass.
+- **Auto-scroll.** After 5 seconds without a remote key, the rows scroll upward on their own and loop. Any remote key stops the scroll and puts the focus back where it was; the idle timer starts again. Scroll steps are whole multiples of 4 rows; see the CRT pass.
 - **Banner.** A band across the bottom: a channel cell (number large, ID under it), a main panel with an ochre strip (`NOW 8:30 PM – 10:25 PM`), the title and a `NEXT` line, and a clock cell. It replaces today's ASS banner and keeps its timing and content rules.
 - **Menus.** A full-screen violet field, an ochre heading band with the mark, a list panel of rows with the focused row in `focus` and yellow, and a footer line with the date, time and key hints (`▲▼ CHOOSE  ◀▶ CHANGE  BACK CLOSE`).
 
@@ -90,7 +93,7 @@ The watermark is the station bug, in the top-right corner of every channel. It i
 
 - **Look.** White at 60% opacity, with a black shadow at 50% offset 3 px right and down. The CRT pass applies to it at the chosen level.
 - **Place and size.** Its right edge is 96 px from the screen's right edge and its top 86 px from the top. The beside form is 72 px tall (the mark 72 px, SCTV beside it); the under form is 100 px tall.
-- **On landing on a channel.** When a channel change settles, the moment the banner shows, the beside form appears and holds for 10 seconds, then fades out over 1 second (*proposed* timings).
+- **On landing on a channel.** When a channel change settles, the moment the banner shows, the beside form appears and holds for 3 seconds, then fades out over 1 second.
 - **During commercials.** For the whole of a break event the under form shows instead, and fades out over 1 second when the break ends. Landing on a channel during a break shows the under form until the break ends.
 - **Filler and idents** (*proposed*). Filler is treated like a break. Idents show no watermark, because an ident is itself the station's identification.
 - **Guide and menus.** The watermark hides while the guide or a menu is open and comes back if a break is still on when it closes.
@@ -103,7 +106,7 @@ The TV's Picture menu and the web admin both offer:
 | Setting | Values | Default |
 | --- | --- | --- |
 | CRT filter | Heavy, Light, Off | Heavy |
-| Guide auto-scroll after | a number of seconds | 30 (*proposed*) |
+| Guide auto-scroll after | a number of seconds | 5 |
 
 ## Web admin
 
