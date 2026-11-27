@@ -1,3 +1,4 @@
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -123,8 +124,13 @@ fn print_from_store(
     };
     match Store::open_read_only(db_path) {
         Ok(store) => {
+            let mut out = io::stdout().lock();
             for line in lines(&config, &store, app::now_ms()) {
-                println!("{line}");
+                // A reader that stops early, such as `head`, closes the pipe;
+                // stop quietly instead of panicking like `println!`.
+                if writeln!(out, "{line}").is_err() {
+                    break;
+                }
             }
             ExitCode::SUCCESS
         }
