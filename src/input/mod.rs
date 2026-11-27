@@ -5,23 +5,22 @@
 //! crate: the Pi's CEC remote (a device whose name contains `vc4-hdmi`) and
 //! every keyboard. [`FakeInput`] hands out keys a test pushed.
 //!
-//! | Key | Linux key codes |
-//! | --- | --- |
-//! | [`Key::Next`] | `KEY_UP` (103), `KEY_CHANNELUP` (402) |
-//! | [`Key::Previous`] | `KEY_DOWN` (108), `KEY_CHANNELDOWN` (403) |
-//! | [`Key::Banner`] | `KEY_OK` (352), `KEY_ENTER` (28), `KEY_I` (23) |
-//! | [`Key::Quit`] | `KEY_Q` (16), from a keyboard only |
+//! Which Linux key codes mean which [`Key`] is the [`KeyMap`]: the `[keys]`
+//! table of `channels.toml` over defaults (see `docs/reference/run.md`).
+//! Quit works from a keyboard only.
 //!
 //! Only a press counts. A release and the kernel's auto-repeat are ignored,
 //! so holding a key changes the channel once.
 
 mod evdev;
+mod keymap;
 
 use std::collections::VecDeque;
 
 pub use evdev::{
     Device, EVENT_SIZE, EvdevInput, Origin, RawEvent, key_for, parse_devices, parse_events,
 };
+pub use keymap::{KeyMap, KeyProblem, code_for};
 
 /// What a key press asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +31,20 @@ pub enum Key {
     Previous,
     /// Show the channel banner again.
     Banner,
+    /// A digit of a channel number being entered.
+    Digit(u8),
+    /// Go back. The run loop ignores it for now.
+    Back,
+    /// Open the menu. The run loop ignores it for now.
+    Menu,
+    /// Open the guide. The run loop ignores it for now.
+    Guide,
+    /// Mute. The run loop ignores it for now.
+    Mute,
+    /// Volume up. The run loop ignores it for now.
+    VolumeUp,
+    /// Volume down. The run loop ignores it for now.
+    VolumeDown,
     /// Stop surfcult.
     Quit,
 }

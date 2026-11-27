@@ -88,10 +88,11 @@ pub fn run(config_path: &Path, db_path: &Path) -> Result<(), String> {
             .map_err(|e| format!("cannot handle signal {signal}: {e}"))?;
     }
 
+    let keys = config.keys.clone();
     let mut tv = Tv::new(
         config,
         player,
-        EvdevInput::new(),
+        EvdevInput::new(keys),
         clips,
         Box::new(transcodes),
         Box::new(clock_trusted),

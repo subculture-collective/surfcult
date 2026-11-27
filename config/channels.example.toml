@@ -8,6 +8,14 @@ timezone = "America/Chicago"
 # channel (optional; the default is "tune-in"). A pool named here must exist.
 tune_in_pool = "tune-in"
 
+# Keys (optional). Each action lists Linux key names; an action named here
+# replaces that action's default keys. The defaults for channel_up are shown;
+# the rest are in docs/reference/run.md. Actions: channel_up, channel_down,
+# digit_0 .. digit_9, info, back, menu, guide, mute, volume_up, volume_down,
+# quit.
+# [keys]
+# channel_up = ["KEY_UP", "KEY_CHANNELUP", "KEY_PAGEUP"]
+
 # A channel with one source and one mode.
 # mode: sequential | shuffle | weighted | blocks
 [[channel]]

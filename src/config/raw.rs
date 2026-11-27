@@ -3,12 +3,14 @@
 //! Values that can be wrong in ways worth naming (modes, durations, times, the
 //! time zone) stay strings here so each problem is reported against its key.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer};
+
+use crate::input::KeyMap;
 
 use super::duration::{parse_duration, parse_minute_of_day};
 use super::{
@@ -26,6 +28,7 @@ pub struct RawConfig {
     interstitial_pool: Vec<RawPool>,
     display: Option<RawDisplay>,
     tune_in_pool: Option<String>,
+    keys: Option<BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(Deserialize)]
@@ -295,6 +298,17 @@ impl RawConfig {
             .as_ref()
             .map_or_else(Display::default, |raw| raw.check(&mut problems));
 
+        let keys = match self.keys.as_ref().map(KeyMap::from_table) {
+            None => KeyMap::default(),
+            Some(Ok(keys)) => keys,
+            Some(Err(found)) => {
+                for (field, message) in found {
+                    problems.add(field, message);
+                }
+                KeyMap::default()
+            }
+        };
+
         match (timezone, problems.0.is_empty()) {
             (Some(timezone), true) => Ok(Config {
                 timezone,
@@ -302,6 +316,7 @@ impl RawConfig {
                 pools,
                 display,
                 tune_in_pool,
+                keys,
             }),
             _ => Err(problems.0),
         }

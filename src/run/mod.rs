@@ -87,6 +87,8 @@ pub struct Settings {
     pub upkeep_every_ms: i64,
     /// How often an untrusted clock is checked again.
     pub clock_retry_ms: i64,
+    /// How long a channel number waits for its next digit.
+    pub entry_ms: i64,
 }
 
 impl Default for Settings {
@@ -96,6 +98,7 @@ impl Default for Settings {
             banner_ms: DEFAULT_BANNER_MS,
             upkeep_every_ms: 60 * 60 * 1000,
             clock_retry_ms: 60 * 1000,
+            entry_ms: 2000,
         }
     }
 }
@@ -126,6 +129,9 @@ pub struct Tv<P, I> {
     channel: Option<u32>,
     banner_pending: bool,
     banner_until_ms: Option<i64>,
+    /// The channel number being typed: its value, its digits and when it
+    /// is tuned if no digit follows.
+    entry: Option<(u32, usize, i64)>,
     upkeep: Upkeep,
     /// The clock slate is up until the clock is trusted.
     waiting_for_clock: bool,
@@ -172,6 +178,7 @@ impl<P: Player, I: Input> Tv<P, I> {
             channel: None,
             banner_pending: false,
             banner_until_ms: None,
+            entry: None,
             upkeep: Upkeep::default(),
             waiting_for_clock: false,
             quit: false,
@@ -215,6 +222,11 @@ impl<P: Player, I: Input> Tv<P, I> {
         }
         for key in self.input.poll(now_ms) {
             self.key(key, now_ms);
+        }
+        if let Some((number, _, due_ms)) = self.entry
+            && now_ms >= due_ms
+        {
+            self.finish_entry(number, now_ms);
         }
         self.pump(now_ms, store);
         self.settle(now_ms, store);
@@ -337,13 +349,38 @@ impl<P: Player, I: Input> Tv<P, I> {
 
     fn key(&mut self, key: Key, now_ms: i64) {
         match key {
+            Key::Digit(d) => {
+                let (number, digits, _) = self.entry.unwrap_or((0, 0, 0));
+                let number = number.saturating_mul(10).saturating_add(u32::from(d));
+                let digits = digits + 1;
+                // The widest channel number, and at least two digits, ends
+                // the entry without waiting.
+                let width = self.numbers.last().map_or(0, |n| n.to_string().len());
+                if digits >= width.max(2) {
+                    self.finish_entry(number, now_ms);
+                } else {
+                    self.entry = Some((number, digits, now_ms + self.settings.entry_ms));
+                }
+            }
             Key::Next | Key::Previous => {
+                self.entry = None;
                 if let Some(target) = self.neighbour(key == Key::Next) {
                     self.tune(target, now_ms);
                 }
             }
             Key::Banner => self.banner_pending = self.driver.following(),
             Key::Quit => self.quit = true,
+            // Not used yet: the guide, the menu and the volume come later.
+            Key::Back | Key::Menu | Key::Guide | Key::Mute | Key::VolumeUp | Key::VolumeDown => {}
+        }
+    }
+
+    /// Ends number entry: tunes `number` when there is such a channel and
+    /// ignores it otherwise.
+    fn finish_entry(&mut self, number: u32, now_ms: i64) {
+        self.entry = None;
+        if self.numbers.contains(&number) {
+            self.tune(number, now_ms);
         }
     }
 

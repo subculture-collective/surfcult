@@ -79,7 +79,7 @@ The test scripts are in `tools/pi-spike/`. Copy them to `~/spike/` on the Pi to 
 
 The Pi's CEC adapter works (`cec-ctl -d /dev/cec0`). Check it with `cec-ctl -d /dev/cec0 --playback --show-topology`: the TV should appear at logical address 0. On the first TV tried, HDMI-CEC was off in the TV's settings (the name varies by brand, for example Anynet+, Bravia Sync or Simplink) and the TV never answered. On the second TV it worked at once: the TV, an audio system at `1.0.0.0` and the Pi at `2.0.0.0` all showed.
 
-Remote keys arrive as Linux input events from the input device named `vc4-hdmi-0`. Find it by that name: its number changed between boots (`event2`, then `event0`). Read it with `patrick`'s `input` group; no desktop session is needed. On 2026-11-23 these keys arrived: up, down, left, right, channel up, channel down and OK (reported as `KEY_OK`, code 352). Number keys, Back, Menu and volume were not seen: they may not have been pressed, and volume normally goes to the audio system, not the Pi. If keys do not arrive, send `cec-ctl -d /dev/cec0 --active-source phys-addr=PHYSICAL_ADDRESS` so the TV treats the Pi as the source.
+Remote keys arrive as Linux input events from the input device named `vc4-hdmi-0`. Find it by that name: its number changed between boots (`event2`, then `event0`). Read it with `patrick`'s `input` group; no desktop session is needed. On 2026-11-23 these keys arrived: up, down, left, right, channel up, channel down and OK (reported as `KEY_OK`, code 352). On 2026-11-27 the TCL Fire TV remote sent Menu as `KEY_MENU` (139), Back as `KEY_EXIT` (174), Play/Pause alternating `KEY_PLAYCD` (200) and `KEY_PAUSECD` (201), Rewind `KEY_REWIND` (168) and Fast-forward `KEY_FASTFORWARD` (208). Home, volume and mute never reached the Pi, and the remote has no number keys. Earlier, number keys, Back, Menu and volume were not seen: they may not have been pressed, and volume normally goes to the audio system, not the Pi. If keys do not arrive, send `cec-ctl -d /dev/cec0 --active-source phys-addr=PHYSICAL_ADDRESS` so the TV treats the Pi as the source.
 
 ## Run the TV
 
@@ -101,7 +101,7 @@ export SURFCULT_JELLYFIN_API_KEY_FILE=$HOME/spike/.jf-key
 
 On the first start the library cache is empty, so every channel is logged as unresolvable and shows the stand-by card until the first library sync is written; then the schedules are filled and the tuned channel starts playing. Logs go to the terminal, each line starting `surfcult:`.
 
-Use the TV remote: up or channel up for the next channel, down or channel down for the previous one, OK for the banner. If no key arrives, see CEC and the remote above. Stop with Ctrl-C, or Q on a USB keyboard; both stop the transcodes and MPV. Closing the SSH session stops it too.
+Use the TV remote: up or channel up for the next channel, down or channel down for the previous one, OK for the banner; digits on a keyboard enter a channel number. The keys are configurable ([run reference](../reference/run.md#keys)). If no key arrives, see CEC and the remote above. Stop with Ctrl-C, or Q on a USB keyboard; both stop the transcodes and MPV. Closing the SSH session stops it too.
 
 Check what the TV shows against the schedule from a second SSH session:
 

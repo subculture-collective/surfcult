@@ -14,6 +14,7 @@ use std::time::Duration;
 pub use chrono_tz::Tz;
 use serde::Deserialize;
 
+pub use crate::input::KeyMap;
 pub use crate::player::Filter;
 use crate::player::{DEFAULT_GLITCH_EVERY, DEFAULT_STANDBY_FILTERS};
 
@@ -27,6 +28,8 @@ pub struct Config {
     /// top-level `tune_in_pool` key ([`DEFAULT_TUNE_IN_POOL`] when it is not
     /// set). A pool named by the key must exist; the default need not.
     pub tune_in_pool: String,
+    /// The optional `[keys]` table over the default keys.
+    pub keys: KeyMap,
 }
 
 /// The tune-in pool's name when `tune_in_pool` is not set.

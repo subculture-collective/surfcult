@@ -95,12 +95,31 @@ Until the clock is trusted for the first time the TV shows the clock slate, the 
 
 The remote is the Linux input device whose name contains `vc4-hdmi` (the Pi's CEC adapter). It is found by name because its event number changes between boots. Every device with the `kbd` handler is read as a keyboard. Devices are read from `/dev/input/eventN`, which needs the `input` group, and the device list is read again every 3 seconds, so a device plugged in later works. The devices are not grabbed.
 
-| Key | Does |
-| --- | --- |
-| Up, Channel up | Next channel up, wrapping from the highest number to the lowest |
-| Down, Channel down | Next channel down, wrapping |
-| OK, Enter, I | Shows the banner again |
-| Q (keyboard only) | Quits |
+Which key does what is the optional `[keys]` table of `channels.toml`. Each key is an action and each value a list of Linux key names (`KEY_UP`, as in `linux/input-event-codes.h`). An action the table names replaces that action's default keys, and a key it gives to an action is taken from any default action that has it. An empty list turns an action off. Names cover letters, digits, the keypad (`KEY_KP0`), `KEY_NUMERIC_0` to `KEY_NUMERIC_9`, the arrows, `KEY_F1` to `KEY_F12` and the media and remote keys below. An unknown action, an unknown key name, or one key under two actions in the table is a validation problem naming its field (`keys.guide[1]`); a value that is not a list of strings is a parse error.
+
+```toml
+[keys]
+channel_up = ["KEY_UP", "KEY_CHANNELUP", "KEY_PAGEUP"]
+digit_5 = ["KEY_5", "KEY_KP5", "KEY_NUMERIC_5"]
+```
+
+| Action | Default keys | Does |
+| --- | --- | --- |
+| `channel_up` | `KEY_UP`, `KEY_CHANNELUP`, `KEY_PAGEUP` | Next channel up, wrapping from the highest number to the lowest |
+| `channel_down` | `KEY_DOWN`, `KEY_CHANNELDOWN`, `KEY_PAGEDOWN` | Next channel down, wrapping |
+| `digit_0` to `digit_9` | `KEY_0` to `KEY_9`, `KEY_KP0` to `KEY_KP9`, `KEY_NUMERIC_0` to `KEY_NUMERIC_9` | Enters a channel number, see below |
+| `info` | `KEY_OK`, `KEY_ENTER`, `KEY_INFO`, `KEY_I` | Shows the banner again |
+| `quit` | `KEY_Q` (keyboard only) | Quits |
+| `back` | `KEY_EXIT`, `KEY_BACK`, `KEY_ESC`, `KEY_BACKSPACE` | Nothing yet |
+| `menu` | `KEY_MENU`, `KEY_M` | Nothing yet |
+| `guide` | `KEY_EPG`, `KEY_PROGRAM`, `KEY_G`, `KEY_PLAYCD`, `KEY_PAUSECD`, `KEY_PLAYPAUSE` | Nothing yet |
+| `mute` | `KEY_MUTE` | Nothing yet |
+| `volume_up` | `KEY_VOLUMEUP` | Nothing yet |
+| `volume_down` | `KEY_VOLUMEDOWN` | Nothing yet |
+
+`back`, `menu`, `guide`, `mute`, `volume_up` and `volume_down` are read and passed to the loop as `Key` values, which ignores them for now. The guide, the menu and the volume come in later issues. The defaults suit the TCL Fire TV remote over HDMI-CEC: its Menu key is `KEY_MENU`, Back is `KEY_EXIT`, OK is `KEY_OK`, and Play/Pause alternates `KEY_PLAYCD` and `KEY_PAUSECD`, so both open the guide. Its Home, volume and mute keys do not reach the Pi, and it has no number keys. A keyboard's number row and keypad enter channel numbers.
+
+Number entry: a digit starts a channel number, and each digit adds to it. The channel is tuned at once when the number is as wide as the highest channel number (at least two digits), and otherwise 2 seconds after the last digit. A number that is not a channel is ignored. Channel up and down end the entry and change the channel as usual. Other keys leave it alone.
 
 Only a press counts; a held key changes the channel once. Left and right do nothing yet.
 
@@ -165,6 +184,6 @@ A program that never starts and never fails, such as a transcode that hangs, kee
 
 ## Tests
 
-`src/run/tests.rs` drives the loop with a virtual clock, a `FakePlayer` wrapped so single programs can fail as a Jellyfin error would, or all of them as a Jellyfin outage would, a `FakeInput`, an in-memory store whose library cache is the media source, and clip pools scanned from a temporary directory with a fake prober. They cover wrapping channel changes, the commands of a tune, returning to a channel at its live position, a program cut by breaks, a stale queue, gaps and off-air time, the banner and its timeout, an unplayable program with and without a filler pool, a program that fails twice on screen, a Jellyfin outage with a break in it and its recovery, a refused tune, a player restart, an unresolvable source at startup and the clock slate until the clock is trusted. `src/input/evdev.rs` tests parsing `input_event` bytes and `/proc/bus/input/devices`. The stream resolver is tested against recorded Jellyfin responses. A real MPV test (skipped without `mpv`) checks that MPV accepts `play_program`, `queue_clip` and the banner's `osd-overlay`.
+`src/run/tests.rs` drives the loop with a virtual clock, a `FakePlayer` wrapped so single programs can fail as a Jellyfin error would, or all of them as a Jellyfin outage would, a `FakeInput`, an in-memory store whose library cache is the media source, and clip pools scanned from a temporary directory with a fake prober. They cover wrapping channel changes, the commands of a tune, returning to a channel at its live position, a program cut by breaks, a stale queue, gaps and off-air time, the banner and its timeout, an unplayable program with and without a filler pool, a program that fails twice on screen, a Jellyfin outage with a break in it and its recovery, a refused tune, a player restart, an unresolvable source at startup and the clock slate until the clock is trusted. `src/input/evdev.rs` tests parsing `input_event` bytes and `/proc/bus/input/devices`, and `src/input/keymap.rs` the key names, the defaults and the `[keys]` overrides. The loop tests also cover number entry: one digit after the wait, two digits at once, an unknown number and a channel key during entry. The stream resolver is tested against recorded Jellyfin responses. A real MPV test (skipped without `mpv`) checks that MPV accepts `play_program`, `queue_clip` and the banner's `osd-overlay`.
 
 Not tested here: the remote, the TV, Jellyfin, the look of the banner and the slates on the Pi, and what MPV reports for a missing file or a Jellyfin that goes away mid-program. That is the owner's check: change channels across three channels and compare each with `surfcult now`.
