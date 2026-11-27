@@ -1,13 +1,13 @@
-//! Replaces a channel's future after its config or its items' durations
+//! Replaces a channel's future after its config or the items it plays
 //! changed, keeping what is about to air.
 
-use super::extend::fill;
+use super::extend::{extend, fill};
 use super::sign_off::nights;
 use super::{Extended, HORIZON_MS, ScheduleError};
 use crate::clips::Pool;
 use crate::config::{Channel, Source, Tz};
-use crate::library::MediaItem;
-use crate::store::Store;
+use crate::library::{LibraryChanges, MediaItem};
+use crate::store::{Store, Substitution};
 use crate::timeline::{Event, EventKind};
 
 /// How far ahead of `now` the schedule is frozen: 30 minutes. A regeneration
@@ -128,4 +128,55 @@ fn boundary(stored: &[Event], sign_offs: &[i64], now_ms: i64, freeze_ms: i64) ->
 /// continues in later events at higher offsets.
 fn starts_program(event: &Event) -> bool {
     event.kind == EventKind::Program && event.media_offset_ms == 0
+}
+
+/// Keeps `channel`'s schedule in step with a library sync that made
+/// `changes`. `pools` are resolved from the cache after the sync, so they
+/// hold the new runtimes and not the items that left. The caller has checked
+/// that the clock is trusted.
+///
+/// When an event from `now_ms` on plays an item whose runtime changed or that
+/// left the library ([`LibraryChanges::affects`]), the channel is regenerated
+/// ([`regenerate`]), so only events after the freeze point change. Each
+/// program of an item that left and that the regeneration replaced is then
+/// recorded as a [`Substitution`], with the media of the event that now
+/// starts or runs at its time. A program inside the freeze point stays, and
+/// fails when it is due to play. When nothing scheduled changed, the schedule
+/// is only extended ([`extend`]). A renamed item needs nothing here:
+/// [`Store::replace_library`] has already given its events the new id.
+pub fn reschedule(
+    store: &mut Store,
+    channel: &Channel,
+    pools: &[(Source, Vec<MediaItem>)],
+    clips: &[Pool],
+    timezone: Tz,
+    now_ms: i64,
+    changes: &LibraryChanges,
+) -> Result<Extended, ScheduleError> {
+    let n = channel.number;
+    let before = store.events_between(n, now_ms, i64::MAX)?;
+    if !before.iter().any(|event| changes.affects(&event.media_id)) {
+        return extend(store, channel, pools, clips, timezone, now_ms, true);
+    }
+    let result = regenerate(store, channel, pools, clips, timezone, now_ms, true)?;
+    let after = store.events_between(n, now_ms, i64::MAX)?;
+    for event in &before {
+        let replaced = starts_program(event)
+            && changes.vanished.contains(&event.media_id)
+            && !after.contains(event);
+        if replaced {
+            let replacement = after
+                .iter()
+                .find(|e| e.start_ms <= event.start_ms && event.start_ms < e.end_ms)
+                .map(|e| e.media_id.clone());
+            let substitution = Substitution {
+                channel: n,
+                media_id: event.media_id.clone(),
+                scheduled_ms: event.start_ms,
+                replacement,
+            };
+            store.record_substitution(&substitution, now_ms)?;
+        }
+    }
+    Ok(result)
 }

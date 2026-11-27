@@ -64,7 +64,7 @@ The player is polled every step, at most 20 ms apart, as the stand-by card's gli
 
 Each channel's sources are resolved into program pools from the library cache (`library::resolve_pool`) and `schedule::extend` fills the channel to seven days ahead. This happens at startup, after every sync that was written, and every hour.
 
-A sync that changed the runtime of an item in a channel's pools runs `schedule::regenerate` for that channel instead. It keeps the next 30 minutes and rebuilds the rest.
+After a sync that changed the library, each channel goes through `schedule::reschedule` instead. A channel whose schedule plays an item that got a new runtime or left the library is regenerated: the next 30 minutes stay and the rest is rebuilt, and each program replaced for an item that left is recorded as a substitution. The log line `library changed: N renamed, N with a new runtime, N gone` reports what the sync found. While the clock is not trusted the changes wait for the first schedule upkeep that runs.
 
 A channel with a source that cannot be resolved is skipped and logged once with the channel and the reason, for example `channel 5: jellyfin_series "Name" matches nothing in the library`. Before the first sync every source fails this way. A skipped channel plays the events it already has and then shows the stand-by card; the other channels are not affected.
 

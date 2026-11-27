@@ -713,23 +713,44 @@ fn a_schedule_written_once_the_clock_is_trusted_starts_playing() {
 }
 
 #[test]
-fn only_a_changed_runtime_of_a_kept_item_counts_as_a_change() {
-    let source = Source::JellyfinCollection("Cartoons".into());
-    let pools = |items: &[(&str, u64)]| -> Pools {
-        let items = items
-            .iter()
-            .map(|(id, ms)| MediaItem::new(*id, *id, MediaKind::Movie, *ms))
-            .collect();
-        vec![(source.clone(), items)]
+fn a_sync_that_changes_a_scheduled_runtime_regenerates_after_the_freeze() {
+    let mut rig = Rig::new();
+    rig.trusted.set(true);
+    rig.start();
+    let before = rig.store.events_between(3, T, i64::MAX).unwrap();
+    assert_eq!((before[0].start_ms, before[0].end_ms), (T, T + 60 * MIN));
+
+    // Tdarr replaced `show` with a 30-minute file under the same id.
+    let mut shorter = item("show", "The Show", "hevc");
+    shorter.runtime_ms = 30 * MIN as u64;
+    let entries: Vec<LibraryEntry> = [
+        shorter,
+        item("movie", "The Movie", "h264"),
+        item("tc", "Transcoded", "av1"),
+    ]
+    .into_iter()
+    .map(|item| LibraryEntry { item, path: None })
+    .collect();
+    let cartoons = Collection {
+        name: "Cartoons".into(),
+        members: vec![MediaId::new("show")],
     };
-    let before = pools(&[("a", 1_000), ("b", 2_000)]);
-    assert!(!runtimes_changed(
-        &before,
-        &pools(&[("a", 1_000), ("b", 2_000)])
-    ));
-    assert!(!runtimes_changed(
-        &before,
-        &pools(&[("a", 1_000), ("c", 5)])
-    ));
-    assert!(runtimes_changed(&before, &pools(&[("b", 2_500)])));
+    let changes = rig.store.replace_library(&entries, &[cartoons], 1).unwrap();
+    assert_eq!(changes.resized, [MediaId::new("show")]);
+    let report = SyncReport {
+        items: 3,
+        collections: 1,
+        skipped: 0,
+        changes,
+    };
+    rig.tv.synced(T + MIN, &mut rig.store, Ok(report));
+
+    let after = rig.store.events_between(3, T, i64::MAX).unwrap();
+    // The program on screen is frozen; the next one has the new runtime.
+    assert_eq!(after[0], before[0]);
+    assert_eq!(
+        (after[1].start_ms, after[1].end_ms),
+        (T + 60 * MIN, T + 90 * MIN)
+    );
+    assert_eq!(after[1].media_duration_ms, 30 * MIN as u64);
 }

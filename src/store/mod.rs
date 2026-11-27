@@ -12,6 +12,8 @@
 //!   there is no separate cursor; migration 3 dropped the old `cursors` table.
 //! - `playback_history`: one row each time the tuner starts something, with a
 //!   short outcome word. Read newest first.
+//! - `substitutions`: one row for each scheduled program a regeneration
+//!   replaced because its item left the library. See [`Substitution`].
 //!
 //! - `library_*`: a copy of the Jellyfin library (items, chapters, streams,
 //!   libraries, tags, genres, series and collections), replaced as a whole by
@@ -72,6 +74,19 @@ pub struct PlaybackRecord {
     pub media_id: MediaId,
     pub started_at_ms: i64,
     pub outcome: String,
+}
+
+/// A scheduled program that was replaced because its item left the library.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Substitution {
+    pub channel: u32,
+    /// The item that left the library.
+    pub media_id: MediaId,
+    /// When its program was to start.
+    pub scheduled_ms: i64,
+    /// The media of the event the new schedule has at that time, or `None`
+    /// when nothing is on then.
+    pub replacement: Option<MediaId>,
 }
 
 /// A SQLite database of schedule events, playback history and the library cache.
@@ -378,6 +393,54 @@ impl Store {
                     media_id: MediaId::new(row.get::<_, String>(1)?),
                     started_at_ms: row.get(2)?,
                     outcome: row.get(3)?,
+                })
+            })
+            .map_err(StoreError::database(action))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(StoreError::database(action))
+    }
+
+    /// Adds one row to the substitutions, recorded at `recorded_at_ms`.
+    pub fn record_substitution(
+        &mut self,
+        substitution: &Substitution,
+        recorded_at_ms: i64,
+    ) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT INTO substitutions
+                   (channel, media_id, scheduled_ms, replacement_id, recorded_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    substitution.channel,
+                    substitution.media_id.as_str(),
+                    substitution.scheduled_ms,
+                    substitution.replacement.as_ref().map(MediaId::as_str),
+                    recorded_at_ms
+                ],
+            )
+            .map_err(StoreError::database("recording a substitution"))?;
+        Ok(())
+    }
+
+    /// `channel`'s substitutions, by scheduled time and then in the order
+    /// they were recorded.
+    pub fn substitutions(&self, channel: u32) -> Result<Vec<Substitution>, StoreError> {
+        let action = "reading substitutions";
+        let mut statement = self
+            .conn
+            .prepare_cached(
+                "SELECT channel, media_id, scheduled_ms, replacement_id FROM substitutions
+                 WHERE channel = ?1 ORDER BY scheduled_ms, id",
+            )
+            .map_err(StoreError::database(action))?;
+        let rows = statement
+            .query_map([channel], |row| {
+                Ok(Substitution {
+                    channel: row.get(0)?,
+                    media_id: MediaId::new(row.get::<_, String>(1)?),
+                    scheduled_ms: row.get(2)?,
+                    replacement: row.get::<_, Option<String>>(3)?.map(MediaId::new),
                 })
             })
             .map_err(StoreError::database(action))?;

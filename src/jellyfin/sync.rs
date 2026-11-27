@@ -1,8 +1,9 @@
 use super::client::{FetchedLibrary, JellyfinClient, JellyfinError};
+use crate::library::LibraryChanges;
 use crate::store::Store;
 
 /// What one [`sync`] cached.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncReport {
     /// Items now in the cache.
     pub items: usize,
@@ -11,6 +12,9 @@ pub struct SyncReport {
     /// Items Jellyfin listed that were left out: placeholders for missing
     /// episodes, items without a runtime, and items with an unreadable shape.
     pub skipped: usize,
+    /// How the cached items changed since the cache this sync replaced:
+    /// renamed (a new id for the same file path), resized and vanished items.
+    pub changes: LibraryChanges,
 }
 
 /// Fetches every movie and episode and every collection from Jellyfin and
@@ -40,10 +44,11 @@ pub(super) fn write_fetched(
     fetched: &FetchedLibrary,
     synced_at_ms: i64,
 ) -> Result<SyncReport, JellyfinError> {
-    store.replace_library(&fetched.entries, &fetched.collections, synced_at_ms)?;
+    let changes = store.replace_library(&fetched.entries, &fetched.collections, synced_at_ms)?;
     Ok(SyncReport {
         items: fetched.entries.len(),
         collections: fetched.collections.len(),
         skipped: fetched.skipped,
+        changes,
     })
 }

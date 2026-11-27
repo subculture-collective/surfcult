@@ -26,8 +26,9 @@
 //! cache in the store and its schedule is extended at startup, after every
 //! sync that was written, and every hour, but only while the clock is
 //! trusted (checked again every minute while it is not). A sync that changed
-//! the runtime of an item in a channel's pools regenerates that channel
-//! instead, which keeps the next 30 minutes. A channel with a source that
+//! the runtime of an item a channel's schedule plays, or removed one,
+//! regenerates that channel instead, which keeps the next 30 minutes, and
+//! records each program it replaced for a removed item as a substitution. A channel with a source that
 //! cannot be resolved (nothing synced yet, or a name the library does not
 //! have) is logged with the reason and skipped; it shows the stand-by card
 //! once its stored events run out, and the other channels keep working.
@@ -46,7 +47,7 @@ use crate::clips::{Clip, ClipLibrary};
 use crate::config::{Channel, Config, Source};
 use crate::input::{Input, Key};
 use crate::jellyfin::{JellyfinError, SyncReport};
-use crate::library::{MediaItem, resolve_pool};
+use crate::library::{LibraryChanges, MediaItem, resolve_pool};
 use crate::overlay::{self, DEFAULT_BANNER_MS};
 use crate::player::{Player, PlayerEvent};
 use crate::schedule::{self, Extended};
@@ -91,9 +92,8 @@ impl Default for Settings {
 #[derive(Default)]
 struct Upkeep {
     due_ms: i64,
-    /// The pools each channel was last scheduled from, to see what a sync
-    /// changed.
-    pools: HashMap<u32, Pools>,
+    /// Library changes from syncs that no schedule has followed yet.
+    changes: LibraryChanges,
     /// The last problem logged for each channel, so it is logged once.
     problems: HashMap<u32, String>,
     clock_logged: bool,
@@ -169,7 +169,7 @@ impl<P: Player, I: Input> Tv<P, I> {
         if let Err(e) = self.tuner.player_mut().show_standby() {
             eprintln!("surfcult: cannot show the stand-by card: {e}");
         }
-        self.keep_schedules(now_ms, store, false);
+        self.keep_schedules(now_ms, store);
         if let Some(&first) = self.numbers.first() {
             self.tune(first, now_ms);
         } else {
@@ -193,7 +193,7 @@ impl<P: Player, I: Input> Tv<P, I> {
         self.driver.step(now_ms, &mut cx);
         self.banner(now_ms, store);
         if now_ms >= self.upkeep.due_ms {
-            self.keep_schedules(now_ms, store, false);
+            self.keep_schedules(now_ms, store);
         }
     }
 
@@ -213,7 +213,20 @@ impl<P: Player, I: Input> Tv<P, I> {
                     "surfcult: library synced: {} items, {} collections, {} skipped",
                     report.items, report.collections, report.skipped
                 );
-                self.keep_schedules(now_ms, store, true);
+                let changes = report.changes;
+                if !changes.is_empty() {
+                    eprintln!(
+                        "surfcult: library changed: {} renamed, {} with a new runtime, {} gone",
+                        changes.renamed.len(),
+                        changes.resized.len(),
+                        changes.vanished.len()
+                    );
+                }
+                let pending = &mut self.upkeep.changes;
+                pending.renamed.extend(changes.renamed);
+                pending.resized.extend(changes.resized);
+                pending.vanished.extend(changes.vanished);
+                self.keep_schedules(now_ms, store);
             }
             Err(e) => {
                 eprintln!("surfcult: the library sync failed; keeping the cached library: {e}")
@@ -393,10 +406,11 @@ impl<P: Player, I: Input> Tv<P, I> {
         self.config.channels.iter().find(|c| c.number == number)
     }
 
-    /// Extends every channel's schedule, or regenerates a channel whose
-    /// items changed runtime when `after_sync` is set. Does nothing but wait
-    /// while the clock is not trusted.
-    fn keep_schedules(&mut self, now_ms: i64, store: &mut Store, after_sync: bool) {
+    /// Extends every channel's schedule. After a sync changed the library, a
+    /// channel whose schedule plays an item that changed runtime or left is
+    /// regenerated instead ([`schedule::reschedule`]). Does nothing but wait
+    /// while the clock is not trusted; the changes wait too.
+    fn keep_schedules(&mut self, now_ms: i64, store: &mut Store) {
         if !(self.clock_trusted)() {
             if !self.upkeep.clock_logged {
                 eprintln!(
@@ -409,6 +423,7 @@ impl<P: Player, I: Input> Tv<P, I> {
         }
         self.upkeep.clock_logged = false;
         self.upkeep.due_ms = now_ms.saturating_add(self.settings.upkeep_every_ms);
+        let changes = std::mem::take(&mut self.upkeep.changes);
         let pools_now = self.clips.pools();
         for channel in &self.config.channels {
             let n = channel.number;
@@ -422,18 +437,11 @@ impl<P: Player, I: Input> Tv<P, I> {
                     continue;
                 }
             };
-            let changed = after_sync
-                && self
-                    .upkeep
-                    .pools
-                    .get(&n)
-                    .is_some_and(|before| runtimes_changed(before, &pools));
             let tz = self.config.timezone;
-            let result = if changed {
-                eprintln!("surfcult: channel {n}: a runtime changed; regenerating its schedule");
-                schedule::regenerate(store, channel, &pools, pools_now, tz, now_ms, true)
-            } else {
+            let result = if changes.is_empty() {
                 schedule::extend(store, channel, &pools, pools_now, tz, now_ms, true)
+            } else {
+                schedule::reschedule(store, channel, &pools, pools_now, tz, now_ms, &changes)
             };
             match result {
                 Ok(Extended::Generated { .. } | Extended::UpToDate { .. }) => {
@@ -448,7 +456,6 @@ impl<P: Player, I: Input> Tv<P, I> {
                     }
                 }
             }
-            self.upkeep.pools.insert(n, pools);
         }
         self.driver.invalidate();
     }
@@ -470,17 +477,4 @@ fn resolve_pools(channel: &Channel, store: &Store) -> Result<Pools, String> {
     } else {
         Err(problems.join("; "))
     }
-}
-
-/// Whether an item in both `before` and `after` has a different runtime.
-fn runtimes_changed(before: &Pools, after: &Pools) -> bool {
-    let old: HashMap<_, u64> = before
-        .iter()
-        .flat_map(|(_, items)| items)
-        .map(|item| (&item.id, item.runtime_ms))
-        .collect();
-    after
-        .iter()
-        .flat_map(|(_, items)| items)
-        .any(|item| old.get(&item.id).is_some_and(|&ms| ms != item.runtime_ms))
 }

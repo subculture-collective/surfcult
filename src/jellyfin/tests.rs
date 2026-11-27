@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::library::{MediaId, MediaKind, MediaSource, SeriesEpisode, SourceError};
+use crate::library::{LibraryChanges, MediaId, MediaKind, MediaSource, SeriesEpisode, SourceError};
 use crate::store::Store;
 
 const ITEMS: &str = include_str!("../../tests/fixtures/jellyfin/items-page.json");
@@ -222,7 +222,8 @@ fn a_sync_fills_the_cache_with_runtime_chapters_streams_and_path() {
         SyncReport {
             items: 4,
             collections: 2,
-            skipped: 1
+            skipped: 1,
+            changes: LibraryChanges::default(),
         }
     );
     let movie = store.resolve(&MediaId::new(MOVIE_1)).unwrap();

@@ -296,7 +296,7 @@ pub(crate) use generate::{
     Lane, Layout, Params, Resume, SourcePool, cooling_target, generate, generate_blocks,
     generate_fixed,
 };
-pub use regenerate::{FREEZE_MS, regenerate};
+pub use regenerate::{FREEZE_MS, regenerate, reschedule};
 
 /// The most events one run will produce. A run over seven days that reaches
 /// this has items only seconds long, which means the library data is wrong.

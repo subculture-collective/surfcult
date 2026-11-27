@@ -162,7 +162,7 @@ Cuts, an `order` rotation and padding use no randomness. They depend only on the
 
 ## Regeneration
 
-`schedule::regenerate` takes the same arguments as `extend`. Call it when a channel's config or the runtime of an item in its pools changed. Events that start within the next 30 minutes (`schedule::FREEZE_MS`) never change.
+`schedule::regenerate` takes the same arguments as `extend`. Call it when a channel's config changed; after a library sync, `reschedule` calls it when needed. Events that start within the next 30 minutes (`schedule::FREEZE_MS`) never change.
 
 - The boundary is the first place at or after `now_ms` plus 30 minutes where the generator can pick up exactly where the stored schedule is: the start of a program (a `Program` event with `media_offset_ms` 0); a `Filler` event that follows another `Filler` event, which is a blocks channel's uncovered time or the gap before a sign-off (a break's padding follows a break clip or a program); an `Ident` event that starts when a night off the air starts, which is the sign-off clip; or time with no events, such as dead air or the time off the air, at its start or at the freeze point if that falls inside it. Every event before the boundary is kept, so a program and its breaks that run past the freeze point are kept whole and the new schedule never starts inside a break. On a blocks channel a new or moved block therefore reaches the filler or dead air after the freeze point, not only the next program.
 - In one transaction `Store::replace_events_from` deletes the events from the boundary on and writes the new ones, generated from the boundary to `now_ms` plus seven days. The generator resumes from the stored history before the boundary, exactly as `extend` does: the last program, the shuffle cooldown, each block's place and the recent break clips.
@@ -170,6 +170,15 @@ Cuts, an `order` rotation and padding use no randomness. They depend only on the
 - When the stored schedule ends before any boundary, the time after its end is filled as `extend` fills it.
 - A pool with nothing playable replaces the future as well. From the boundary on the channel gets filler, or no events (dead air), and the notes say why, such as `NoPlayableItems`. The tuner shows the stand-by card for that time. This is never the result of a failed library fetch: a failed sync leaves the library cache as it was, and a source that matches nothing is an error before `regenerate` runs. So an empty pool comes from a deliberate config change, and `regenerate` follows it.
 - It returns `Extended`, like `extend`, and does nothing without a trusted clock.
+
+### Following library changes
+
+`schedule::reschedule(&mut Store, &Channel, pools, clips, timezone, now_ms, &changes)` keeps a channel in step with a library sync. `changes` is the `LibraryChanges` that `Store::replace_library` returned (see [Jellyfin source](jellyfin.md#keeping-the-schedule-in-step)), and `pools` are resolved from the cache after the sync, so they have the new runtimes and not the items that left. The caller checks that the clock is trusted.
+
+- If an event from `now_ms` on plays an item whose runtime changed (`resized`) or that left the library (`vanished`), the channel is regenerated as above. Events within the freeze point stay, including a program of an item that left; that program fails when it is due and the tuner shows the stand-by card.
+- Each program of a vanished item that the regeneration replaced is recorded with `Store::record_substitution`: the channel, the item, the time it was to start and the media of the event that the new schedule has at that time (`None` for dead air). `Store::substitutions(channel)` reads them back.
+- Otherwise the schedule is only extended.
+- A renamed item (a new id for the same file path) needs nothing here: `replace_library` already gave its events the new id.
 
 ## When a file's length differs from its event
 
