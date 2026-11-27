@@ -28,10 +28,11 @@
 //! trusted (checked again every minute while it is not). A sync that changed
 //! the runtime of an item a channel's schedule plays, or removed one,
 //! regenerates that channel instead, which keeps the next 30 minutes, and
-//! records each program it replaced for a removed item as a substitution. A channel with a source that
-//! cannot be resolved (nothing synced yet, or a name the library does not
-//! have) is logged with the reason and skipped; it shows the stand-by card
-//! once its stored events run out, and the other channels keep working.
+//! records each program it replaced for a removed item as a substitution. A
+//! channel with a source that cannot be resolved (nothing synced yet, or a
+//! name the library does not have) is logged with the reason and skipped; it
+//! shows the stand-by card once its stored events run out, and the other
+//! channels keep working.
 
 pub mod app;
 mod clock;
