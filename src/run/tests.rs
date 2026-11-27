@@ -65,6 +65,12 @@ impl Player for TestPlayer {
     fn queue_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
         self.fake.queue_clip(path)
     }
+    fn loop_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
+        self.fake.loop_clip(path)
+    }
+    fn queue_looping_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
+        self.fake.queue_looping_clip(path)
+    }
     fn seek(&mut self, position_ms: u64) -> Result<(), PlayerError> {
         self.fake.seek(position_ms)
     }
@@ -519,6 +525,47 @@ fn a_program_cut_by_breaks_plays_its_segments_and_break_clips_in_order() {
             ("show".into(), T + 2 * MIN),
         ]
     );
+}
+
+#[test]
+fn a_pad_longer_than_its_clip_loops_the_clip_until_the_next_event() {
+    let mut rig = Rig::new();
+    let (ad1, ad2) = (rig.clip("ad1.mp4"), rig.clip("ad2.mp4"));
+    // Both clips are 30 s. The break's pad repeats ad2 for 90 s, and a
+    // second pad, on its own, repeats ad1 for 2 minutes.
+    rig.write(
+        3,
+        &[
+            program(T - 10 * MIN, T + MIN, "show", 0),
+            event(T + MIN, T + MIN + 30_000, &ad1, 0, EventKind::Break),
+            event(T + MIN + 30_000, T + 3 * MIN, &ad2, 0, EventKind::Ident),
+            program(T + 3 * MIN, T + 10 * MIN, "show", 11 * MIN as u64),
+            event(T + 10 * MIN, T + 12 * MIN, &ad1, 0, EventKind::Ident),
+            program(T + 12 * MIN, T + 20 * MIN, "show", 18 * MIN as u64),
+        ],
+    );
+    rig.start();
+    rig.go_live(T);
+    rig.step(T + MIN - 1);
+    rig.take();
+    // The pad is queued to loop, so MPV never runs out of it.
+    rig.step(T + MIN);
+    assert_eq!(
+        rig.take(),
+        [
+            Command::PlayClip(ad1.clone().into()),
+            Command::QueueLoopingClip(ad2.clone().into())
+        ]
+    );
+    // Nothing is queued behind a looping clip: the program replaces it.
+    rig.step(T + MIN + 30_000);
+    assert_eq!(rig.take(), []);
+    rig.step(T + 3 * MIN);
+    assert_eq!(rig.take(), [play("show", 11 * MIN)]);
+    rig.step(T + 10 * MIN);
+    assert_eq!(rig.take(), [Command::LoopClip(ad1.into())]);
+    rig.step(T + 12 * MIN);
+    assert_eq!(rig.take(), [play("show", 18 * MIN)]);
 }
 
 #[test]

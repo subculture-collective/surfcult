@@ -27,6 +27,10 @@
 //! immediate; replacing it with another program shows nothing for that
 //! program's start-up time.
 //!
+//! A clip shorter than its event, such as a break's pad that repeats one
+//! ident, loops until the next item replaces it at the boundary, so the
+//! screen never runs out of video. Nothing is queued behind it.
+//!
 //! # Position
 //!
 //! The position always comes from the schedule at the current time, never
@@ -416,6 +420,11 @@ impl Following {
                 "the clip {} is not in the scanned clip pools",
                 event.media_id
             )),
+            Some(clip) if shorter_than(clip, &event) => cx
+                .player
+                .loop_clip(&clip.path)
+                .map(|()| clip.duration)
+                .map_err(|e| format!("cannot play the clip {}: {e}", event.media_id)),
             Some(clip) => cx
                 .player
                 .play_clip(&clip.path)
@@ -464,6 +473,7 @@ impl Following {
                 .map(|()| self.awaiting = Some(next.media_id.clone()))
         } else {
             match clip_for(cx.clips, &next.media_id) {
+                Some(clip) if shorter_than(clip, &next) => cx.player.queue_looping_clip(&clip.path),
                 Some(clip) => cx.player.queue_clip(&clip.path),
                 // The boundary shows the card and logs why.
                 None => return,
@@ -508,4 +518,12 @@ fn record(store: &mut Store, channel: u32, media_id: &MediaId, at_ms: i64, outco
     if let Err(e) = store.record_playback(channel, media_id, at_ms, outcome) {
         eprintln!("surfcult: channel {channel}: cannot record playback history: {e}");
     }
+}
+
+/// Whether `clip` ends before `event` does, by more than the queue
+/// tolerance: a pad or gap event that repeats one clip. Such a clip loops
+/// until the event's end replaces it, so the screen never goes empty.
+fn shorter_than(clip: &Clip, event: &Event) -> bool {
+    let clip_ms = i64::try_from(clip.duration.as_millis()).unwrap_or(i64::MAX);
+    event.end_ms.saturating_sub(event.start_ms) > clip_ms.saturating_add(QUEUE_TOLERANCE_MS)
 }

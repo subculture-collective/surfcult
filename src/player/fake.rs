@@ -42,6 +42,8 @@ pub enum Command {
         start_ms: u64,
     },
     QueueClip(PathBuf),
+    LoopClip(PathBuf),
+    QueueLoopingClip(PathBuf),
     Seek(u64),
     Stop,
     /// The overlay's place and size; the pixels are not recorded.
@@ -174,6 +176,14 @@ impl Player for FakePlayer {
 
     fn queue_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
         self.record(Command::QueueClip(path.to_path_buf()))
+    }
+
+    fn loop_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
+        self.record(Command::LoopClip(path.to_path_buf()))
+    }
+
+    fn queue_looping_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
+        self.record(Command::QueueLoopingClip(path.to_path_buf()))
     }
 
     fn seek(&mut self, position_ms: u64) -> Result<(), PlayerError> {

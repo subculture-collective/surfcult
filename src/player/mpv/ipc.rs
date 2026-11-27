@@ -203,10 +203,26 @@ impl Session {
         self.replace(&path, json!({}), Entry::Clip)
     }
 
+    /// Plays the local file at `path` over and over, replacing the playlist.
+    pub(super) fn loop_clip(&mut self, path: &Path) -> Result<(), IpcError> {
+        let path = clip_path(path)?;
+        self.replace(&path, json!({ "loop-file": "inf" }), Entry::Clip)
+    }
+
     /// Queues the local file at `path` behind the current entry.
     pub(super) fn queue_clip(&mut self, path: &Path) -> Result<(), IpcError> {
+        self.append_clip(path, json!({}))
+    }
+
+    /// Queues the local file at `path` behind the current entry, to play
+    /// over and over once it starts.
+    pub(super) fn queue_looping_clip(&mut self, path: &Path) -> Result<(), IpcError> {
+        self.append_clip(path, json!({ "loop-file": "inf" }))
+    }
+
+    fn append_clip(&mut self, path: &Path, options: Value) -> Result<(), IpcError> {
         let path = clip_path(path)?;
-        let id = self.loadfile(&path, "append", json!({}))?;
+        let id = self.loadfile(&path, "append", options)?;
         self.entries.insert(id, Entry::Clip);
         Ok(())
     }
