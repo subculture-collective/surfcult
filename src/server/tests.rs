@@ -424,3 +424,66 @@ fn serve_answers_on_a_listener_the_caller_bound() {
     assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
     assert!(response.contains("SATURDAY CARTOONS"), "{response}");
 }
+
+fn xml_body(response: Response) -> String {
+    let bytes = run(to_bytes(response.into_body(), usize::MAX)).unwrap();
+    String::from_utf8(bytes.to_vec()).unwrap()
+}
+
+#[test]
+fn xmltv_lists_every_channel_and_the_guide_programs() {
+    let response = send(app(None), get_request("/xmltv.xml"));
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/xml");
+    let xml = xml_body(response);
+    for id in ["3.surfcult", "4.surfcult", "5.surfcult"] {
+        assert!(xml.contains(&format!("<channel id=\"{id}\">")), "{xml}");
+    }
+    assert!(xml.contains("<display-name>SATURDAY CARTOONS</display-name>"));
+    // Channel 3 has two programs with a break between, channel 4 one. NOW is
+    // 1970-01-01 00:16:40 UTC.
+    assert_eq!(xml.matches("<programme ").count(), 3, "{xml}");
+    assert!(
+        xml.contains(
+            "<programme start=\"19700101001540 +0000\" stop=\"19700101001641 +0000\" channel=\"3.surfcult\">\n    <title>A</title>"
+        ),
+        "{xml}"
+    );
+    // "b" is not in the library, so its title is its media id.
+    assert!(
+        xml.contains(
+            "start=\"19700101001642 +0000\" stop=\"19700101001742 +0000\" channel=\"3.surfcult\">\n    <title>b</title>"
+        ),
+        "{xml}"
+    );
+}
+
+#[test]
+fn xmltv_escapes_special_characters_and_lists_genres() {
+    let mut store = store();
+    let mut item = MediaItem::new("a", "Tom & Jerry <\"1\"> 'x'", MediaKind::Episode, 60_000);
+    item.genres = vec!["Action & Adventure".to_string()];
+    store
+        .replace_library(&[LibraryEntry { item, path: None }], &[], 42)
+        .unwrap();
+    let app = router(Config::parse(EXAMPLE).unwrap(), store, None, fixed_now);
+
+    let xml = xml_body(send(app, get_request("/xmltv.xml")));
+
+    assert!(
+        xml.contains("<title>Tom &amp; Jerry &lt;&quot;1&quot;&gt; &apos;x&apos;</title>"),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<category>Action &amp; Adventure</category>"),
+        "{xml}"
+    );
+}
+
+#[test]
+fn xmltv_needs_the_token_when_one_is_set() {
+    let response = send(app(Some(TOKEN)), get_request("/xmltv.xml"));
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
