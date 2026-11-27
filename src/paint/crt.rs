@@ -230,7 +230,7 @@ fn scanlines(px: &mut [u8], w: usize, top: i32, p: &Params) {
             3 => p.row3,
             _ => continue,
         };
-        for pixel in line.chunks_exact_mut(4) {
+        for pixel in line.as_chunks_mut::<4>().0 {
             for c in &mut pixel[..3] {
                 *c = ((u32::from(*c) * factor + 128) >> 8) as u8;
             }

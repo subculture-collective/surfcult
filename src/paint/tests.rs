@@ -20,7 +20,9 @@ fn at(o: &Overlay, x: u32, y: u32) -> [u8; 4] {
 
 fn premultiplied(o: &Overlay) -> bool {
     o.bgra
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3])
 }
 
@@ -300,7 +302,10 @@ fn preview() {
         let mut o = c.to_overlay(0, 0);
         crt::apply(&mut o, level);
         let mut rgba = o.bgra.clone();
-        rgba.chunks_exact_mut(4).for_each(|p| p.swap(0, 2));
+        rgba.as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .for_each(|p| p.swap(0, 2));
         let size = tiny_skia::IntSize::from_wh(o.width, o.height).unwrap();
         let pixmap = tiny_skia::Pixmap::from_vec(rgba, size).unwrap();
         std::fs::write(

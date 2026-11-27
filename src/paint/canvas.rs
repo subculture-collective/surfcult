@@ -177,7 +177,7 @@ impl Canvas {
     /// the same premultiplied pixels, reordered to blue, green, red, alpha.
     pub fn to_overlay(&self, x: i32, y: i32) -> Overlay {
         let mut bgra = self.pixmap.data().to_vec();
-        for px in bgra.chunks_exact_mut(4) {
+        for px in bgra.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
         Overlay {
