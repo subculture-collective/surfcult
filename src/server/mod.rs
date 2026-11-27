@@ -6,8 +6,10 @@
 //! `127.0.0.1:8090` unless `SURFCULT_API_ADDR` says otherwise. When a token is configured every request must carry
 //! `Authorization: Bearer <token>` or it gets `401`.
 //!
-//! Every route is a fixed `GET`. Nothing here runs a command, writes to the
-//! store or reads a file at run time: channels come from the parsed [`Config`] and the
+//! Every route but `POST /tune` and `POST /crt` is a fixed `GET`. Nothing
+//! here runs a command, writes to the store or reads a file at run time; the
+//! two `POST`s hand a request to the TV's run loop ([`Control`]), which
+//! carries it out: channels come from the parsed [`Config`] and the
 //! rest from the [`Store`]. Any other method gets `405` and any other path
 //! `404`.
 //!
@@ -30,6 +32,7 @@
 //!
 //! Endpoints and JSON shapes are in `docs/reference/api.md`.
 
+mod control;
 mod settings;
 #[cfg(test)]
 mod tests;
@@ -44,7 +47,7 @@ use axum::extract::{Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +55,7 @@ use crate::config::{Config, Mode, Plan};
 use crate::store::{Store, StoreError};
 use crate::timeline::{Event, EventKind};
 
+pub use control::{AdminCommand, Control, TvStatus};
 pub use settings::{
     ADDR_ENV, ApiToken, DEFAULT_ADDR, ServerSettings, SettingsError, TOKEN_ENV, TOKEN_FILE_ENV,
 };
@@ -80,17 +84,27 @@ struct AppState {
     store: Arc<Mutex<Store>>,
     token: Option<Arc<ApiToken>>,
     now: Clock,
+    /// The line to the TV, when the server runs inside `surfcult run`.
+    control: Option<Control>,
 }
 
 /// The read API over `config` and `store`. With `token`, every request needs
 /// `Authorization: Bearer <token>`. `now` answers "now" for the default
-/// schedule window and for health.
-pub fn router(config: Config, store: Store, token: Option<ApiToken>, now: Clock) -> Router {
+/// schedule window and for health. With `control`, the admin can tune the TV
+/// and set its CRT filter; without it those routes answer `503`.
+pub fn router(
+    config: Config,
+    store: Store,
+    token: Option<ApiToken>,
+    now: Clock,
+    control: Option<Control>,
+) -> Router {
     let state = AppState {
         config: Arc::new(config),
         store: Arc::new(Mutex::new(store)),
         token: token.map(Arc::new),
         now,
+        control,
     };
     // The reads, and any unknown path, are behind the token; the admin
     // page's files are not.
@@ -100,6 +114,9 @@ pub fn router(config: Config, store: Store, token: Option<ApiToken>, now: Clock)
         .route("/xmltv.xml", get(xmltv::guide))
         .route("/health", get(health))
         .route("/guide", get(web::guide))
+        .route("/tv", get(control::tv))
+        .route("/tune", post(control::tune))
+        .route("/crt", post(control::crt))
         .fallback(|| async { StatusCode::NOT_FOUND })
         .layer(middleware::from_fn_with_state(state.clone(), require_token));
     web::pages().merge(reads).with_state(state)
@@ -113,7 +130,22 @@ pub async fn serve(
     config: Config,
     store: Store,
 ) -> std::io::Result<()> {
-    axum::serve(listener, router(config, store, token, system_now_ms)).await
+    axum::serve(listener, router(config, store, token, system_now_ms, None)).await
+}
+
+/// As [`serve`], with a line to the TV, for the admin inside `surfcult run`.
+pub async fn serve_with_control(
+    listener: tokio::net::TcpListener,
+    token: Option<ApiToken>,
+    config: Config,
+    store: Store,
+    control: Control,
+) -> std::io::Result<()> {
+    axum::serve(
+        listener,
+        router(config, store, token, system_now_ms, Some(control)),
+    )
+    .await
 }
 
 /// Lets a request through only if no token is configured or it carries

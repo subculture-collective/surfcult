@@ -227,6 +227,16 @@ td small { color: var(--muted); }
   box-shadow: inset 2px 2px 0 #ffe9a8, inset -2px -2px 0 #8a4a07;
 }
 .btn:hover { filter: brightness(1.1); }
+.btn.small { font-size: 15px; padding: 6px 12px; }
+.btn[aria-pressed="false"] {
+  background: var(--cell);
+  color: var(--white);
+  box-shadow: inset 2px 2px 0 var(--hi), inset -2px -2px 0 var(--lo);
+}
+.segmented { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 10px; }
+.pill.on-tv { background: var(--yellow); color: var(--ink); }
+td.act { text-align: right; white-space: nowrap; }
+.onnow .item.with-tune { grid-template-columns: 58px 1fr auto; }
 .btn:active { box-shadow: inset -2px -2px 0 #ffe9a8, inset 2px 2px 0 #8a4a07; }
 
 .status {

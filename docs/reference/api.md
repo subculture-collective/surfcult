@@ -1,6 +1,6 @@
 # Read API
 
-`surfcult serve <channels.toml> <db>` serves channels, the schedule, the guide and health as JSON over HTTP, the guide as XMLTV, and the web admin page that reads them. The code is in `src/server/`. Every route is a fixed `GET`: nothing runs a command, writes to the database or reads a file at run time. Channels come from the parsed `channels.toml` and everything else from the SQLite store. Any other path gets `404` and any other method `405`.
+`surfcult run` serves the web admin and the API described here, with control of the TV; `surfcult serve <channels.toml> <db>` serves the same reads on their own, with no TV to control. The API gives channels, the schedule, the guide and health as JSON over HTTP, the guide as XMLTV, and the web admin page that reads them. The code is in `src/server/`. Every route but `POST /tune` and `POST /crt` is a fixed `GET`, and nothing runs a command, writes to the database or reads a file at run time; those two hand a request to the TV's run loop, which carries it out. Channels come from the parsed `channels.toml` and everything else from the SQLite store. Any other path gets `404` and any other method `405`.
 
 ## Settings
 
@@ -81,6 +81,26 @@ The guide as XMLTV (`application/xml`), for external guide clients. It lists eve
 
 `library_synced_at_ms` is `null` while the library cache is empty. `scheduled_until_ms` is when the channel's last stored event ends, `null` if it has none; a value close to `now_ms` means the schedule is running out. If the database cannot be read, or its schema version is not the one this build expects (for example before the writer has run a new build's migrations), the answer is `503`.
 
+## Controlling the TV
+
+Inside `surfcult run`, the admin can change what the TV does. The run loop reads each request at its next step, within about 20 ms, and does what the remote or the Picture menu would. Under `surfcult serve` there is no TV: `/tv` says so and the two `POST`s answer `503`. Both need the token like every read. They take JSON only (`Content-Type: application/json`), so a plain form on another site cannot send one; a body that is not JSON gets `415`, and JSON of the wrong shape `422`.
+
+### `GET /tv`
+
+```json
+{"controllable": true, "channel": 4, "crt": "heavy"}
+```
+
+`channel` is the channel tuned last (`null` before the first), and `crt` the CRT filter in use. Without a TV: `{"controllable": false, "channel": null, "crt": null}`.
+
+### `POST /tune`
+
+`{"channel": 5}` changes channel, as the remote would. A channel `channels.toml` does not have gets `404`. The answer is `202`: the change starts at the TV's next step.
+
+### `POST /crt`
+
+`{"level": "light"}` sets the CRT filter, as the Picture menu would, and stores it. `level` is `heavy`, `light` or `off`, in any case; anything else gets `400`. The answer is `202`.
+
 ## The web admin
 
 `GET /` is the web admin: one page in the Cable Grid design ([cable-grid.md](../design/cable-grid.md#web-admin)), with its script, stylesheet, fonts and mark compiled into the binary (`assets/web/`, `assets/fonts/`, `assets/brand/`) and served at `/admin.js`, `/admin.css`, `/fonts/archivo-narrow-bold.ttf`, `/fonts/vcr-osd-mono.ttf`, `/mark.svg` and `/favicon.svg` with `Cache-Control: no-cache`. It is read only and draws everything in the browser from the reads above:
@@ -91,4 +111,4 @@ The guide as XMLTV (`application/xml`), for external guide clients. It lists eve
 
 Times are in the TV's time zone. The page reads again every 30 seconds. When a read answers `401`, the page asks for the token and keeps it in the browser's local storage, sending it as `Authorization: Bearer` with every read.
 
-Nothing in the page changes the TV: the CRT filter, channels and tuning stay on the TV and in `channels.toml` until the admin has a way to write.
+When `/tv` says the TV can be controlled, the page adds a Tune button to each channel on the Channels view and in the On now list, marks the channel on the TV, and shows the CRT filter's three levels on the System view. After a request it says what it asked for and reads the page again. Channels themselves stay in `channels.toml`; the admin does not edit them.

@@ -68,6 +68,7 @@ fn app(token: Option<&str>) -> Router {
         store(),
         token.map(|token| ApiToken::new(token).unwrap()),
         fixed_now,
+        None,
     )
 }
 
@@ -237,6 +238,7 @@ fn health_is_unavailable_while_the_schema_is_older_than_this_build() {
         Store::open_read_only(&path).unwrap(),
         None,
         fixed_now,
+        None,
     );
 
     let response = send(app, get_request("/health"));
@@ -466,7 +468,13 @@ fn xmltv_escapes_special_characters_and_lists_genres() {
     store
         .replace_library(&[LibraryEntry { item, path: None }], &[], 42)
         .unwrap();
-    let app = router(Config::parse(EXAMPLE).unwrap(), store, None, fixed_now);
+    let app = router(
+        Config::parse(EXAMPLE).unwrap(),
+        store,
+        None,
+        fixed_now,
+        None,
+    );
 
     let xml = xml_body(send(app, get_request("/xmltv.xml")));
 
@@ -603,4 +611,97 @@ fn preview_database() {
             .collect();
         store.write_events(channel.number, &events).unwrap();
     }
+}
+
+fn controlled(token: Option<&str>) -> (Router, std::sync::mpsc::Receiver<AdminCommand>) {
+    let (commands, received) = std::sync::mpsc::channel();
+    let status = Arc::new(Mutex::new(TvStatus {
+        channel: Some(4),
+        crt: crate::paint::Crt::Light,
+    }));
+    let app = router(
+        Config::parse(EXAMPLE).unwrap(),
+        store(),
+        token.map(|token| ApiToken::new(token).unwrap()),
+        fixed_now,
+        Some(Control::new(commands, status)),
+    );
+    (app, received)
+}
+
+fn post_json(uri: &str, body: &str) -> Request<Body> {
+    Request::post(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+#[test]
+fn tv_reports_the_channel_and_filter_or_that_there_is_no_tv() {
+    let (app, _received) = controlled(None);
+    let body: control::TvBody = json(send(app, get_request("/tv")));
+    assert_eq!(
+        body,
+        control::TvBody {
+            controllable: true,
+            channel: Some(4),
+            crt: Some("light".into())
+        }
+    );
+    let body: control::TvBody = json(send(super::tests::app(None), get_request("/tv")));
+    assert!(!body.controllable);
+}
+
+#[test]
+fn tune_and_crt_hand_the_request_to_the_tv() {
+    let (app, received) = controlled(None);
+    let response = send(app.clone(), post_json("/tune", r#"{"channel": 5}"#));
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let response = send(app, post_json("/crt", r#"{"level": "OFF"}"#));
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let commands: Vec<AdminCommand> = received.try_iter().collect();
+    assert_eq!(
+        commands,
+        [
+            AdminCommand::Tune(5),
+            AdminCommand::SetCrt(crate::paint::Crt::Off)
+        ]
+    );
+}
+
+#[test]
+fn bad_control_requests_are_refused_and_nothing_is_sent() {
+    let (app, received) = controlled(None);
+    for (uri, body, status) in [
+        ("/tune", r#"{"channel": 99}"#, StatusCode::NOT_FOUND),
+        (
+            "/tune",
+            r#"{"channel": "five"}"#,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        ("/crt", r#"{"level": "medium"}"#, StatusCode::BAD_REQUEST),
+    ] {
+        let response = send(app.clone(), post_json(uri, body));
+        assert_eq!(response.status(), status, "{uri} {body}");
+    }
+    // A form post, as a page on another site could send, is not JSON.
+    let form = Request::post("/tune")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .body(Body::from("channel=5"))
+        .unwrap();
+    assert_eq!(send(app, form).status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    assert_eq!(received.try_iter().count(), 0);
+}
+
+#[test]
+fn control_needs_the_token_and_a_tv() {
+    let (app, received) = controlled(Some(TOKEN));
+    let response = send(app, post_json("/tune", r#"{"channel": 5}"#));
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(received.try_iter().count(), 0);
+    let response = send(
+        super::tests::app(None),
+        post_json("/tune", r#"{"channel": 5}"#),
+    );
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }

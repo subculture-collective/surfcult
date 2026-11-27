@@ -73,6 +73,7 @@ use crate::paint::watermark::Form;
 use crate::paint::{self, Crt};
 use crate::player::{Overlay, Player, PlayerEvent, Slate, VideoArea};
 use crate::schedule::{self, Extended};
+use crate::server::AdminCommand;
 use crate::store::Store;
 use crate::tuner::{State, Timing, Tuner};
 
@@ -376,6 +377,25 @@ impl<P: Player, I: Input> Tv<P, I> {
         self.channel
     }
 
+    /// The CRT filter in use.
+    pub fn crt(&self) -> Crt {
+        self.settings.crt
+    }
+
+    /// Carries out a request from the web admin, as the remote or the menu
+    /// would. A channel the config does not have is ignored.
+    pub fn admin(&mut self, command: AdminCommand, now_ms: i64, store: &mut Store) {
+        match command {
+            AdminCommand::Tune(channel) => {
+                if self.numbers.contains(&channel) {
+                    self.entry = None;
+                    self.tune(channel, now_ms);
+                }
+            }
+            AdminCommand::SetCrt(crt) => self.choose_crt(crt, store),
+        }
+    }
+
     pub fn player(&self) -> &P {
         self.tuner.player()
     }
@@ -596,20 +616,24 @@ impl<P: Player, I: Input> Tv<P, I> {
         }
     }
 
+    /// The viewer chose `crt`, in the menu or the web admin: use it, store
+    /// it, and draw the menu again if it is open.
+    fn choose_crt(&mut self, crt: Crt, store: &mut Store) {
+        self.apply_crt(crt);
+        if let Err(e) = store.set_viewer_setting(CRT_SETTING, &crt_name(crt).to_lowercase()) {
+            eprintln!("surfcult: cannot store the CRT filter: {e}");
+        }
+        if let Some(menu) = self.menu.as_mut() {
+            menu.stale = true;
+        }
+    }
+
     /// A key while the menu is open. Returns whether the menu used it; a
     /// key it does not use goes on to the usual handling.
     fn menu_key(&mut self, key: Key, store: &mut Store) -> bool {
         match key {
             Key::Banner => {
-                let crt = next_crt(self.settings.crt);
-                self.apply_crt(crt);
-                if let Err(e) = store.set_viewer_setting(CRT_SETTING, &crt_name(crt).to_lowercase())
-                {
-                    eprintln!("surfcult: cannot store the CRT filter: {e}");
-                }
-                if let Some(menu) = self.menu.as_mut() {
-                    menu.stale = true;
-                }
+                self.choose_crt(next_crt(self.settings.crt), store);
                 true
             }
             // One setting so far: nothing to move between.
