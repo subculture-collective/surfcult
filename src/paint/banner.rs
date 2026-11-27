@@ -3,9 +3,9 @@
 //! 1920x1080 screen, inside the 5% margin a TV may cut off.
 //!
 //! From left to right: a channel cell with the number large and the name
-//! under it; a violet panel with an ochre strip carrying the times and the
-//! title under it; and a clock cell. Text that does not fit is cut with an
-//! ellipsis.
+//! under it; a violet panel with an ochre strip carrying the times, the
+//! title under it and the next program under that; and a clock cell. Text
+//! that does not fit is cut with an ellipsis.
 
 use super::palette::*;
 use super::{Canvas, Font, Shadow};
@@ -155,17 +155,37 @@ pub fn draw(banner: &Banner) -> Overlay {
         OCHRE_INK,
         None,
     );
-    let title = archivo.fit(&banner.title, 64.0, 0.0, mw - 2.0 * PAD);
+    // With a NEXT line the title is smaller and higher, to make room.
+    let (title_px, title_base) = if banner.next.is_empty() {
+        (64.0, y0 + STRIP_HEIGHT + 86.0)
+    } else {
+        (54.0, y0 + STRIP_HEIGHT + 60.0)
+    };
+    let title = archivo.fit(&banner.title, title_px, 0.0, mw - 2.0 * PAD);
+    let base = title_base;
     c.text(
         &archivo,
         &title,
-        64.0,
+        title_px,
         0.0,
         mx + PAD,
-        y0 + STRIP_HEIGHT + 86.0,
+        base,
         WHITE,
         shadow(),
     );
+    if !banner.next.is_empty() {
+        let next = archivo.fit(&banner.next, 30.0, 0.5, mw - 2.0 * PAD);
+        c.text(
+            &archivo,
+            &next,
+            30.0,
+            0.5,
+            mx + PAD,
+            y0 + height - 16.0,
+            YELLOW,
+            shadow(),
+        );
+    }
 
     let x = LEFT as i32 - MARGIN as i32;
     let y = (SCREEN.1 - BOTTOM - HEIGHT) as i32 - MARGIN as i32;

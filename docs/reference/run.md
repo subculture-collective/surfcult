@@ -158,13 +158,14 @@ The stream resolver asks Jellyfin how to play each program (`JellyfinClient::pla
 
 ## The banner
 
-The banner shows when a channel change has settled, on the program or on the stand-by card, when the player restarted and the tuner tuned again, and on OK. It stays up for `SURFCULT_BANNER_SECONDS` (5 s). It has three lines on a dark translucent box across the bottom of the screen:
+The banner shows when a channel change has settled, on the program or on the stand-by card, when the player restarted and the tuner tuned again, and on OK. It stays up for `SURFCULT_BANNER_SECONDS` (5 s). It says, across the bottom of the screen:
 
 1. the channel number and name;
 2. the program on now (`Series: Episode` for an episode). A break inside the program still names the program. A break, filler or ident between programs shows `NEXT:` and the next program. A gap shows `OFF THE AIR`, and a channel with nothing stored for seven days `NO SCHEDULE`;
 3. the program's local start and end (`19:00–19:30`, breaks included), or `BACK AT 06:00` when off the air.
+4. while a program is on, the one after it: `NEXT 19:30` and its title, when it starts within the next three hours.
 
-The player draws it in the Cable Grid design ([paint.md](paint.md#the-banner)): a channel cell with the number and name, an ochre strip with the times over the title, and a clock cell with the local time it was shown. It gets the CRT pass at `SURFCULT_CRT` and is shown in overlay layer 63, which the player keeps for it. MPV draws overlays after its shaders, so the CRT shader does not touch it. Any command that replaces the screen or stops it removes the banner, so a boundary inside the 5 seconds takes it away early. A restarted MPV has no banner until the tuner's new sequence settles.
+The player draws it in the Cable Grid design ([paint.md](paint.md#the-banner)): a channel cell with the number and name, an ochre strip with the times over the title and the NEXT line, and a clock cell with the local time it was shown. It gets the CRT pass at `SURFCULT_CRT` and is shown in overlay layer 63, which the player keeps for it. MPV draws overlays after its shaders, so the CRT shader does not touch it. Any command that replaces the screen or stops it removes the banner, so a boundary inside the 5 seconds takes it away early. A restarted MPV has no banner until the tuner's new sequence settles.
 
 ## The guide
 

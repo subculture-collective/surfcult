@@ -48,7 +48,7 @@ On the development Mac (Apple M3, release build) a full 1920x1080 pass takes abo
 | Part | Contents |
 | --- | --- |
 | Channel cell, 276 px | The number with two digits at 108 px and the name at 34 px, yellow with the hard shadow, centred |
-| Main panel | The violet field; an ochre strip 56 px tall with a slanted right end, carrying `times` at 32 px in ochre ink; the title at 64 px in white |
+| Main panel | The violet field; an ochre strip 56 px tall with a slanted right end, carrying `times` at 32 px in ochre ink; the title at 64 px in white, or at 54 px and higher with `next` under it at 30 px in yellow |
 | Clock cell | `clock` in VCR OSD Mono at 46 px, centred |
 
 Text that does not fit is cut with an ellipsis (`Font::fit`).

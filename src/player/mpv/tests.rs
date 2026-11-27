@@ -1290,6 +1290,7 @@ mod real {
             title: "The Show".into(),
             times: "19:00–19:30".into(),
             clock: "19:05".into(),
+            next: "NEXT 19:30 Other".into(),
         };
         player.show_banner(&banner).unwrap();
         let events = wait_for(&mut player, 15, |e| *e == PlayerEvent::ClipEnded);
