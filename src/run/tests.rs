@@ -1429,3 +1429,38 @@ fn the_watermark_hides_while_the_menu_is_open() {
     rig.press(Key::Menu, T + 1_000);
     assert_eq!(watermark(&rig.take()), [None]);
 }
+
+#[test]
+fn right_and_left_move_the_guide_through_time() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.press(Key::Guide, T + 10_000);
+    rig.take();
+    rig.press(Key::Right, T + 10_200);
+    assert_eq!(
+        shown(GUIDE_LAYER, &rig.take()),
+        1,
+        "drawn for the next half hour"
+    );
+    rig.press(Key::Left, T + 10_400);
+    assert_eq!(shown(GUIDE_LAYER, &rig.take()), 1, "and back");
+    rig.press(Key::Left, T + 10_600);
+    assert_eq!(shown(GUIDE_LAYER, &rig.take()), 0, "not before now");
+    assert_eq!(rig.tv.channel(), Some(3));
+}
+
+#[test]
+fn left_and_right_do_nothing_outside_the_guide() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.step(T + 9_000);
+    rig.take();
+    rig.press(Key::Left, T + 10_000);
+    rig.press(Key::Right, T + 10_500);
+    assert_eq!(rig.take(), []);
+    assert_eq!(rig.tv.channel(), Some(3));
+}

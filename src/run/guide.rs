@@ -25,6 +25,8 @@ use crate::store::Store;
 pub const SLOT_MS: i64 = 30 * 60 * 1000;
 /// The time the whole grid covers.
 pub const SPAN_MS: i64 = 3 * SLOT_MS;
+/// How far ahead the guide can go: 24 hours, in half hours.
+pub const MAX_LATER: i64 = 48;
 /// How long the guide waits without a key before it scrolls.
 pub const IDLE_MS: i64 = 5_000;
 /// How often a scroll step comes.
@@ -47,6 +49,8 @@ pub(super) struct Guide {
     pub(super) shown_row: Option<u32>,
     /// When the last key came, or the guide opened.
     idle_since_ms: i64,
+    /// How many half hours past the current one the grid starts.
+    later: i64,
 }
 
 impl Guide {
@@ -60,9 +64,28 @@ impl Guide {
             clock_drawn: None,
             shown_row: None,
             idle_since_ms: now_ms,
+            later: 0,
         };
         guide.follow(count);
         guide
+    }
+
+    /// Moves the grid half an hour later (`later`) or earlier, between now
+    /// and [`MAX_LATER`] half hours ahead. Returns whether it moved.
+    pub(super) fn shift(&mut self, later: bool) -> bool {
+        let before = self.later;
+        self.later = if later {
+            (self.later + 1).min(MAX_LATER)
+        } else {
+            (self.later - 1).max(0)
+        };
+        self.later != before
+    }
+
+    /// Where the grid starts at `now_ms`: the current half hour, moved on
+    /// by [`Guide::shift`].
+    pub(super) fn from(&self, now_ms: i64) -> i64 {
+        window_start(now_ms) + self.later * SLOT_MS
     }
 
     pub(super) fn focus(&self) -> usize {
@@ -129,7 +152,9 @@ impl Guide {
         now_ms: i64,
         timezone: Tz,
     ) -> GuideView {
-        let from = window_start(now_ms);
+        let from = self.from(now_ms);
+        // The focused cell is the program on at the grid's start, or now.
+        let at = now_ms.max(from);
         let window = Window {
             from_ms: from,
             to_ms: from + SPAN_MS,
@@ -155,7 +180,7 @@ impl Guide {
             let focused_index = (Some(channel.number) == focus_number).then(|| {
                 cells
                     .iter()
-                    .position(|c| c.start_ms <= now_ms && now_ms < c.end_ms)
+                    .position(|c| c.start_ms <= at && at < c.end_ms)
                     .unwrap_or(0)
             });
             let cells: Vec<GuideCell> = cells
@@ -346,5 +371,22 @@ mod tests {
         let g = Guide::new(0, ROWS, 0);
         assert!(!g.scrolling(60_000, ROWS));
         assert_eq!(g.top_row(60_000, ROWS), 0);
+    }
+
+    #[test]
+    fn left_and_right_move_the_grid_by_half_hours_between_now_and_a_day_ahead() {
+        let mut g = Guide::new(0, 6, 0);
+        let now = 10 * SLOT_MS + 5;
+        assert_eq!(g.from(now), 10 * SLOT_MS);
+        assert!(!g.shift(false), "not before now");
+        assert!(g.shift(true));
+        assert_eq!(g.from(now), 11 * SLOT_MS);
+        for _ in 0..60 {
+            g.shift(true);
+        }
+        assert_eq!(g.from(now), (10 + MAX_LATER) * SLOT_MS);
+        assert!(!g.shift(true), "not past a day ahead");
+        assert!(g.shift(false));
+        assert_eq!(g.from(now), (10 + MAX_LATER - 1) * SLOT_MS);
     }
 }

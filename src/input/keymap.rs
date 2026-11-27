@@ -47,6 +47,8 @@ const DEFAULTS: &[(&str, Key, &[&str])] = &[
             "KEY_PLAYPAUSE",
         ],
     ),
+    ("left", Key::Left, &["KEY_LEFT"]),
+    ("right", Key::Right, &["KEY_RIGHT"]),
     ("mute", Key::Mute, &["KEY_MUTE"]),
     ("volume_up", Key::VolumeUp, &["KEY_VOLUMEUP"]),
     ("volume_down", Key::VolumeDown, &["KEY_VOLUMEDOWN"]),
@@ -293,7 +295,8 @@ mod tests {
         assert_eq!(map.key(5), Some(Key::Digit(4)));
         assert_eq!(map.key(82), Some(Key::Digit(0)));
         assert_eq!(map.key(521), Some(Key::Digit(9)));
-        assert_eq!(map.key(105), None); // KEY_LEFT
+        assert_eq!(map.key(105), Some(Key::Left));
+        assert_eq!(map.key(106), Some(Key::Right));
         assert_eq!(map.key(168), None); // KEY_REWIND has no action yet
     }
 
