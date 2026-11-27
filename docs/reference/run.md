@@ -43,6 +43,7 @@ Every channel in the config is listed; the config has no way to disable one.
 | `SURFCULT_JELLYFIN_USER_ID` | The Jellyfin user playback is asked for as. Without it, the first enabled user. See [Jellyfin source](jellyfin.md#playback-urls). |
 | `SURFCULT_SYNC_MINUTES` | Minutes between two library syncs. Default 15. |
 | `SURFCULT_BANNER_SECONDS` | Seconds the banner stays up. Default 5. |
+| `SURFCULT_CRT` | The CRT pass on the interface, such as the watermark: `heavy` (the default), `light` or `off`. See [paint.md](paint.md#the-crt-pass). |
 | `SURFCULT_AUDIO_DEVICE` | MPV's audio device. Default `alsa/plughw:CARD=vc4hdmi0,DEV=0`, the first HDMI port. List the devices with `mpv --audio-device=help`; the second port is `alsa/plughw:CARD=vc4hdmi1,DEV=0`. |
 | `SURFCULT_CLOCK_TRUSTED` | `1` trusts the clock and `0` distrusts it, overriding systemd. For testing. |
 | `XDG_RUNTIME_DIR` | MPV's runtime directory is `$XDG_RUNTIME_DIR/surfcult`, or `/run/user/<uid>/surfcult` without it. |
@@ -68,7 +69,7 @@ One thread owns the store. Each step:
 2. reads the player's events, hands them to the tuner and the driver, and ticks the tuner;
 3. when the tuner's sequence has settled, on the program or on the stand-by card, hands the screen to the playback driver and shows the banner;
 4. lets the driver move the screen to the next event;
-5. clears the banner when its time is up;
+5. clears the banner when its time is up, and shows, fades or hides the SCTV watermark;
 6. extends the schedules when that is due.
 
 The player is polled every step, at most 20 ms apart, as the stand-by card's glitch needs. A watchdog restart of MPV blocks a step for up to 10 s; the next step catches up.
@@ -165,6 +166,17 @@ The banner shows when a channel change has settled, on the program or on the sta
 
 MPV draws it as ASS text through `osd-overlay` (id 1) on a 1920x1080 layout, in DejaVu Sans, white with a thin black border. It is OSD, so the CRT shader does not touch it. Any command that replaces the screen or stops it removes the banner, so a boundary inside the 5 seconds takes it away early. A restarted MPV has no banner until the tuner's new sequence settles.
 
+## The watermark
+
+The SCTV watermark is the station bug in the top-right corner, drawn in overlay layer 8 (`run::WATERMARK_LAYER`) at 60% opacity, with the CRT pass at `SURFCULT_CRT`. Its look and place are in [paint.md](paint.md#the-watermark).
+
+- When a channel change settles, the moment the banner shows, the beside form (the mark with SCTV beside it) appears, holds for 3 seconds and fades out over 1 second.
+- While a break or filler event is on screen, the under form (SCTV under the mark) shows instead, for the whole event. When the break ends it fades out over 1 second. A break cancels the landing's hold and fade.
+- Fades move in eighths of the opacity, so a fade is at most eight redraws of the watermark's small bitmap. The loop sends a command only when the form or opacity changes.
+- A channel change hides it at once, and a player restart forgets it; it comes back with the next landing.
+
+Each form is drawn and given the CRT pass once, on first use, and then only scaled for each step of a fade.
+
 ## Playback history
 
 Each program and clip the driver starts gets a `playback_history` row with the outcome `played`, or `failed` when the player or Jellyfin refused it or the player reported it failed. The tuner's program is recorded as `played` when it starts. Tune-in clips are not recorded.
@@ -184,6 +196,6 @@ A program that never starts and never fails, such as a transcode that hangs, kee
 
 ## Tests
 
-`src/run/tests.rs` drives the loop with a virtual clock, a `FakePlayer` wrapped so single programs can fail as a Jellyfin error would, or all of them as a Jellyfin outage would, a `FakeInput`, an in-memory store whose library cache is the media source, and clip pools scanned from a temporary directory with a fake prober. They cover wrapping channel changes, the commands of a tune, returning to a channel at its live position, a program cut by breaks, a stale queue, gaps and off-air time, the banner and its timeout, an unplayable program with and without a filler pool, a program that fails twice on screen, a Jellyfin outage with a break in it and its recovery, a refused tune, a player restart, an unresolvable source at startup and the clock slate until the clock is trusted. `src/input/evdev.rs` tests parsing `input_event` bytes and `/proc/bus/input/devices`, and `src/input/keymap.rs` the key names, the defaults and the `[keys]` overrides. The loop tests also cover number entry: one digit after the wait, two digits at once, an unknown number and a channel key during entry. The stream resolver is tested against recorded Jellyfin responses. A real MPV test (skipped without `mpv`) checks that MPV accepts `play_program`, `queue_clip` and the banner's `osd-overlay`.
+`src/run/tests.rs` drives the loop with a virtual clock, a `FakePlayer` wrapped so single programs can fail as a Jellyfin error would, or all of them as a Jellyfin outage would, a `FakeInput`, an in-memory store whose library cache is the media source, and clip pools scanned from a temporary directory with a fake prober. They cover wrapping channel changes, the commands of a tune, returning to a channel at its live position, a program cut by breaks, a stale queue, gaps and off-air time, the banner and its timeout, an unplayable program with and without a filler pool, a program that fails twice on screen, a Jellyfin outage with a break in it and its recovery, a refused tune, a player restart, an unresolvable source at startup, the clock slate until the clock is trusted, and the watermark's hold, fade, break form and channel change. The existing tests run with the watermark off (`Settings::watermark`) so their command lists stay exact; `Rig::watermarked` turns it on. `src/input/evdev.rs` tests parsing `input_event` bytes and `/proc/bus/input/devices`, and `src/input/keymap.rs` the key names, the defaults and the `[keys]` overrides. The loop tests also cover number entry: one digit after the wait, two digits at once, an unknown number and a channel key during entry. The stream resolver is tested against recorded Jellyfin responses. A real MPV test (skipped without `mpv`) checks that MPV accepts `play_program`, `queue_clip` and the banner's `osd-overlay`.
 
 Not tested here: the remote, the TV, Jellyfin, the look of the banner and the slates on the Pi, and what MPV reports for a missing file or a Jellyfin that goes away mid-program. That is the owner's check: change channels across three channels and compare each with `surfcult now`.

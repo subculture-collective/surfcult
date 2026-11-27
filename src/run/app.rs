@@ -30,6 +30,7 @@ use crate::clips::{ClipLibrary, FfprobeProber};
 use crate::config::Config;
 use crate::input::EvdevInput;
 use crate::jellyfin::{ApiKey, JellyfinClient, JellyfinConfig, SyncWorker};
+use crate::paint::Crt;
 use crate::player::mpv::{MpvConfig, MpvPlayer};
 use crate::store::Store;
 
@@ -39,6 +40,8 @@ pub const URL_ENV: &str = "SURFCULT_JELLYFIN_URL";
 pub const SYNC_ENV: &str = "SURFCULT_SYNC_MINUTES";
 /// Seconds the banner stays up.
 pub const BANNER_ENV: &str = "SURFCULT_BANNER_SECONDS";
+/// The CRT pass on the interface: `heavy` (the default), `light` or `off`.
+pub const CRT_ENV: &str = "SURFCULT_CRT";
 /// The environment variable that names MPV's audio device, such as
 /// `alsa/plughw:CARD=vc4hdmi1,DEV=0`. The default is the first HDMI port.
 pub const AUDIO_DEVICE_ENV: &str = "SURFCULT_AUDIO_DEVICE";
@@ -141,6 +144,10 @@ fn settings() -> Result<Settings, String> {
     let mut settings = Settings::default();
     if let Some(seconds) = positive_env(BANNER_ENV)? {
         settings.banner_ms = i64::try_from(seconds.saturating_mul(1000)).unwrap_or(i64::MAX);
+    }
+    if let Ok(text) = std::env::var(CRT_ENV) {
+        settings.crt = Crt::parse(&text)
+            .ok_or_else(|| format!("{CRT_ENV} must be heavy, light or off, not {text:?}"))?;
     }
     Ok(settings)
 }

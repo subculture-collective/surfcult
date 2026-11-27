@@ -167,6 +167,15 @@ impl Rig {
     }
 
     fn with_five(five_source: &str) -> Self {
+        Self::build(five_source, false)
+    }
+
+    /// As [`Rig::new`], with the SCTV watermark on.
+    fn watermarked() -> Self {
+        Self::build("jellyfin_collection = \"Cartoons\"", true)
+    }
+
+    fn build(five_source: &str, watermark: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         for (pool, file, _) in CLIPS {
             let pool = dir.path().join(pool);
@@ -241,7 +250,10 @@ impl Rig {
             clips,
             Box::new(CountedStreams(stops.clone())),
             Box::new(move || trust.get()),
-            Settings::default(),
+            Settings {
+                watermark,
+                ..Settings::default()
+            },
         );
         Self {
             tv,
@@ -1060,4 +1072,90 @@ fn keys_without_a_use_yet_do_nothing() {
     }
     assert_eq!(rig.tv.channel(), Some(3));
     assert_eq!(rig.take(), []);
+}
+
+/// The watermark layer's commands, with the width of each bitmap shown (the
+/// beside form is wider than the under form) or `None` for a clear.
+fn watermark(commands: &[Command]) -> Vec<Option<u32>> {
+    commands
+        .iter()
+        .filter_map(|c| match c {
+            Command::ShowOverlay { id, width, .. } if *id == WATERMARK_LAYER => Some(Some(*width)),
+            Command::ClearOverlay(id) if *id == WATERMARK_LAYER => Some(None),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn the_watermark_shows_on_landing_holds_three_seconds_and_fades_out() {
+    let mut rig = Rig::watermarked();
+    hour_everywhere(&mut rig);
+    rig.start();
+    let live = rig.go_live(T);
+    let shown = T + 500 + TUNE_IN_MS;
+    let first = watermark(&live);
+    assert_eq!(first.len(), 1, "{live:?}");
+    let beside = first[0].unwrap();
+    rig.step(shown + 2_999);
+    assert_eq!(watermark(&rig.take()), []);
+    // The fade redraws in eighths: the first step down is an eighth of the
+    // way into the fade.
+    rig.step(shown + 3_125);
+    assert_eq!(watermark(&rig.take()), [Some(beside)]);
+    rig.step(shown + 3_999);
+    assert_eq!(watermark(&rig.take()), [Some(beside)]);
+    rig.step(shown + 4_000);
+    assert_eq!(watermark(&rig.take()), [None]);
+    rig.step(shown + 10_000);
+    assert_eq!(watermark(&rig.take()), []);
+}
+
+#[test]
+fn the_watermark_stays_through_a_break_in_its_under_form() {
+    let mut rig = Rig::watermarked();
+    cut_by_a_break(&mut rig);
+    rig.start();
+    let live = rig.go_live(T);
+    let beside = watermark(&live)[0].unwrap();
+    // The break starts a minute in.
+    rig.step(T + MIN);
+    let under = watermark(&rig.take());
+    assert_eq!(under.len(), 1);
+    let under = under[0].unwrap();
+    assert!(under < beside, "the under form is narrower");
+    rig.fake().clip_ended();
+    rig.step(T + MIN + 30_000);
+    rig.step(T + MIN + 50_000);
+    assert_eq!(
+        watermark(&rig.take()),
+        [],
+        "no change while the break lasts"
+    );
+    // The program comes back at two minutes: the under form fades out.
+    rig.step(T + 2 * MIN);
+    rig.step(T + 2 * MIN + 500);
+    assert_eq!(watermark(&rig.take()), [Some(under)]);
+    rig.step(T + 2 * MIN + 1_000);
+    assert_eq!(watermark(&rig.take()), [None]);
+}
+
+#[test]
+fn a_channel_change_takes_the_watermark_away() {
+    let mut rig = Rig::watermarked();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.take();
+    rig.press(Key::Next, T + 1_000);
+    assert_eq!(watermark(&rig.take()), [None]);
+}
+
+#[test]
+fn the_watermark_is_off_when_the_settings_say_so() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    let live = rig.go_live(T);
+    assert_eq!(watermark(&live), []);
 }

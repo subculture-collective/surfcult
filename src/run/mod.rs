@@ -13,7 +13,8 @@
 //! 3. when the tuner's sequence has settled, on a program or on the stand-by
 //!    card, hands the screen to the playback driver and shows the banner;
 //! 4. lets the driver move the screen to the next event when one starts;
-//! 5. clears the banner when its time is up;
+//! 5. clears the banner when its time is up, and shows, fades or hides the
+//!    SCTV watermark ([`watermark`]);
 //! 6. keeps every channel's schedule filled when that is due.
 //!
 //! Nothing here reads the clock or sleeps: every call takes `now_ms`, so
@@ -52,8 +53,11 @@ mod now;
 mod streams;
 #[cfg(test)]
 mod tests;
+mod watermark;
 
 use std::collections::HashMap;
+
+use watermark::Watermark;
 
 use crate::clips::{Clip, ClipLibrary};
 use crate::config::{Channel, Config, Source};
@@ -61,7 +65,9 @@ use crate::input::{Input, Key};
 use crate::jellyfin::{JellyfinError, SyncReport};
 use crate::library::{LibraryChanges, MediaItem, resolve_pool};
 use crate::overlay::{self, DEFAULT_BANNER_MS};
-use crate::player::{Player, PlayerEvent, Slate};
+use crate::paint::watermark::Form;
+use crate::paint::{self, Crt};
+use crate::player::{Overlay, Player, PlayerEvent, Slate};
 use crate::schedule::{self, Extended};
 use crate::store::Store;
 use crate::tuner::{State, Timing, Tuner};
@@ -89,7 +95,14 @@ pub struct Settings {
     pub clock_retry_ms: i64,
     /// How long a channel number waits for its next digit.
     pub entry_ms: i64,
+    /// The CRT pass on the interface.
+    pub crt: Crt,
+    /// Whether the SCTV watermark shows.
+    pub watermark: bool,
 }
+
+/// The overlay layer the SCTV watermark is drawn in.
+pub const WATERMARK_LAYER: u8 = 8;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -99,6 +112,8 @@ impl Default for Settings {
             upkeep_every_ms: 60 * 60 * 1000,
             clock_retry_ms: 60 * 1000,
             entry_ms: 2000,
+            crt: Crt::default(),
+            watermark: true,
         }
     }
 }
@@ -132,6 +147,11 @@ pub struct Tv<P, I> {
     /// The channel number being typed: its value, its digits and when it
     /// is tuned if no digit follows.
     entry: Option<(u32, usize, i64)>,
+    watermark: Watermark,
+    /// What the watermark layer shows now: the form and opacity.
+    watermark_shown: Option<(Form, f32)>,
+    /// Each form drawn at full opacity with the CRT pass, made on first use.
+    watermark_bitmaps: HashMap<Form, Overlay>,
     upkeep: Upkeep,
     /// The clock slate is up until the clock is trusted.
     waiting_for_clock: bool,
@@ -179,6 +199,9 @@ impl<P: Player, I: Input> Tv<P, I> {
             banner_pending: false,
             banner_until_ms: None,
             entry: None,
+            watermark: Watermark::default(),
+            watermark_shown: None,
+            watermark_bitmaps: HashMap::new(),
             upkeep: Upkeep::default(),
             waiting_for_clock: false,
             quit: false,
@@ -239,6 +262,7 @@ impl<P: Player, I: Input> Tv<P, I> {
         };
         self.driver.step(now_ms, &mut cx);
         self.banner(now_ms, store);
+        self.show_watermark(now_ms);
         if now_ms >= self.upkeep.due_ms {
             self.keep_schedules(now_ms, store);
         }
@@ -405,6 +429,7 @@ impl<P: Player, I: Input> Tv<P, I> {
         self.banner_pending = false;
         // Static replaces the screen, and the banner with it.
         self.banner_until_ms = None;
+        self.watermark.leave();
         self.channel = Some(channel);
         self.tuner.tune(channel, now_ms);
     }
@@ -420,6 +445,9 @@ impl<P: Player, I: Input> Tv<P, I> {
                     self.driver.leave();
                     self.banner_pending = false;
                     self.banner_until_ms = None;
+                    // The restart took the overlays with it.
+                    self.watermark.leave();
+                    self.watermark_shown = None;
                 }
                 PlayerEvent::ProgramStarted {
                     position_ms,
@@ -467,6 +495,7 @@ impl<P: Player, I: Input> Tv<P, I> {
             State::Live { channel } => {
                 self.driver.join_live(channel, now_ms, store);
                 self.banner_pending = true;
+                self.watermark.landed(now_ms);
             }
             State::Failed { channel, reason } => {
                 eprintln!("surfcult: channel {channel}: {reason}");
@@ -477,6 +506,7 @@ impl<P: Player, I: Input> Tv<P, I> {
                 }
                 self.driver.join_standby(channel, now_ms, store);
                 self.banner_pending = true;
+                self.watermark.landed(now_ms);
             }
             State::Idle
             | State::Static { .. }
@@ -506,6 +536,44 @@ impl<P: Player, I: Input> Tv<P, I> {
                 eprintln!("surfcult: cannot clear the banner: {e}");
             }
         }
+    }
+
+    /// Shows the watermark in the form and at the opacity due at `now_ms`,
+    /// or clears it, when that changed since the last step.
+    fn show_watermark(&mut self, now_ms: i64) {
+        if !self.settings.watermark {
+            return;
+        }
+        let want = if self.driver.following() {
+            self.watermark.at(now_ms, self.driver.on_break())
+        } else {
+            None
+        };
+        if want == self.watermark_shown {
+            return;
+        }
+        let result = match want {
+            Some((form, opacity)) => {
+                let crt = self.settings.crt;
+                let base = self.watermark_bitmaps.entry(form).or_insert_with(|| {
+                    let mut bitmap = paint::watermark::draw(form);
+                    paint::crt::apply(&mut bitmap, crt);
+                    bitmap
+                });
+                let mut bitmap = base.clone();
+                paint::fade(&mut bitmap, opacity * paint::watermark::OPACITY);
+                self.tuner
+                    .player_mut()
+                    .show_overlay(WATERMARK_LAYER, &bitmap)
+            }
+            None => self.tuner.player_mut().clear_overlay(WATERMARK_LAYER),
+        };
+        if let Err(e) = result {
+            eprintln!("surfcult: cannot show the watermark: {e}");
+        }
+        // Recorded even after an error, so a broken player is not asked
+        // again on every step.
+        self.watermark_shown = want;
     }
 
     fn channel_config(&self, number: u32) -> Option<&Channel> {

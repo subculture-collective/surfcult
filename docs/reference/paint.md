@@ -1,6 +1,6 @@
 # Drawing the interface
 
-The code is in `src/paint/`. It draws the TV's interface in the Cable Grid design ([cable-grid.md](../design/cable-grid.md)) into bitmaps the player shows as overlays, and runs the CRT pass on them. Nothing draws with it yet; the watermark, banner and guide will.
+The code is in `src/paint/`. It draws the TV's interface in the Cable Grid design ([cable-grid.md](../design/cable-grid.md)) into bitmaps the player shows as overlays, and runs the CRT pass on them. The SCTV watermark draws with it; the banner and guide will.
 
 ## Canvas
 
@@ -41,6 +41,23 @@ Colours are `Rgba` with straight alpha; the design's tokens are the constants in
 
 On the development Mac (Apple M3, release build) a full 1920x1080 pass takes about 29 ms, and a 260x140 watermark 0.5 ms. It has not been measured on the Pi 4B, which is several times slower; the pass runs only when the interface is redrawn, never per video frame.
 
+## The mark
+
+`paint::mark::shapes()` is the Guide Wave with SC as its middle row, as one path on the 64-unit grid of `assets/brand/mark.svg`. The shapes run from (`mark::LEFT`, `mark::TOP`) = (9, 11) and are `mark::WIDTH` by `mark::HEIGHT` = 47 by 42 units.
+
+## The watermark
+
+`paint::watermark::draw(form)` returns the SCTV bug at full opacity as an overlay at its place on a 1920x1080 screen:
+
+| Form | Shape | Size |
+| --- | --- | --- |
+| `Form::Beside` | the mark, then SCTV with a capital height of 24 of the mark's 42 units, tracked 0.04 em | 72 px tall |
+| `Form::Under` | the mark, then SCTV 11 units tall and tracked 0.14 em under it, centred | about 100 px tall |
+
+Both are white with a black shadow at 50% alpha, 3 px right and down. The bug's right edge is 96 px from the screen's right edge and its top 86 px from the top. The bitmap has a transparent margin of 16 px (`watermark::MARGIN`) round it for the CRT pass's glow.
+
+`paint::fade(&mut overlay, opacity)` scales every byte of an overlay, colour and alpha together; the run loop uses it to show the bug at `watermark::OPACITY` (60%) and to fade it. When and which form shows is in [run.md](run.md#the-watermark).
+
 ## Tests
 
-`src/paint/tests.rs` checks the fonts, text placement and shadows, bevels, gradients, the overlay's byte order, and the pass: Off, transparency, the scanline rows and their phase, Heavy against Light, glow reach, the colour fringe and premultiplied output. With `SURFCULT_PAINT_PREVIEW=<dir>`, `cargo test --lib paint::tests::preview` also writes a sample drawing as `paint-flat.png`, `paint-heavy.png` and `paint-light.png` to look at.
+`src/paint/tests.rs` checks the fonts, text placement and shadows, bevels, gradients, the overlay's byte order, and the pass: Off, transparency, the scanline rows and their phase, Heavy against Light, glow reach, the colour fringe and premultiplied output; the mark's bounds, the watermark's size, position and clear margin, and fading. With `SURFCULT_PAINT_PREVIEW=<dir>`, `cargo test --lib paint::tests::preview` also writes a sample drawing as `paint-flat.png`, `paint-heavy.png` and `paint-light.png` to look at, and `paint::tests::preview_watermark` writes both watermark forms over a sample picture with the pass at Heavy and Off.
