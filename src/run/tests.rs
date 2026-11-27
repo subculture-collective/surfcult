@@ -99,6 +99,18 @@ impl Player for TestPlayer {
     fn set_video_area(&mut self, area: VideoArea) -> Result<(), PlayerError> {
         self.fake.set_video_area(area)
     }
+    fn show_overlay_rows(
+        &mut self,
+        id: u8,
+        overlay: &Overlay,
+        first_row: u32,
+        rows: u32,
+    ) -> Result<(), PlayerError> {
+        self.fake.show_overlay_rows(id, overlay, first_row, rows)
+    }
+    fn scroll_overlay(&mut self, id: u8, first_row: u32, rows: u32) -> Result<(), PlayerError> {
+        self.fake.scroll_overlay(id, first_row, rows)
+    }
     fn poll_event(&mut self) -> Option<PlayerEvent> {
         self.fake.poll_event()
     }
@@ -1171,8 +1183,11 @@ fn guide_commands(commands: &[Command]) -> Vec<Command> {
     commands
         .iter()
         .filter(|c| match c {
-            Command::ShowOverlay { id, .. } | Command::ClearOverlay(id) => {
-                *id == GUIDE_LAYER || *id == GUIDE_CLOCK_LAYER
+            Command::ShowOverlay { id, .. }
+            | Command::ShowOverlayRows { id, .. }
+            | Command::ScrollOverlay { id, .. }
+            | Command::ClearOverlay(id) => {
+                *id == GUIDE_LAYER || *id == GUIDE_CLOCK_LAYER || *id == GUIDE_ROWS_LAYER
             }
             Command::SetVideoArea(_) => true,
             _ => false,
@@ -1243,6 +1258,7 @@ fn up_and_down_move_the_focus_and_ok_tunes_the_focused_channel() {
         [
             Command::ClearOverlay(GUIDE_LAYER),
             Command::ClearOverlay(GUIDE_CLOCK_LAYER),
+            Command::ClearOverlay(GUIDE_ROWS_LAYER),
             Command::SetVideoArea(VideoArea::Full),
         ]
     );
@@ -1266,6 +1282,7 @@ fn back_closes_the_guide_without_tuning() {
         [
             Command::ClearOverlay(GUIDE_LAYER),
             Command::ClearOverlay(GUIDE_CLOCK_LAYER),
+            Command::ClearOverlay(GUIDE_ROWS_LAYER),
             Command::SetVideoArea(VideoArea::Full),
         ]
     );
@@ -1300,4 +1317,39 @@ fn the_watermark_hides_while_the_guide_is_open() {
     rig.take();
     rig.press(Key::Guide, T + 2_000);
     assert_eq!(watermark(&rig.take()), [None]);
+}
+
+#[test]
+fn the_guide_shows_its_rows_from_a_tall_bitmap_and_three_channels_never_scroll() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.take();
+    rig.press(Key::Guide, T + 10_000);
+    let rows: Vec<Command> = guide_commands(&rig.take())
+        .into_iter()
+        .filter(|c| matches!(c, Command::ShowOverlayRows { .. }))
+        .collect();
+    // Three channels: three rows of 92, all on screen, no repeat for a loop.
+    assert_eq!(
+        rows,
+        [Command::ShowOverlayRows {
+            id: GUIDE_ROWS_LAYER,
+            x: 96,
+            y: 660,
+            width: 1728,
+            height: 3 * 92,
+            first_row: 0,
+            rows: 3 * 92,
+        }]
+    );
+    // Well past the idle time, nothing scrolls.
+    rig.step(T + 30_000);
+    let later = rig.take();
+    assert!(
+        !later
+            .iter()
+            .any(|c| matches!(c, Command::ScrollOverlay { .. }))
+    );
 }

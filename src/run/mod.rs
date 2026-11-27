@@ -109,6 +109,8 @@ pub const WATERMARK_LAYER: u8 = 8;
 pub const GUIDE_LAYER: u8 = 1;
 /// The overlay layer of the guide's clock cell, drawn over the guide.
 pub const GUIDE_CLOCK_LAYER: u8 = 2;
+/// The overlay layer of the guide's channel rows, which scroll.
+pub const GUIDE_ROWS_LAYER: u8 = 3;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -407,7 +409,7 @@ impl<P: Player, I: Input> Tv<P, I> {
             }
             Key::Banner => self.banner_pending = self.driver.following(),
             Key::Quit => self.quit = true,
-            Key::Guide => self.open_guide(),
+            Key::Guide => self.open_guide(now_ms),
             // Not used yet: the menu and the volume come later.
             Key::Back | Key::Menu | Key::Mute | Key::VolumeUp | Key::VolumeDown => {}
         }
@@ -559,6 +561,14 @@ impl<P: Player, I: Input> Tv<P, I> {
     /// a key it does not use goes on to the usual handling.
     fn guide_key(&mut self, key: Key, now_ms: i64) -> bool {
         let count = self.numbers.len();
+        // A key during the scroll only stops it.
+        if self
+            .guide
+            .as_mut()
+            .is_some_and(|guide| guide.touch(now_ms, count))
+        {
+            return true;
+        }
         match key {
             Key::Next | Key::Previous => {
                 if let Some(guide) = self.guide.as_mut()
@@ -597,7 +607,7 @@ impl<P: Player, I: Input> Tv<P, I> {
     /// Opens the guide on the channel being watched and moves the video
     /// into the top-right quarter. The banner goes; the watermark hides
     /// while the guide is open.
-    fn open_guide(&mut self) {
+    fn open_guide(&mut self, now_ms: i64) {
         if self.numbers.is_empty() {
             return;
         }
@@ -605,7 +615,7 @@ impl<P: Player, I: Input> Tv<P, I> {
             .channel
             .and_then(|c| self.numbers.iter().position(|&n| n == c))
             .unwrap_or(0);
-        self.guide = Some(Guide::new(index, self.numbers.len()));
+        self.guide = Some(Guide::new(index, self.numbers.len(), now_ms));
         let player = self.tuner.player_mut();
         if self.banner_until_ms.take().is_some()
             && let Err(e) = player.clear_banner()
@@ -624,7 +634,7 @@ impl<P: Player, I: Input> Tv<P, I> {
             return;
         }
         let player = self.tuner.player_mut();
-        for layer in [GUIDE_LAYER, GUIDE_CLOCK_LAYER] {
+        for layer in [GUIDE_LAYER, GUIDE_CLOCK_LAYER, GUIDE_ROWS_LAYER] {
             if let Err(e) = player.clear_overlay(layer) {
                 eprintln!("surfcult: cannot clear the guide: {e}");
             }
@@ -634,8 +644,9 @@ impl<P: Player, I: Input> Tv<P, I> {
         }
     }
 
-    /// Draws the guide when it is open: the body when the focus moved or a
-    /// new half hour began, and the clock when its second changed.
+    /// Draws the guide when it is open: the body and the rows when the
+    /// focus moved or a new half hour began, the clock when its second
+    /// changed, and the rows' place in their bitmap when they scroll.
     fn draw_guide(&mut self, now_ms: i64, store: &Store) {
         let Some(mut guide) = self.guide.take() else {
             return;
@@ -652,10 +663,28 @@ impl<P: Player, I: Input> Tv<P, I> {
             let view = guide.view(&channels, store, now_ms, timezone);
             let mut body = paint::guide::draw(&view);
             paint::crt::apply(&mut body, crt);
-            if let Err(e) = self.tuner.player_mut().show_overlay(GUIDE_LAYER, &body) {
+            let mut rows = paint::guide::draw_rows(&view.rows);
+            paint::crt::apply(&mut rows, crt);
+            let top = guide.top_row(now_ms, self.numbers.len());
+            let player = self.tuner.player_mut();
+            if let Err(e) = player.show_overlay(GUIDE_LAYER, &body) {
                 eprintln!("surfcult: cannot show the guide: {e}");
             }
+            let visible = paint::guide::VISIBLE.min(rows.height.saturating_sub(top));
+            match player.show_overlay_rows(GUIDE_ROWS_LAYER, &rows, top, visible) {
+                Ok(()) => guide.shown_row = Some(top),
+                Err(e) => eprintln!("surfcult: cannot show the guide's rows: {e}"),
+            }
             guide.drawn_for = Some(from);
+        } else {
+            let top = guide.top_row(now_ms, self.numbers.len());
+            if guide.shown_row.is_some_and(|shown| shown != top) {
+                let player = self.tuner.player_mut();
+                match player.scroll_overlay(GUIDE_ROWS_LAYER, top, paint::guide::VISIBLE) {
+                    Ok(()) => guide.shown_row = Some(top),
+                    Err(e) => eprintln!("surfcult: cannot scroll the guide: {e}"),
+                }
+            }
         }
         let clock = clock_with_seconds(now_ms, timezone);
         if guide.clock_drawn.as_deref() != Some(clock.as_str()) {

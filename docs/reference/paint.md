@@ -63,9 +63,9 @@ Text that does not fit is cut with an ellipsis (`Font::fit`).
 | Video | the top-right quarter | left transparent for the picture |
 | Header | y 556, 52 px tall | the clock's cell, then three half-hour slots in yellow |
 | Date row | y 614, 40 px tall | the date across the slots |
-| Rows | from y 660, four rows 86 px tall | a channel cell (two-digit number and name in yellow) and program cells: series blue, films maroon, the focused one in the focus colour with a 6 px yellow outline. A program that runs past an edge gets a white arrow there |
+| Rows | from y 660, four rows 86 px tall, drawn separately by `draw_rows` | a channel cell (two-digit number and name in yellow) and program cells: series blue, films maroon, the focused one in the focus colour with a 6 px yellow outline. A program that runs past an edge gets a white arrow there |
 
-The grid runs from 96 px to 1824 px across, inside the area a TV may cut off. Titles that do not fit are cut with an ellipsis, and a sliver of a cell gets no title. `paint::guide::draw_clock(text)` draws the clock cell, in VCR OSD Mono, as its own small overlay at the head of the grid.
+The grid runs from 96 px to 1824 px across, inside the area a TV may cut off. Titles that do not fit are cut with an ellipsis, and a sliver of a cell gets no title. `paint::guide::draw_rows(rows)` draws every row in one bitmap at the grid's place, 92 px apart (`guide::PITCH`, a multiple of 4), so the guide can show four of them (`guide::VISIBLE`, 368 px) and scroll through the rest. `paint::guide::draw_clock(text)` draws the clock cell, in VCR OSD Mono, as its own small overlay at the head of the grid.
 
 ## The mark
 

@@ -651,6 +651,7 @@ fn player_with(
         global_shaders,
         standby_shaders,
         glitch,
+        overlays: HashMap::new(),
     }
 }
 
@@ -1575,4 +1576,37 @@ fn the_guide_moves_the_video_with_margin_ratios() {
             json!(["set_property", "video-margin-ratio-bottom", 0.0]),
         ]
     );
+}
+
+#[test]
+fn part_of_an_overlay_is_shown_from_an_offset_into_its_file() {
+    let fake = FakeMpv::new();
+    let mut session = fake.connect();
+    session
+        .overlay_add_rows(3, 96, 660, "/run/overlay-3.bgra", 10, 8, 4)
+        .unwrap();
+    assert_eq!(
+        fake.commands(),
+        [json!([
+            "overlay-add",
+            3,
+            96,
+            660,
+            "/run/overlay-3.bgra",
+            320,
+            "bgra",
+            10,
+            4,
+            40
+        ])]
+    );
+}
+
+#[test]
+fn rows_outside_the_bitmap_are_refused() {
+    assert!(check_rows(10, 0, 10).is_ok());
+    assert!(check_rows(10, 6, 4).is_ok());
+    assert!(check_rows(10, 6, 5).is_err());
+    assert!(check_rows(10, 0, 0).is_err());
+    assert!(check_rows(10, u32::MAX, 2).is_err());
 }

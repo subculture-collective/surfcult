@@ -351,6 +351,24 @@ impl Session {
         width: u32,
         height: u32,
     ) -> Result<(), IpcError> {
+        self.overlay_add_rows(id, x, y, file, width, 0, height)
+    }
+
+    /// Shows `rows` rows of a `width`-pixel-wide BGRA bitmap in `file`,
+    /// starting at row `first_row`, with their top left at `x`, `y`. MPV reads
+    /// them at an offset into the file, so moving `first_row` scrolls the
+    /// bitmap without writing it again.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn overlay_add_rows(
+        &mut self,
+        id: u8,
+        x: i32,
+        y: i32,
+        file: &str,
+        width: u32,
+        first_row: u32,
+        rows: u32,
+    ) -> Result<(), IpcError> {
         let stride = u64::from(width) * 4;
         self.command(json!([
             "overlay-add",
@@ -358,10 +376,10 @@ impl Session {
             x,
             y,
             file,
-            0,
+            u64::from(first_row) * stride,
             "bgra",
             width,
-            height,
+            rows,
             stride
         ]))
         .map(drop)

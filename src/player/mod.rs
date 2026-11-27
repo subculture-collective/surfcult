@@ -224,6 +224,22 @@ pub trait Player {
     /// for the banner and refuses it here.
     fn show_overlay(&mut self, id: u8, overlay: &Overlay) -> Result<(), PlayerError>;
 
+    /// As [`Player::show_overlay`], but only rows `first_row` to
+    /// `first_row + rows` of `overlay` show, with their top at `overlay.y`.
+    /// The rest is kept for [`Player::scroll_overlay`].
+    fn show_overlay_rows(
+        &mut self,
+        id: u8,
+        overlay: &Overlay,
+        first_row: u32,
+        rows: u32,
+    ) -> Result<(), PlayerError>;
+
+    /// Shows rows `first_row` to `first_row + rows` of the bitmap layer `id`
+    /// showed last, at the same place, without sending its pixels again. An
+    /// empty layer or rows outside the bitmap are an error.
+    fn scroll_overlay(&mut self, id: u8, first_row: u32, rows: u32) -> Result<(), PlayerError>;
+
     /// Removes the overlay in layer `id`. Clearing an empty layer is not an
     /// error.
     fn clear_overlay(&mut self, id: u8) -> Result<(), PlayerError>;
