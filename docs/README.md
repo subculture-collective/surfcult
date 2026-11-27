@@ -2,6 +2,7 @@
 
 - `idea.md`: product idea and draft specification (codename BROADCAST); technical choices are superseded by the design below
 - `superpowers/specs/2026-11-22-surfcult-design.md`: the current design (draft, awaiting approval)
+- `design/cable-grid.md`: the TV and web design the owner chose: palette, type, the mark and its files, the TV screens, the CRT pass on the interface, the SCTV watermark and the web admin
 - `reference/stack.md`: tools, versions and commands for this stack
 - `reference/storage.md`: the SQLite tables and the migration rule
 - `reference/jellyfin.md`: the Jellyfin source: endpoints, the auth header, key sources, the SQLite cache and failed syncs
@@ -17,6 +18,7 @@
 - `research/2026-11-24-pi-hardware-checks.md`: the hardware checks of #21, #22 and #72 on the Pi: playback URLs, the MPV watchdog, the stand-by card and CRT cost
 - `../tools/pi-spike/`: the scripts behind those measurements
 - `../tools/standby/`: the generator of the stand-by card's colour bars and Oswald-derived lettering, with its fit data and the Oswald licence
+- `../tools/brand/`: the generator of the mark, favicon, lockups and SCTV watermarks in `assets/brand/`, with the Archivo Narrow licence
 - `adr/`: architecture decision records; [0001](adr/0001-pi-and-library-findings.md) records what the Pi 4B and the library showed in Phase 0
 - `reference/`: stable technical references
 - `research/`: exploratory notes and comparisons
