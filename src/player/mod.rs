@@ -124,6 +124,17 @@ impl fmt::Debug for Overlay {
     }
 }
 
+/// Where the video is drawn on the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoArea {
+    /// The whole screen.
+    #[default]
+    Full,
+    /// The top-right quarter, while the program guide is open. A 16:9
+    /// picture fills it exactly.
+    TopRight,
+}
+
 /// A command the player could not carry out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerError {
@@ -224,6 +235,10 @@ pub trait Player {
 
     /// Removes the banner. Clearing when none shows is not an error.
     fn clear_banner(&mut self) -> Result<(), PlayerError>;
+
+    /// Draws the video in `area` from now on, whatever plays. A restart
+    /// puts it back to [`VideoArea::Full`].
+    fn set_video_area(&mut self, area: VideoArea) -> Result<(), PlayerError>;
 
     /// The next thing the player reports, oldest first, or `None`.
     fn poll_event(&mut self) -> Option<PlayerEvent>;

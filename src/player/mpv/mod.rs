@@ -103,7 +103,7 @@ use std::time::{Duration, Instant};
 
 use super::{
     DEFAULT_GLITCH_EVERY, DEFAULT_STANDBY_FILTERS, Filter, Overlay, Player, PlayerError,
-    PlayerEvent, Slate, standby_filters,
+    PlayerEvent, Slate, VideoArea, standby_filters,
 };
 use crate::config::Display;
 use crate::library::MediaId;
@@ -734,6 +734,10 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
 
     fn clear_banner(&mut self) -> Result<(), PlayerError> {
         self.with_session(Session::hide_banner)
+    }
+
+    fn set_video_area(&mut self, area: VideoArea) -> Result<(), PlayerError> {
+        self.with_session(|s| s.set_video_area(area))
     }
 
     fn poll_event(&mut self) -> Option<PlayerEvent> {

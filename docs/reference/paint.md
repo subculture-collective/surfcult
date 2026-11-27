@@ -1,6 +1,6 @@
 # Drawing the interface
 
-The code is in `src/paint/`. It draws the TV's interface in the Cable Grid design ([cable-grid.md](../design/cable-grid.md)) into bitmaps the player shows as overlays, and runs the CRT pass on them. The SCTV watermark and the channel banner draw with it; the guide will.
+The code is in `src/paint/`. It draws the TV's interface in the Cable Grid design ([cable-grid.md](../design/cable-grid.md)) into bitmaps the player shows as overlays, and runs the CRT pass on them. The SCTV watermark, the channel banner and the program guide draw with it.
 
 ## Canvas
 
@@ -53,6 +53,20 @@ On the development Mac (Apple M3, release build) a full 1920x1080 pass takes abo
 
 Text that does not fit is cut with an ellipsis (`Font::fit`).
 
+## The guide
+
+`paint::guide::draw(&view)` draws a `GuideView` as a full-screen overlay, before the CRT pass. The run loop builds the view from the schedule (`run::guide`).
+
+| Part | Where | Contents |
+| --- | --- | --- |
+| Info panel | the top-left quarter, on the violet field | four centred lines at 52 px: the channel, the focused program in quotes (yellow), the day, `Channel N` |
+| Video | the top-right quarter | left transparent for the picture |
+| Header | y 556, 52 px tall | the clock's cell, then three half-hour slots in yellow |
+| Date row | y 614, 40 px tall | the date across the slots |
+| Rows | from y 660, four rows 86 px tall | a channel cell (two-digit number and name in yellow) and program cells: series blue, films maroon, the focused one in the focus colour with a 6 px yellow outline. A program that runs past an edge gets a white arrow there |
+
+The grid runs from 96 px to 1824 px across, inside the area a TV may cut off. Titles that do not fit are cut with an ellipsis, and a sliver of a cell gets no title. `paint::guide::draw_clock(text)` draws the clock cell, in VCR OSD Mono, as its own small overlay at the head of the grid.
+
 ## The mark
 
 `paint::mark::shapes()` is the Guide Wave with SC as its middle row, as one path on the 64-unit grid of `assets/brand/mark.svg`. The shapes run from (`mark::LEFT`, `mark::TOP`) = (9, 11) and are `mark::WIDTH` by `mark::HEIGHT` = 47 by 42 units.
@@ -72,4 +86,4 @@ Both are white with a black shadow at 50% alpha, 3 px right and down. The bug's 
 
 ## Tests
 
-`src/paint/tests.rs` checks the fonts, text placement and shadows, bevels, gradients, the overlay's byte order, and the pass: Off, transparency, the scanline rows and their phase, Heavy against Light, glow reach, the colour fringe and premultiplied output; the mark's bounds, the watermark's size, position and clear margin, fading, the banner's place and a long title cut with an ellipsis. With `SURFCULT_PAINT_PREVIEW=<dir>`, `cargo test --lib paint::tests::preview` also writes a sample drawing as `paint-flat.png`, `paint-heavy.png` and `paint-light.png` to look at, and `paint::tests::preview_watermark` writes both watermark forms over a sample picture with the pass at Heavy and Off, and `paint::tests::preview_banner` writes the banner.
+`src/paint/tests.rs` checks the fonts, text placement and shadows, bevels, gradients, the overlay's byte order, and the pass: Off, transparency, the scanline rows and their phase, Heavy against Light, glow reach, the colour fringe and premultiplied output; the mark's bounds, the watermark's size, position and clear margin, fading, the banner's place and a long title cut with an ellipsis. With `SURFCULT_PAINT_PREVIEW=<dir>`, `cargo test --lib paint::tests::preview` also writes a sample drawing as `paint-flat.png`, `paint-heavy.png` and `paint-light.png` to look at, and `paint::tests::preview_watermark` writes both watermark forms over a sample picture with the pass at Heavy and Off, `paint::tests::preview_banner` writes the banner, and `paint::tests::preview_guide` writes the guide over a picture in the video's quarter.

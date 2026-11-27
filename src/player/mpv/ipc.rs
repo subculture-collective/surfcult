@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use super::Stream;
 use super::banner::BANNER_LAYER;
-use crate::player::PlayerEvent;
+use crate::player::{PlayerEvent, VideoArea};
 
 /// Why a command did not work.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -296,6 +296,18 @@ impl Session {
         self.overlay_add(BANNER_LAYER, x, y, file, width, height)?;
         self.banner = true;
         Ok(())
+    }
+
+    /// Draws the video in `area`, with MPV's `video-margin-ratio-left` and
+    /// `video-margin-ratio-bottom`: 0.5 each leaves the top-right quarter.
+    pub(super) fn set_video_area(&mut self, area: VideoArea) -> Result<(), IpcError> {
+        let margin = match area {
+            VideoArea::Full => 0.0,
+            VideoArea::TopRight => 0.5,
+        };
+        self.command(json!(["set_property", "video-margin-ratio-left", margin]))?;
+        self.command(json!(["set_property", "video-margin-ratio-bottom", margin]))
+            .map(drop)
     }
 
     /// Removes the banner, if it is up.
