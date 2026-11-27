@@ -401,6 +401,7 @@ fn sample_banner(title: &str) -> crate::overlay::Banner {
         title: title.into(),
         times: "20:30–22:25".into(),
         clock: "21:16".into(),
+        next: "NEXT 22:25 Night Matinee".into(),
     }
 }
 

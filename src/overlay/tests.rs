@@ -98,6 +98,7 @@ fn names_the_channel_and_the_program_on_now_with_its_whole_extent() {
             title: "The Simpsons: Bart the Genius".into(),
             times: "19:00–19:30".into(),
             clock: "19:05".into(),
+            next: r"NEXT 19:32 Night {Film} \N".into(),
         }
     );
     // A break inside the program is still the program.
@@ -136,4 +137,18 @@ fn times_are_local_to_the_config_time_zone() {
     // 19:00 UTC is 13:00 in Chicago in November.
     assert_eq!(clock(at(19, 0), chicago), "13:00");
     assert_eq!(clock(at(9, 5), Tz::UTC), "09:05");
+}
+
+#[test]
+fn next_names_the_program_after_the_one_on_and_is_empty_otherwise() {
+    let store = stored(&schedule());
+    // During the filler between the episode and the film, the title is
+    // already the next program, so there is no NEXT line.
+    let between = banner(&channel(), &store, at(19, 31), Tz::UTC);
+    assert!(between.title.starts_with("NEXT: "), "{}", between.title);
+    assert_eq!(between.next, "");
+    // The film is the last program: nothing follows it.
+    assert_eq!(banner(&channel(), &store, at(20, 0), Tz::UTC).next, "");
+    // Off the air, nothing is on to follow.
+    assert_eq!(banner(&channel(), &store, at(22, 0), Tz::UTC).next, "");
 }

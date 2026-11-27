@@ -462,6 +462,7 @@ fn a_tune_shows_static_a_tune_in_clip_the_program_at_its_live_position_and_the_b
                     clock(T + 50 * MIN, Tz::UTC)
                 ),
                 clock: clock(T + 500 + TUNE_IN_MS, Tz::UTC),
+                next: format!("NEXT {} The Show", clock(T + 50 * MIN, Tz::UTC)),
             }),
         ]
     );
@@ -677,6 +678,7 @@ fn a_tune_into_a_gap_shows_the_card_with_off_the_air_and_follows_on() {
             title: "OFF THE AIR".into(),
             times: format!("BACK AT {}", clock(T + 5 * MIN, Tz::UTC)),
             clock: clock(T + 500, Tz::UTC),
+            next: String::new(),
         }]
     );
     rig.step(T + 10_000);

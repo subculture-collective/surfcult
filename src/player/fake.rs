@@ -315,6 +315,7 @@ mod tests {
             title: "Show".into(),
             times: "19:00–19:30".into(),
             clock: "19:05".into(),
+            next: "NEXT 19:30 Other".into(),
         };
         player.show_banner(&banner).unwrap();
         player.clear_banner().unwrap();

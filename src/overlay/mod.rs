@@ -35,6 +35,9 @@ pub struct Banner {
     pub times: String,
     /// The local time of day when the banner was made, `HH:MM`.
     pub clock: String,
+    /// The program after the one on now, `NEXT 19:30 Title`, or empty when
+    /// nothing follows it in the next three hours or no program is on.
+    pub next: String,
 }
 
 /// The banner for `channel` at `now_ms`, with times in `timezone`.
@@ -47,17 +50,18 @@ pub struct Banner {
 /// has nothing more for the next seven days, `NO SCHEDULE`. A schedule that
 /// cannot be read counts as none.
 pub fn banner(channel: &Channel, store: &Store, now_ms: i64, timezone: Tz) -> Banner {
-    let (title, times) = what_is_on(channel.number, store, now_ms, timezone);
+    let (title, times, next) = what_is_on(channel.number, store, now_ms, timezone);
     Banner {
         number: channel.number,
         name: channel.name.clone(),
         title,
         times,
         clock: clock(now_ms, timezone),
+        next,
     }
 }
 
-fn what_is_on(channel: u32, store: &Store, now_ms: i64, timezone: Tz) -> (String, String) {
+fn what_is_on(channel: u32, store: &Store, now_ms: i64, timezone: Tz) -> (String, String, String) {
     let cells = guide::build(store, store, &[channel], Window::starting_at(now_ms))
         .ok()
         .and_then(|rows| rows.into_iter().next())
@@ -67,7 +71,12 @@ fn what_is_on(channel: u32, store: &Store, now_ms: i64, timezone: Tz) -> (String
         .iter()
         .find(|c| c.start_ms <= now_ms && now_ms < c.end_ms)
     {
-        return (title(cell, store), span(cell, timezone));
+        let next = cells
+            .iter()
+            .find(|c| c.start_ms >= cell.end_ms)
+            .map(|c| format!("NEXT {} {}", clock(c.start_ms, timezone), title(c, store)))
+            .unwrap_or_default();
+        return (title(cell, store), span(cell, timezone), next);
     }
     let clip_on = store
         .events_between(channel, now_ms, now_ms.saturating_add(1))
@@ -76,6 +85,7 @@ fn what_is_on(channel: u32, store: &Store, now_ms: i64, timezone: Tz) -> (String
         return (
             format!("NEXT: {}", title(next, store)),
             span(next, timezone),
+            String::new(),
         );
     }
     let next_start = store
@@ -87,8 +97,9 @@ fn what_is_on(channel: u32, store: &Store, now_ms: i64, timezone: Tz) -> (String
         Some(at) => (
             "OFF THE AIR".into(),
             format!("BACK AT {}", clock(at, timezone)),
+            String::new(),
         ),
-        None => ("NO SCHEDULE".into(), String::new()),
+        None => ("NO SCHEDULE".into(), String::new(), String::new()),
     }
 }
 
