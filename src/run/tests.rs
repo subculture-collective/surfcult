@@ -99,6 +99,9 @@ impl Player for TestPlayer {
     fn set_video_area(&mut self, area: VideoArea) -> Result<(), PlayerError> {
         self.fake.set_video_area(area)
     }
+    fn set_crt(&mut self, crt: Crt) -> Result<(), PlayerError> {
+        self.fake.set_crt(crt)
+    }
     fn show_overlay_rows(
         &mut self,
         id: u8,
@@ -1079,13 +1082,7 @@ fn keys_without_a_use_yet_do_nothing() {
     rig.go_live(T);
     rig.step(T + 9_000);
     rig.take();
-    for key in [
-        Key::Back,
-        Key::Menu,
-        Key::Mute,
-        Key::VolumeUp,
-        Key::VolumeDown,
-    ] {
+    for key in [Key::Back, Key::Mute, Key::VolumeUp, Key::VolumeDown] {
         rig.press(key, T + 10_000);
     }
     assert_eq!(rig.tv.channel(), Some(3));
@@ -1352,4 +1349,81 @@ fn the_guide_shows_its_rows_from_a_tall_bitmap_and_three_channels_never_scroll()
             .iter()
             .any(|c| matches!(c, Command::ScrollOverlay { .. }))
     );
+}
+
+fn menu_shown(commands: &[Command]) -> usize {
+    shown(MENU_LAYER, commands)
+}
+
+#[test]
+fn the_menu_key_opens_the_picture_menu_and_ok_steps_the_crt_filter() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.take();
+    rig.press(Key::Menu, T + 10_000);
+    let commands = rig.take();
+    assert_eq!(menu_shown(&commands), 1);
+    assert!(commands.contains(&Command::ClearBanner), "{commands:?}");
+    // The rig starts at Off (its settings): OK goes on to Heavy.
+    rig.press(Key::Banner, T + 11_000);
+    let commands = rig.take();
+    assert!(
+        commands.contains(&Command::SetCrt(Crt::Heavy)),
+        "{commands:?}"
+    );
+    assert_eq!(menu_shown(&commands), 1, "drawn again with the new level");
+    assert_eq!(
+        rig.store.viewer_setting("crt").unwrap().as_deref(),
+        Some("heavy")
+    );
+    rig.press(Key::Banner, T + 12_000);
+    assert!(rig.take().contains(&Command::SetCrt(Crt::Light)));
+    assert_eq!(
+        rig.store.viewer_setting("crt").unwrap().as_deref(),
+        Some("light")
+    );
+    // Up and Down have nothing to move between, and change no channel.
+    rig.press(Key::Next, T + 13_000);
+    assert_eq!(rig.take(), []);
+    assert_eq!(rig.tv.channel(), Some(3));
+    rig.press(Key::Back, T + 14_000);
+    assert_eq!(rig.take(), [Command::ClearOverlay(MENU_LAYER)]);
+    // Closed: Up changes channel again.
+    rig.press(Key::Next, T + 15_000);
+    assert_eq!(rig.tv.channel(), Some(5));
+}
+
+#[test]
+fn a_stored_crt_filter_wins_over_the_default_at_start() {
+    let mut rig = Rig::new();
+    rig.store.set_viewer_setting("crt", "light").unwrap();
+    rig.start();
+    assert!(rig.take().contains(&Command::SetCrt(Crt::Light)));
+}
+
+#[test]
+fn the_guide_key_in_the_menu_closes_it_and_opens_the_guide() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.press(Key::Menu, T + 10_000);
+    rig.take();
+    rig.press(Key::Guide, T + 11_000);
+    let commands = rig.take();
+    assert_eq!(commands[0], Command::ClearOverlay(MENU_LAYER));
+    assert!(commands.contains(&Command::SetVideoArea(VideoArea::TopRight)));
+}
+
+#[test]
+fn the_watermark_hides_while_the_menu_is_open() {
+    let mut rig = Rig::watermarked();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.take();
+    rig.press(Key::Menu, T + 1_000);
+    assert_eq!(watermark(&rig.take()), [None]);
 }

@@ -589,3 +589,41 @@ fn the_rows_are_one_bitmap_92_pixels_a_row_at_the_grid() {
     assert_eq!(rows.y % 4, 0);
     assert!(premultiplied(&rows));
 }
+
+fn sample_menu() -> super::menu::MenuView {
+    super::menu::MenuView {
+        title: "PICTURE".into(),
+        rows: vec![("CRT filter".into(), "HEAVY".into())],
+        focus: 0,
+        help:
+            "Scanlines and glow on the guide, the banner and the watermark. Never on the program."
+                .into(),
+        keys: "OK CHANGE   BACK CLOSE".into(),
+    }
+}
+
+#[test]
+fn the_menu_covers_the_whole_screen() {
+    let o = super::menu::draw(&sample_menu());
+    assert_eq!((o.x, o.y, o.width, o.height), (0, 0, 1920, 1080));
+    assert!(o.bgra.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+}
+
+/// Writes the menu to `SURFCULT_PAINT_PREVIEW` with the pass at Heavy.
+#[test]
+fn preview_menu() {
+    let Some(dir) = std::env::var_os("SURFCULT_PAINT_PREVIEW") else {
+        return;
+    };
+    let mut o = super::menu::draw(&sample_menu());
+    crt::apply(&mut o, Crt::Heavy);
+    let mut rgba = o.bgra.clone();
+    rgba.as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .for_each(|p| p.swap(0, 2));
+    let size = tiny_skia::IntSize::from_wh(o.width, o.height).unwrap();
+    let png = tiny_skia::Pixmap::from_vec(rgba, size).unwrap();
+    let file = std::path::PathBuf::from(dir).join("menu-heavy.png");
+    std::fs::write(file, png.encode_png().unwrap()).unwrap();
+}

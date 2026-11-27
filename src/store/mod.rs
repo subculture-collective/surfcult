@@ -452,6 +452,34 @@ impl Store {
     }
 }
 
+impl Store {
+    /// The value the viewer chose for setting `name`, or `None` when they
+    /// have not chosen one.
+    pub fn viewer_setting(&self, name: &str) -> Result<Option<String>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT value FROM viewer_settings WHERE name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StoreError::database("reading a viewer setting"))
+    }
+
+    /// Records the viewer's choice `value` for setting `name`, replacing an
+    /// earlier one.
+    pub fn set_viewer_setting(&mut self, name: &str, value: &str) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "INSERT INTO viewer_settings (name, value) VALUES (?1, ?2)
+                 ON CONFLICT (name) DO UPDATE SET value = excluded.value",
+                params![name, value],
+            )
+            .map_err(StoreError::database("writing a viewer setting"))?;
+        Ok(())
+    }
+}
+
 /// Checks events before anything is written, so a bad one fails the whole call.
 fn validate(events: &[Event]) -> Result<(), StoreError> {
     for event in events {

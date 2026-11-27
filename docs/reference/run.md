@@ -43,7 +43,7 @@ Every channel in the config is listed; the config has no way to disable one.
 | `SURFCULT_JELLYFIN_USER_ID` | The Jellyfin user playback is asked for as. Without it, the first enabled user. See [Jellyfin source](jellyfin.md#playback-urls). |
 | `SURFCULT_SYNC_MINUTES` | Minutes between two library syncs. Default 15. |
 | `SURFCULT_BANNER_SECONDS` | Seconds the banner stays up. Default 5. |
-| `SURFCULT_CRT` | The CRT pass on the interface, such as the watermark: `heavy` (the default), `light` or `off`. See [paint.md](paint.md#the-crt-pass). |
+| `SURFCULT_CRT` | The default CRT pass on the interface (the banner, the watermark, the guide and the menu): `heavy` (the default), `light` or `off`. A level the viewer chose in the Picture menu wins over it. See [paint.md](paint.md#the-crt-pass). |
 | `SURFCULT_AUDIO_DEVICE` | MPV's audio device. Default `alsa/plughw:CARD=vc4hdmi0,DEV=0`, the first HDMI port. List the devices with `mpv --audio-device=help`; the second port is `alsa/plughw:CARD=vc4hdmi1,DEV=0`. |
 | `SURFCULT_CLOCK_TRUSTED` | `1` trusts the clock and `0` distrusts it, overriding systemd. For testing. |
 | `XDG_RUNTIME_DIR` | MPV's runtime directory is `$XDG_RUNTIME_DIR/surfcult`, or `/run/user/<uid>/surfcult` without it. |
@@ -112,13 +112,13 @@ digit_5 = ["KEY_5", "KEY_KP5", "KEY_NUMERIC_5"]
 | `info` | `KEY_OK`, `KEY_ENTER`, `KEY_INFO`, `KEY_I` | Shows the banner again |
 | `quit` | `KEY_Q` (keyboard only) | Quits |
 | `back` | `KEY_EXIT`, `KEY_BACK`, `KEY_ESC`, `KEY_BACKSPACE` | Closes the guide; otherwise nothing yet |
-| `menu` | `KEY_MENU`, `KEY_M` | Nothing yet |
+| `menu` | `KEY_MENU`, `KEY_M` | Opens and closes the Picture menu, see below |
 | `guide` | `KEY_EPG`, `KEY_PROGRAM`, `KEY_G`, `KEY_PLAYCD`, `KEY_PAUSECD`, `KEY_PLAYPAUSE` | Opens and closes the guide, see below |
 | `mute` | `KEY_MUTE` | Nothing yet |
 | `volume_up` | `KEY_VOLUMEUP` | Nothing yet |
 | `volume_down` | `KEY_VOLUMEDOWN` | Nothing yet |
 
-`menu`, `mute`, `volume_up` and `volume_down` are read and passed to the loop as `Key` values, which ignores them for now; the menu and the volume come in later issues. The defaults suit the TCL Fire TV remote over HDMI-CEC: its Menu key is `KEY_MENU`, Back is `KEY_EXIT`, OK is `KEY_OK`, and Play/Pause alternates `KEY_PLAYCD` and `KEY_PAUSECD`, so both open the guide. Its Home, volume and mute keys do not reach the Pi, and it has no number keys. A keyboard's number row and keypad enter channel numbers.
+`mute`, `volume_up` and `volume_down` are read and passed to the loop as `Key` values, which ignores them for now; the volume comes in a later issue. The defaults suit the TCL Fire TV remote over HDMI-CEC: its Menu key is `KEY_MENU`, Back is `KEY_EXIT`, OK is `KEY_OK`, and Play/Pause alternates `KEY_PLAYCD` and `KEY_PAUSECD`, so both open the guide. Its Home, volume and mute keys do not reach the Pi, and it has no number keys. A keyboard's number row and keypad enter channel numbers.
 
 Number entry: a digit starts a channel number, and each digit adds to it. The channel is tuned at once when the number is as wide as the highest channel number (at least two digits), and otherwise 2 seconds after the last digit. A number that is not a channel is ignored. Channel up and down end the entry and change the channel as usual. Other keys leave it alone.
 
@@ -189,6 +189,16 @@ Closing the guide, changing channel or a player restart removes all three layers
 
 Not built yet: moving through time, which needs left and right keys.
 
+## The Picture menu
+
+The menu key opens the Picture menu over the whole screen, in overlay layer 4 (`run::MENU_LAYER`), with the CRT pass at the current level ([paint.md](paint.md#the-menu)). The guide closes, the banner goes, and the watermark hides while it is open. Its one setting is the CRT filter:
+
+- `info` (OK) steps it to the next level, Heavy, Light, Off and round again. The new level applies at once to the menu, the watermark, the guide and the banner (`Player::set_crt`), and is stored in the store's viewer settings (`viewer_settings`, name `crt`), so it outlives a restart. At start a stored level wins over `SURFCULT_CRT`; a stored value that does not parse is logged and ignored.
+- `channel_up` and `channel_down` do nothing, as there is one setting.
+- `menu` and `back` close it. The guide key and a digit close it and then do what they usually do.
+
+A channel change or a player restart closes it.
+
 ## The watermark
 
 The SCTV watermark is the station bug in the top-right corner, drawn in overlay layer 8 (`run::WATERMARK_LAYER`) at 60% opacity, with the CRT pass at `SURFCULT_CRT`. Its look and place are in [paint.md](paint.md#the-watermark).
@@ -219,6 +229,6 @@ A program that never starts and never fails, such as a transcode that hangs, kee
 
 ## Tests
 
-`src/run/tests.rs` drives the loop with a virtual clock, a `FakePlayer` wrapped so single programs can fail as a Jellyfin error would, or all of them as a Jellyfin outage would, a `FakeInput`, an in-memory store whose library cache is the media source, and clip pools scanned from a temporary directory with a fake prober. They cover wrapping channel changes, the commands of a tune, returning to a channel at its live position, a program cut by breaks, a stale queue, gaps and off-air time, the banner and its timeout, an unplayable program with and without a filler pool, a program that fails twice on screen, a Jellyfin outage with a break in it and its recovery, a refused tune, a player restart, an unresolvable source at startup, the clock slate until the clock is trusted, the watermark's hold, fade, break form and channel change, and the guide: opening it, the clock's own layer, moving the focus, tuning with OK, closing with Back, the banner going, the watermark hiding, and the rows shown from their tall bitmap (three channels, which never scroll). The scroll itself, its loop and a key stopping it are tested in `src/run/guide.rs`. The existing tests run with the watermark off (`Settings::watermark`) so their command lists stay exact; `Rig::watermarked` turns it on. `src/input/evdev.rs` tests parsing `input_event` bytes and `/proc/bus/input/devices`, and `src/input/keymap.rs` the key names, the defaults and the `[keys]` overrides. The loop tests also cover number entry: one digit after the wait, two digits at once, an unknown number and a channel key during entry. The stream resolver is tested against recorded Jellyfin responses. A real MPV test (skipped without `mpv`) checks that MPV accepts `play_program`, `queue_clip` and the banner's overlay.
+`src/run/tests.rs` drives the loop with a virtual clock, a `FakePlayer` wrapped so single programs can fail as a Jellyfin error would, or all of them as a Jellyfin outage would, a `FakeInput`, an in-memory store whose library cache is the media source, and clip pools scanned from a temporary directory with a fake prober. They cover wrapping channel changes, the commands of a tune, returning to a channel at its live position, a program cut by breaks, a stale queue, gaps and off-air time, the banner and its timeout, an unplayable program with and without a filler pool, a program that fails twice on screen, a Jellyfin outage with a break in it and its recovery, a refused tune, a player restart, an unresolvable source at startup, the clock slate until the clock is trusted, the watermark's hold, fade, break form and channel change, and the guide: opening it, the clock's own layer, moving the focus, tuning with OK, closing with Back, the banner going, the watermark hiding, and the rows shown from their tall bitmap (three channels, which never scroll); and the Picture menu: opening it, OK stepping and storing the CRT filter, a stored level at start, the guide key leaving it, and the watermark hiding. The scroll itself, its loop and a key stopping it are tested in `src/run/guide.rs`. The existing tests run with the watermark off (`Settings::watermark`) so their command lists stay exact; `Rig::watermarked` turns it on. `src/input/evdev.rs` tests parsing `input_event` bytes and `/proc/bus/input/devices`, and `src/input/keymap.rs` the key names, the defaults and the `[keys]` overrides. The loop tests also cover number entry: one digit after the wait, two digits at once, an unknown number and a channel key during entry. The stream resolver is tested against recorded Jellyfin responses. A real MPV test (skipped without `mpv`) checks that MPV accepts `play_program`, `queue_clip` and the banner's overlay.
 
 Not tested here: the remote, the TV, Jellyfin, the look of the banner and the slates on the Pi, and what MPV reports for a missing file or a Jellyfin that goes away mid-program. That is the owner's check: change channels across three channels and compare each with `surfcult now`.

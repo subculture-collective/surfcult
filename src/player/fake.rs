@@ -6,6 +6,7 @@ use std::rc::Rc;
 use super::{Overlay, Player, PlayerError, PlayerEvent, Slate, VideoArea};
 use crate::library::MediaId;
 use crate::overlay::Banner;
+use crate::paint::Crt;
 
 /// A clock that only moves when a test moves it. Clones share the time, so
 /// the test keeps one and gives another to the [`FakePlayer`].
@@ -74,6 +75,7 @@ pub enum Command {
     ShowBanner(Banner),
     ClearBanner,
     SetVideoArea(VideoArea),
+    SetCrt(Crt),
 }
 
 /// A command and the virtual time it was issued.
@@ -244,6 +246,10 @@ impl Player for FakePlayer {
 
     fn set_video_area(&mut self, area: VideoArea) -> Result<(), PlayerError> {
         self.record(Command::SetVideoArea(area))
+    }
+
+    fn set_crt(&mut self, crt: Crt) -> Result<(), PlayerError> {
+        self.record(Command::SetCrt(crt))
     }
 
     fn show_overlay_rows(
