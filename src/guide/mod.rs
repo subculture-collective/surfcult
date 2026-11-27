@@ -57,6 +57,8 @@ pub struct Cell {
     pub title: Option<String>,
     /// Always `None`: the media model has no description yet.
     pub description: Option<String>,
+    /// The item's genres; empty when the item cannot be resolved.
+    pub genres: Vec<String>,
 }
 
 impl Cell {
@@ -101,12 +103,16 @@ pub fn cells(events: &[Event], media: &impl MediaSource, window: Window) -> Vec<
     merge(events)
         .into_iter()
         .filter(|span| span.end_ms > window.from_ms && span.start_ms < window.to_ms)
-        .map(|span| Cell {
-            title: media.resolve(&span.media_id).ok().map(|item| item.title),
-            description: None,
-            media_id: span.media_id,
-            start_ms: span.start_ms,
-            end_ms: span.end_ms,
+        .map(|span| {
+            let item = media.resolve(&span.media_id).ok();
+            Cell {
+                title: item.as_ref().map(|item| item.title.clone()),
+                description: None,
+                genres: item.map(|item| item.genres).unwrap_or_default(),
+                media_id: span.media_id,
+                start_ms: span.start_ms,
+                end_ms: span.end_ms,
+            }
         })
         .collect()
 }

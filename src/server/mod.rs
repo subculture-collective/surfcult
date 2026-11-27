@@ -22,11 +22,14 @@
 //! composition root's `Store` instead would make the tuner wait on HTTP
 //! requests for the lock.
 //!
+//! `/xmltv.xml` exports the guide as XMLTV.
+//!
 //! Endpoints and JSON shapes are in `docs/reference/api.md`.
 
 mod settings;
 #[cfg(test)]
 mod tests;
+mod xmltv;
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -87,6 +90,7 @@ pub fn router(config: Config, store: Store, token: Option<ApiToken>, now: Clock)
     Router::new()
         .route("/channels", get(channels))
         .route("/schedule", get(schedule))
+        .route("/xmltv.xml", get(xmltv::guide))
         .route("/health", get(health))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)

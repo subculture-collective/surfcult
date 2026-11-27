@@ -1,6 +1,6 @@
 # Read API
 
-`surfcult serve <channels.toml> <db>` serves channels, the schedule and health as JSON over HTTP. The code is in `src/server/`. Every route is a fixed `GET`: nothing runs a command, writes to the database or reads a file. Channels come from the parsed `channels.toml` and everything else from the SQLite store. Any other path gets `404` and any other method `405`.
+`surfcult serve <channels.toml> <db>` serves channels, the schedule and health as JSON over HTTP, and the guide as XMLTV. The code is in `src/server/`. Every route is a fixed `GET`: nothing runs a command, writes to the database or reads a file. Channels come from the parsed `channels.toml` and everything else from the SQLite store. Any other path gets `404` and any other method `405`.
 
 ## Settings
 
@@ -44,6 +44,20 @@ An event that started before `from` but is still on at `from` is included, so th
 ```
 
 `kind` is `program`, `break`, `filler` or `ident`. Events carry media ids, not titles.
+
+### `GET /xmltv.xml`
+
+The guide as XMLTV (`application/xml`), for external guide clients. It lists every channel in `channels.toml` and the programs from now to the seven-day horizon (`from` is the request time). Programs are the guide's cells, not raw segments: a program cut by breaks is one `<programme>`, and breaks, filler and idents are left out. Times are `YYYYMMDDHHMMSS +0000`. Channel ids are `<number>.surfcult`.
+
+```xml
+<channel id="3.surfcult"><display-name>SATURDAY CARTOONS</display-name></channel>
+<programme start="19700101001540 +0000" stop="19700101001641 +0000" channel="3.surfcult">
+  <title>Tom &amp; Jerry</title>
+  <category>Animation</category>
+</programme>
+```
+
+`<title>` is the item's title, or its media id when the item has left the library. `<category>` repeats once per genre. There is no `<icon>` because the channel config has no logo field, and no `<desc>` because the media model has no description yet.
 
 ### `GET /health`
 
