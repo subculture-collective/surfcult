@@ -638,6 +638,14 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
         self.with_session(|s| s.queue_clip(path))
     }
 
+    fn loop_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
+        self.with_session(|s| s.loop_clip(path))
+    }
+
+    fn queue_looping_clip(&mut self, path: &Path) -> Result<(), PlayerError> {
+        self.with_session(|s| s.queue_looping_clip(path))
+    }
+
     fn seek(&mut self, position_ms: u64) -> Result<(), PlayerError> {
         self.with_session(|s| s.seek(position_ms))
     }

@@ -124,6 +124,10 @@ pub trait Player {
     /// anything queued.
     fn play_clip(&mut self, path: &Path) -> Result<(), PlayerError>;
 
+    /// As [`Player::play_clip`], but the clip starts again each time it ends,
+    /// until something replaces it: for a clip shorter than its event.
+    fn loop_clip(&mut self, path: &Path) -> Result<(), PlayerError>;
+
     /// Queues a program behind the current item. It will play `media`
     /// starting `start_ms` into it.
     fn queue_program(&mut self, media: &MediaId, start_ms: u64) -> Result<(), PlayerError>;
@@ -134,6 +138,10 @@ pub trait Player {
 
     /// Queues the local clip at `path` behind the current item.
     fn queue_clip(&mut self, path: &Path) -> Result<(), PlayerError>;
+
+    /// As [`Player::queue_clip`], but the clip loops as in
+    /// [`Player::loop_clip`] once it starts.
+    fn queue_looping_clip(&mut self, path: &Path) -> Result<(), PlayerError>;
 
     /// Moves the item on screen to `position_ms` into the media.
     fn seek(&mut self, position_ms: u64) -> Result<(), PlayerError>;

@@ -282,6 +282,23 @@ fn commands_become_mpv_commands() {
 }
 
 #[test]
+fn a_looping_clip_plays_or_queues_with_loop_file() {
+    let fake = FakeMpv::new();
+    let mut session = fake.connect();
+    session.loop_clip(Path::new("/clips/ident.mp4")).unwrap();
+    session
+        .queue_looping_clip(Path::new("/clips/slate.mp4"))
+        .unwrap();
+    assert_eq!(
+        fake.commands(),
+        [
+            json!(["loadfile", "/clips/ident.mp4", "replace", -1, { "loop-file": "inf" }]),
+            json!(["loadfile", "/clips/slate.mp4", "append", -1, { "loop-file": "inf" }]),
+        ]
+    );
+}
+
+#[test]
 fn a_program_can_replace_the_screen_and_a_clip_can_be_queued() {
     let fake = FakeMpv::new();
     let mut session = fake.connect();

@@ -113,20 +113,20 @@ A channel change stops the transcodes of the program on screen and runs the tune
 When the tuner's sequence is over the driver follows the channel's stored events. At each event boundary it shows what the schedule has then:
 
 - **Program**: its media at the live position. A program cut by breaks continues at the next segment's offset. A segment that continues the media on screen with no break between needs no command.
-- **Break, filler or ident**: the local clip whose canonical path is the event's media id. A clip that is not in the scanned pools shows the stand-by card for the event.
+- **Break, filler or ident**: the local clip whose canonical path is the event's media id. A clip shorter than its event, such as a break's pad that repeats one ident, loops until the event ends. A clip that is not in the scanned pools shows the stand-by card for the event.
 - **No event** (a gap, dead air, or off the air after a sign-off): the stand-by card until the next event. A program after the card starts its expected start-up time early (1 s for direct play, 7 s for a transcode), so it is on screen when its event starts; a clip after the card starts on time.
 
 The position always comes from the schedule at the current time. Switching away and back never restarts a program, and never resumes where the viewer left.
 
 How each move is made:
 
-- **After a clip: queued.** A clip's length is known exactly, so when a clip ends at its event's end, the next item is queued behind it as soon as the clip starts. MPV opens it while the clip plays and starts it when the clip ends. A break of several clips and the program after it play without a gap.
+- **After a clip: queued.** A clip's length is known exactly, so when a clip ends at its event's end, the next item is queued behind it as soon as the clip starts. MPV opens it while the clip plays and starts it when the clip ends. A break of several clips and the program after it play without a gap. A queued clip shorter than its event is queued to loop. A looping clip has nothing queued behind it; what follows replaces it at the boundary.
 - **After a program: replaced at the boundary.** A segment cut by a break never ends where its file does, and a program's real length is not known until the player opens it. Replacing a program with a clip or the card is immediate. Replacing it with another program, on a channel without breaks, shows nothing for the new program's start-up time.
 - If the loop was late (a watchdog restart) and the queued item is no longer what is on, what is on now replaces it.
 
 Late starts follow the tuner's rule: a program the driver started that reports its start more than 500 ms behind its live position gets one seek to it. A program that starts early is not corrected.
 
-A program's file may be shorter or longer than its event. A shorter file leaves the screen black until the boundary; a longer one is cut there. Padding a short file with filler at play time (`schedule::fit` and `schedule::record_fit`) needs the file's real length from the player and is later work.
+A program's file may be shorter or longer than its event. When the player reports the file's real length, the driver fits it (`schedule::fit`): a shorter file is padded from the channel's filler pool up to the event's end, and a longer one is cut there. Each mismatch is written to the playback history as `padded`, `short` (no filler clip) or `cut` (`schedule::record_fit`).
 
 After a tune that ended without a program, on the stand-by card, the driver takes over at once: whatever is on now plays without a tune-in clip, or the card stays until the next event. A long filler stretch the tuner did not play this way plays from its next clip.
 
