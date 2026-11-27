@@ -21,8 +21,8 @@
 
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{Settings, Tv, clock_trusted, jellyfin_streams};
@@ -32,6 +32,7 @@ use crate::input::EvdevInput;
 use crate::jellyfin::{ApiKey, JellyfinClient, JellyfinConfig, SyncWorker};
 use crate::paint::Crt;
 use crate::player::mpv::{MpvConfig, MpvPlayer};
+use crate::server::{self, Control, ServerSettings, TvStatus};
 use crate::store::Store;
 
 /// The Jellyfin server's address.
@@ -92,6 +93,13 @@ pub fn run(config_path: &Path, db_path: &Path) -> Result<(), String> {
             .map_err(|e| format!("cannot handle signal {signal}: {e}"))?;
     }
 
+    let (commands, admin_commands) = std::sync::mpsc::channel();
+    let status = Arc::new(Mutex::new(TvStatus {
+        channel: None,
+        crt: settings.crt,
+    }));
+    start_admin(&config, db_path, Control::new(commands, status.clone()));
+
     let keys = config.keys.clone();
     let mut tv = Tv::new(
         config,
@@ -108,12 +116,75 @@ pub fn run(config_path: &Path, db_path: &Path) -> Result<(), String> {
         if let Some(result) = worker.apply(&mut store, now) {
             tv.synced(now, &mut store, result);
         }
+        for command in admin_commands.try_iter() {
+            tv.admin(command, now, &mut store);
+        }
         tv.step(now, &mut store);
+        *status.lock().unwrap_or_else(PoisonError::into_inner) = TvStatus {
+            channel: tv.channel(),
+            crt: tv.crt(),
+        };
         std::thread::sleep(TICK);
     }
     eprintln!("surfcult: stopping");
     tv.shut_down();
     Ok(())
+}
+
+/// Starts the web admin on its own thread, on the address and with the
+/// token of `surfcult serve` (`SURFCULT_API_ADDR`, `SURFCULT_API_TOKEN`), with
+/// its own read-only connection to the database and `control` to the TV. A
+/// problem is logged and the TV goes on without the admin; a token file that
+/// cannot be read keeps the admin off rather than open.
+fn start_admin(config: &Config, db_path: &Path, control: Control) {
+    let settings = match ServerSettings::from_env() {
+        Ok(settings) => settings,
+        Err(e) => {
+            eprintln!("surfcult: the web admin is off: {e}");
+            return;
+        }
+    };
+    let store = match Store::open_read_only(db_path) {
+        Ok(store) => store,
+        Err(e) => {
+            eprintln!("surfcult: the web admin is off: {}: {e}", db_path.display());
+            return;
+        }
+    };
+    let config = config.clone();
+    let spawned = std::thread::Builder::new()
+        .name("surfcult-admin".into())
+        .spawn(move || {
+            // Axum's accept loop sleeps after an accept error, so the timer
+            // must be on as well as IO.
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(e) => return eprintln!("surfcult: the web admin is off: {e}"),
+            };
+            runtime.block_on(async {
+                let listener = match tokio::net::TcpListener::bind(settings.addr).await {
+                    Ok(listener) => listener,
+                    Err(e) => {
+                        return eprintln!("surfcult: the web admin is off: {}: {e}", settings.addr);
+                    }
+                };
+                if let Ok(addr) = listener.local_addr() {
+                    eprintln!("surfcult: the web admin is on http://{addr}");
+                }
+                if let Err(e) =
+                    server::serve_with_control(listener, settings.token, config, store, control)
+                        .await
+                {
+                    eprintln!("surfcult: the web admin stopped: {e}");
+                }
+            });
+        });
+    if let Err(e) = spawned {
+        eprintln!("surfcult: the web admin is off: cannot start its thread: {e}");
+    }
 }
 
 /// The system clock in Unix epoch milliseconds.

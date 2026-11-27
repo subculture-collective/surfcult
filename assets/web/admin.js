@@ -1,6 +1,7 @@
 // The surfcult web admin: reads the API in this server and draws the guide,
-// the channels and the system's health. Read only; nothing here changes the
-// TV. See docs/reference/api.md for the reads and docs/design/cable-grid.md
+// the channels and the system's health. When the server runs inside
+// surfcult run it can also tune the TV and set its CRT filter (/tv, /tune,
+// /crt). See docs/reference/api.md for the API and docs/design/cable-grid.md
 // for the look.
 "use strict";
 
@@ -61,6 +62,30 @@ async function api(path) {
   return body;
 }
 
+/** Sends `body` as JSON to `path`; the TV carries it out at its next step. */
+async function post(path, body) {
+  const headers = { "Content-Type": "application/json" };
+  if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
+  const response = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+  if (response.status === 401) throw new NeedsToken();
+  if (!response.ok) {
+    const answer = await response.json().catch(() => ({}));
+    throw new Error(answer.error || `${path} answered ${response.status}`);
+  }
+}
+
+/** What the TV is doing, or `{controllable: false}` for a server without one. */
+async function loadTv() {
+  return api("/tv");
+}
+
+/** A Tune button for `number`, or the On TV marker when it is on already. */
+function tuneControl(tv, number) {
+  if (!tv.controllable) return null;
+  if (tv.channel === number) return el("span", { class: "pill on-tv" }, "On TV");
+  return el("button", { class: "btn small", type: "button", "data-tune": number }, "Tune");
+}
+
 /** `HH:MM` in the TV's time zone. */
 function hm(ms) {
   return new Intl.DateTimeFormat("en-GB", {
@@ -116,12 +141,12 @@ function nextAfter(cells, at) {
 
 async function loadGuide() {
   const from = Date.now() - (Date.now() % SLOT_MS);
-  const guide = await api(`/guide?from=${from}&to=${from + GUIDE_SLOTS * SLOT_MS}`);
+  const [guide, tv] = await Promise.all([api(`/guide?from=${from}&to=${from + GUIDE_SLOTS * SLOT_MS}`), loadTv()]);
   timezone = guide.timezone;
-  return { guide };
+  return { guide, tv };
 }
 
-function guideView({ guide }) {
+function guideView({ guide, tv }) {
   const { from_ms: from, to_ms: to, now_ms: now } = guide;
   const span = to - from;
   const pct = (ms) => `${((Math.min(Math.max(ms, from), to) - from) / span) * 100}%`;
@@ -169,12 +194,12 @@ function guideView({ guide }) {
   return [
     el("div", { class: "view-head" }, el("h2", {}, "Tonight on surfcult"), el("p", {}, day(now))),
     guide.channels.length ? grid : el("p", { class: "note" }, "channels.toml has no channels."),
-    onNowList(guide),
+    onNowList(guide, tv),
   ];
 }
 
 /** Each channel with what is on now and its progress: the phone's guide. */
-function onNowList(guide) {
+function onNowList(guide, tv) {
   const now = guide.now_ms;
   return el(
     "div",
@@ -185,7 +210,7 @@ function onNowList(guide) {
       const progress = cell ? ((now - cell.start_ms) / (cell.end_ms - cell.start_ms)) * 100 : 0;
       return el(
         "div",
-        { class: "item" },
+        { class: tv.controllable ? "item with-tune" : "item" },
         el("div", { class: "n" }, pad(channel.number), el("small", {}, channel.name)),
         el(
           "div",
@@ -199,18 +224,19 @@ function onNowList(guide) {
           ),
           cell && el("div", { class: "bar-track" }, el("i", { style: { width: `${progress}%` } })),
         ),
+        tuneControl(tv, channel.number),
       );
     }),
   );
 }
 
 async function loadChannels() {
-  const [{ channels }, guide] = await Promise.all([api("/channels"), api("/guide")]);
+  const [{ channels }, guide, tv] = await Promise.all([api("/channels"), api("/guide"), loadTv()]);
   timezone = guide.timezone;
-  return { channels, guide };
+  return { channels, guide, tv };
 }
 
-function channelsView({ channels, guide }) {
+function channelsView({ channels, guide, tv }) {
   const now = guide.now_ms;
   const modes = { sequential: "In order", shuffle: "Shuffle", weighted: "Weighted", blocks: "Blocks" };
   const body = channels.map((channel) => {
@@ -230,6 +256,7 @@ function channelsView({ channels, guide }) {
         cell && el("div", { class: "bar-track" }, el("i", { style: { width: `${progress}%` } })),
       ),
       el("td", {}, next ? [`${hm(next.start_ms)} `, el("small", {}, next.title)] : el("small", {}, "Nothing in the next three hours")),
+      tv.controllable && el("td", { class: "act" }, tuneControl(tv, channel.number)),
     );
   });
   return [
@@ -240,7 +267,7 @@ function channelsView({ channels, guide }) {
       el(
         "table",
         {},
-        el("thead", {}, el("tr", {}, ["CH", "NAME", "ON NOW", "NEXT"].map((h) => el("th", { scope: "col" }, h)))),
+        el("thead", {}, el("tr", {}, ["CH", "NAME", "ON NOW", "NEXT", tv.controllable ? "TV" : null].filter(Boolean).map((h) => el("th", { scope: "col" }, h)))),
         el("tbody", {}, body),
       ),
     ),
@@ -248,12 +275,33 @@ function channelsView({ channels, guide }) {
 }
 
 async function loadSystem() {
-  const [health, { channels }, guide] = await Promise.all([api("/health"), api("/channels"), api("/guide")]);
+  const [health, { channels }, guide, tv] = await Promise.all([api("/health"), api("/channels"), api("/guide"), loadTv()]);
   timezone = guide.timezone;
-  return { health, channels };
+  return { health, channels, tv };
 }
 
-function systemView({ health, channels }) {
+/** The CRT filter's three levels as buttons, the current one pressed. */
+function crtControl(tv) {
+  if (!tv.controllable) {
+    return el("p", { class: "note" }, "This server has no TV to control. The web admin inside surfcult run can set the CRT filter.");
+  }
+  const levels = [["heavy", "Heavy"], ["light", "Light"], ["off", "Off"]];
+  return el(
+    "div",
+    { class: "panel" },
+    el("h3", {}, "CRT FILTER"),
+    el("p", { class: "note" }, "Scanlines and glow on the TV's guide, banner, menu and watermark. Never on the program."),
+    el(
+      "div",
+      { class: "segmented", role: "group", "aria-label": "CRT filter" },
+      levels.map(([value, label]) =>
+        el("button", { class: "btn small", type: "button", "data-crt": value, "aria-pressed": tv.crt === value ? "true" : "false" }, label),
+      ),
+    ),
+  );
+}
+
+function systemView({ health, channels, tv }) {
   const now = health.now_ms;
   const names = new Map(channels.map((c) => [c.number, c.name]));
   const rows = health.channels.map((c) => {
@@ -286,6 +334,7 @@ function systemView({ health, channels }) {
       el("div", { class: "panel fact" }, el("h3", {}, "DATABASE"), el("p", {}, `Schema ${health.schema_version}`)),
       el("div", { class: "panel fact" }, el("h3", {}, "TIME ZONE"), el("p", {}, timezone ?? "")),
     ),
+    crtControl(tv),
     el(
       "div",
       { class: "panel table-wrap" },
@@ -344,6 +393,31 @@ function tick() {
   const clock = document.getElementById("clock");
   clock.textContent = timezone ? hms(Date.now()) : "";
 }
+
+/** Sends a control request, says so, and reads the page again once the TV
+ * has had a step to act. */
+async function control(path, body, done) {
+  const status = document.getElementById("status");
+  try {
+    await post(path, body);
+    status.textContent = done;
+    setTimeout(render, 400);
+  } catch (error) {
+    if (error instanceof NeedsToken) return render();
+    status.textContent = `The TV did not take that: ${error.message}`;
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const tune = event.target.closest("[data-tune]");
+  if (tune) {
+    const channel = Number(tune.dataset.tune);
+    control("/tune", { channel }, `Asked the TV to change to channel ${pad(channel)}.`);
+    return;
+  }
+  const crt = event.target.closest("[data-crt]");
+  if (crt) control("/crt", { level: crt.dataset.crt }, `Asked the TV to set the CRT filter to ${crt.textContent}.`);
+});
 
 document.getElementById("token-form").addEventListener("submit", (event) => {
   event.preventDefault();

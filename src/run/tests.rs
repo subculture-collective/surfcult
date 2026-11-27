@@ -1464,3 +1464,27 @@ fn left_and_right_do_nothing_outside_the_guide() {
     assert_eq!(rig.take(), []);
     assert_eq!(rig.tv.channel(), Some(3));
 }
+
+#[test]
+fn the_web_admin_tunes_known_channels_and_sets_the_crt_filter() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.take();
+    rig.tv
+        .admin(AdminCommand::Tune(7), T + 10_000, &mut rig.store);
+    assert_eq!(rig.tv.channel(), Some(7));
+    assert!(rig.take().contains(&Command::ShowStatic));
+    rig.tv
+        .admin(AdminCommand::Tune(42), T + 11_000, &mut rig.store);
+    assert_eq!(rig.tv.channel(), Some(7), "an unknown channel is ignored");
+    rig.tv
+        .admin(AdminCommand::SetCrt(Crt::Light), T + 12_000, &mut rig.store);
+    assert_eq!(rig.tv.crt(), Crt::Light);
+    assert!(rig.take().contains(&Command::SetCrt(Crt::Light)));
+    assert_eq!(
+        rig.store.viewer_setting("crt").unwrap().as_deref(),
+        Some("light")
+    );
+}
