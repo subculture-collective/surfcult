@@ -23,6 +23,7 @@ pub mod crt;
 mod font;
 pub mod guide;
 pub mod mark;
+pub mod menu;
 pub mod palette;
 pub mod watermark;
 

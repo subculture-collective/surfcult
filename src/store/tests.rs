@@ -848,3 +848,13 @@ fn a_read_only_store_does_not_migrate() {
         migrate::latest_version() - 1
     );
 }
+
+#[test]
+fn a_viewer_setting_is_absent_until_chosen_and_the_last_choice_wins() {
+    let mut store = Store::open_in_memory().unwrap();
+    assert_eq!(store.viewer_setting("crt").unwrap(), None);
+    store.set_viewer_setting("crt", "light").unwrap();
+    store.set_viewer_setting("crt", "off").unwrap();
+    assert_eq!(store.viewer_setting("crt").unwrap().as_deref(), Some("off"));
+    assert_eq!(store.viewer_setting("other").unwrap(), None);
+}

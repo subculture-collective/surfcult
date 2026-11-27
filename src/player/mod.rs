@@ -56,6 +56,7 @@ use std::path::Path;
 
 use crate::library::MediaId;
 use crate::overlay::Banner;
+use crate::paint::Crt;
 
 pub use fake::{Command, FakePlayer, Issued, VirtualClock};
 pub use filter::{DEFAULT_GLITCH_EVERY, DEFAULT_STANDBY_FILTERS, Filter, standby_filters};
@@ -251,6 +252,10 @@ pub trait Player {
 
     /// Removes the banner. Clearing when none shows is not an error.
     fn clear_banner(&mut self) -> Result<(), PlayerError>;
+
+    /// Sets the CRT pass on what the player draws itself, the banner, from
+    /// the next time it is shown.
+    fn set_crt(&mut self, crt: Crt) -> Result<(), PlayerError>;
 
     /// Draws the video in `area` from now on, whatever plays. A restart
     /// puts it back to [`VideoArea::Full`].

@@ -771,6 +771,11 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
         self.with_session(Session::hide_banner)
     }
 
+    fn set_crt(&mut self, crt: Crt) -> Result<(), PlayerError> {
+        self.config.crt = crt;
+        Ok(())
+    }
+
     fn set_video_area(&mut self, area: VideoArea) -> Result<(), PlayerError> {
         self.with_session(|s| s.set_video_area(area))
     }

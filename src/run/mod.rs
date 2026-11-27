@@ -50,6 +50,7 @@ pub mod app;
 mod clock;
 mod driver;
 mod guide;
+mod menu;
 mod now;
 mod streams;
 #[cfg(test)]
@@ -59,6 +60,7 @@ mod watermark;
 use std::collections::HashMap;
 
 use guide::{Guide, clock_with_seconds, window_start};
+use menu::{CRT_SETTING, Menu, crt_name, next_crt};
 use watermark::Watermark;
 
 use crate::clips::{Clip, ClipLibrary};
@@ -111,6 +113,8 @@ pub const GUIDE_LAYER: u8 = 1;
 pub const GUIDE_CLOCK_LAYER: u8 = 2;
 /// The overlay layer of the guide's channel rows, which scroll.
 pub const GUIDE_ROWS_LAYER: u8 = 3;
+/// The overlay layer the Picture menu is drawn in.
+pub const MENU_LAYER: u8 = 4;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -157,6 +161,8 @@ pub struct Tv<P, I> {
     entry: Option<(u32, usize, i64)>,
     /// The program guide, while it is open.
     guide: Option<Guide>,
+    /// The Picture menu, while it is open.
+    menu: Option<Menu>,
     watermark: Watermark,
     /// What the watermark layer shows now: the form and opacity.
     watermark_shown: Option<(Form, f32)>,
@@ -210,6 +216,7 @@ impl<P: Player, I: Input> Tv<P, I> {
             banner_until_ms: None,
             entry: None,
             guide: None,
+            menu: None,
             watermark: Watermark::default(),
             watermark_shown: None,
             watermark_bitmaps: HashMap::new(),
@@ -223,6 +230,7 @@ impl<P: Player, I: Input> Tv<P, I> {
     /// channel. While the clock is not trusted, shows the clock slate
     /// instead and does the rest once it is.
     pub fn start(&mut self, now_ms: i64, store: &mut Store) {
+        self.load_viewer_settings(store);
         if !(self.clock_trusted)() {
             eprintln!(
                 "surfcult: the clock is not synchronized; showing the clock slate until it is"
@@ -255,7 +263,7 @@ impl<P: Player, I: Input> Tv<P, I> {
             return;
         }
         for key in self.input.poll(now_ms) {
-            self.key(key, now_ms);
+            self.key(key, now_ms, store);
         }
         if let Some((number, _, due_ms)) = self.entry
             && now_ms >= due_ms
@@ -274,6 +282,7 @@ impl<P: Player, I: Input> Tv<P, I> {
         self.driver.step(now_ms, &mut cx);
         self.banner(now_ms, store);
         self.draw_guide(now_ms, store);
+        self.draw_menu();
         self.show_watermark(now_ms);
         if now_ms >= self.upkeep.due_ms {
             self.keep_schedules(now_ms, store);
@@ -383,7 +392,10 @@ impl<P: Player, I: Input> Tv<P, I> {
         self.tuner.state()
     }
 
-    fn key(&mut self, key: Key, now_ms: i64) {
+    fn key(&mut self, key: Key, now_ms: i64, store: &mut Store) {
+        if self.menu.is_some() && self.menu_key(key, store) {
+            return;
+        }
         if self.guide.is_some() && self.guide_key(key, now_ms) {
             return;
         }
@@ -411,7 +423,9 @@ impl<P: Player, I: Input> Tv<P, I> {
             Key::Quit => self.quit = true,
             Key::Guide => self.open_guide(now_ms),
             // Not used yet: the menu and the volume come later.
-            Key::Back | Key::Menu | Key::Mute | Key::VolumeUp | Key::VolumeDown => {}
+            Key::Menu => self.open_menu(),
+            // Not used yet: the volume comes later.
+            Key::Back | Key::Mute | Key::VolumeUp | Key::VolumeDown => {}
         }
     }
 
@@ -447,6 +461,7 @@ impl<P: Player, I: Input> Tv<P, I> {
         self.banner_until_ms = None;
         self.watermark.leave();
         self.close_guide();
+        self.close_menu();
         self.channel = Some(channel);
         self.tuner.tune(channel, now_ms);
     }
@@ -467,6 +482,7 @@ impl<P: Player, I: Input> Tv<P, I> {
                     self.watermark.leave();
                     self.watermark_shown = None;
                     self.guide = None;
+                    self.menu = None;
                 }
                 PlayerEvent::ProgramStarted {
                     position_ms,
@@ -554,6 +570,96 @@ impl<P: Player, I: Input> Tv<P, I> {
             if let Err(e) = self.tuner.player_mut().clear_banner() {
                 eprintln!("surfcult: cannot clear the banner: {e}");
             }
+        }
+    }
+
+    /// Applies the viewer's stored choices over the environment's defaults.
+    /// A stored value that does not parse is logged and ignored.
+    fn load_viewer_settings(&mut self, store: &Store) {
+        match store.viewer_setting(CRT_SETTING) {
+            Ok(Some(text)) => match Crt::parse(&text) {
+                Some(crt) => self.apply_crt(crt),
+                None => eprintln!("surfcult: ignoring the stored CRT filter {text:?}"),
+            },
+            Ok(None) => {}
+            Err(e) => eprintln!("surfcult: cannot read the viewer's settings: {e}"),
+        }
+    }
+
+    /// Uses `crt` for everything drawn from now on: the watermark, the guide
+    /// and the menu here, and the banner in the player.
+    fn apply_crt(&mut self, crt: Crt) {
+        self.settings.crt = crt;
+        self.watermark_bitmaps.clear();
+        if let Err(e) = self.tuner.player_mut().set_crt(crt) {
+            eprintln!("surfcult: cannot set the banner's CRT filter: {e}");
+        }
+    }
+
+    /// A key while the menu is open. Returns whether the menu used it; a
+    /// key it does not use goes on to the usual handling.
+    fn menu_key(&mut self, key: Key, store: &mut Store) -> bool {
+        match key {
+            Key::Banner => {
+                let crt = next_crt(self.settings.crt);
+                self.apply_crt(crt);
+                if let Err(e) = store.set_viewer_setting(CRT_SETTING, &crt_name(crt).to_lowercase())
+                {
+                    eprintln!("surfcult: cannot store the CRT filter: {e}");
+                }
+                if let Some(menu) = self.menu.as_mut() {
+                    menu.stale = true;
+                }
+                true
+            }
+            // One setting so far: nothing to move between.
+            Key::Next | Key::Previous => true,
+            Key::Menu | Key::Back => {
+                self.close_menu();
+                true
+            }
+            // The guide key or a channel number closes the menu and does
+            // what it usually does.
+            Key::Guide | Key::Digit(_) => {
+                self.close_menu();
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Opens the Picture menu over the whole screen. The guide closes, the
+    /// banner goes, and the watermark hides while the menu is open.
+    fn open_menu(&mut self) {
+        self.close_guide();
+        self.menu = Some(Menu::new());
+        if self.banner_until_ms.take().is_some()
+            && let Err(e) = self.tuner.player_mut().clear_banner()
+        {
+            eprintln!("surfcult: cannot clear the banner: {e}");
+        }
+    }
+
+    /// Closes the menu, if it is open.
+    fn close_menu(&mut self) {
+        if self.menu.take().is_some()
+            && let Err(e) = self.tuner.player_mut().clear_overlay(MENU_LAYER)
+        {
+            eprintln!("surfcult: cannot clear the menu: {e}");
+        }
+    }
+
+    /// Draws the menu when it is open and has changed.
+    fn draw_menu(&mut self) {
+        let crt = self.settings.crt;
+        let Some(menu) = self.menu.as_mut().filter(|m| m.stale) else {
+            return;
+        };
+        let mut bitmap = paint::menu::draw(&menu.view(crt));
+        paint::crt::apply(&mut bitmap, crt);
+        menu.stale = false;
+        if let Err(e) = self.tuner.player_mut().show_overlay(MENU_LAYER, &bitmap) {
+            eprintln!("surfcult: cannot show the menu: {e}");
         }
     }
 
@@ -708,7 +814,7 @@ impl<P: Player, I: Input> Tv<P, I> {
         if !self.settings.watermark {
             return;
         }
-        let want = if self.driver.following() && self.guide.is_none() {
+        let want = if self.driver.following() && self.guide.is_none() && self.menu.is_none() {
             self.watermark.at(now_ms, self.driver.on_break())
         } else {
             None

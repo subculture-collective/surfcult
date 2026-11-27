@@ -2,7 +2,7 @@
 
 This is the design for surfcult's TV screens and web admin. The owner chose it on November 27, 2026 after four review rounds, recorded in the Studio study `studio/studies/2026-11-27-surfcult-screen-directions/` in `subcult-tv`.
 
-It is a specification. The drawing layer, the CRT pass, the SCTV watermark, the banner and the guide with its auto-scroll are built ([paint.md](../reference/paint.md), [run.md](../reference/run.md#the-guide)). The TV menu is not.
+It is a specification. The drawing layer, the CRT pass, the SCTV watermark, the banner, the guide with its auto-scroll and the Picture menu with the CRT setting are built ([paint.md](../reference/paint.md), [run.md](../reference/run.md#the-guide)). The web admin is not.
 
 ## Decisions
 
@@ -101,12 +101,7 @@ The watermark is the station bug, in the top-right corner of every channel. It i
 
 ## Settings
 
-The TV's Picture menu and the web admin both offer:
-
-| Setting | Values | Default |
-| --- | --- | --- |
-| CRT filter | Heavy, Light, Off | Heavy |
-| Guide auto-scroll after | a number of seconds | 5 |
+The TV's Picture menu (the menu key) offers the CRT filter: Heavy (the default), Light or Off. The remote has no left or right keys, so OK steps to the next level. The choice is stored and outlives a restart; until the viewer chooses, `SURFCULT_CRT` sets the level. The guide's 5-second auto-scroll delay is fixed. The web admin, when it exists, should offer the same setting.
 
 ## Web admin
 

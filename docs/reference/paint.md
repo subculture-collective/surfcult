@@ -1,6 +1,6 @@
 # Drawing the interface
 
-The code is in `src/paint/`. It draws the TV's interface in the Cable Grid design ([cable-grid.md](../design/cable-grid.md)) into bitmaps the player shows as overlays, and runs the CRT pass on them. The SCTV watermark, the channel banner and the program guide draw with it.
+The code is in `src/paint/`. It draws the TV's interface in the Cable Grid design ([cable-grid.md](../design/cable-grid.md)) into bitmaps the player shows as overlays, and runs the CRT pass on them. The SCTV watermark, the channel banner, the program guide and the Picture menu draw with it.
 
 ## Canvas
 
@@ -67,6 +67,10 @@ Text that does not fit is cut with an ellipsis (`Font::fit`).
 
 The grid runs from 96 px to 1824 px across, inside the area a TV may cut off. Titles that do not fit are cut with an ellipsis, and a sliver of a cell gets no title. `paint::guide::draw_rows(rows)` draws every row in one bitmap at the grid's place, 92 px apart (`guide::PITCH`, a multiple of 4), so the guide can show four of them (`guide::VISIBLE`, 368 px) and scroll through the rest. `paint::guide::draw_clock(text)` draws the clock cell, in VCR OSD Mono, as its own small overlay at the head of the grid.
 
+## The menu
+
+`paint::menu::draw(&view)` draws a `MenuView` as a full-screen, opaque overlay, before the CRT pass: the violet field; the mark in yellow beside an ochre heading band with a slanted end (the title at 48 px); a bevelled list panel with a 76 px row per setting, its name on the left and its value on the right at 44 px, the focused row in the focus colour and yellow; a line under the list describing the focused setting; and the keys in VCR OSD Mono under a rule at the bottom.
+
 ## The mark
 
 `paint::mark::shapes()` is the Guide Wave with SC as its middle row, as one path on the 64-unit grid of `assets/brand/mark.svg`. The shapes run from (`mark::LEFT`, `mark::TOP`) = (9, 11) and are `mark::WIDTH` by `mark::HEIGHT` = 47 by 42 units.
@@ -86,4 +90,4 @@ Both are white with a black shadow at 50% alpha, 3 px right and down. The bug's 
 
 ## Tests
 
-`src/paint/tests.rs` checks the fonts, text placement and shadows, bevels, gradients, the overlay's byte order, and the pass: Off, transparency, the scanline rows and their phase, Heavy against Light, glow reach, the colour fringe and premultiplied output; the mark's bounds, the watermark's size, position and clear margin, fading, the banner's place and a long title cut with an ellipsis. With `SURFCULT_PAINT_PREVIEW=<dir>`, `cargo test --lib paint::tests::preview` also writes a sample drawing as `paint-flat.png`, `paint-heavy.png` and `paint-light.png` to look at, and `paint::tests::preview_watermark` writes both watermark forms over a sample picture with the pass at Heavy and Off, `paint::tests::preview_banner` writes the banner, and `paint::tests::preview_guide` writes the guide over a picture in the video's quarter.
+`src/paint/tests.rs` checks the fonts, text placement and shadows, bevels, gradients, the overlay's byte order, and the pass: Off, transparency, the scanline rows and their phase, Heavy against Light, glow reach, the colour fringe and premultiplied output; the mark's bounds, the watermark's size, position and clear margin, fading, the banner's place and a long title cut with an ellipsis. With `SURFCULT_PAINT_PREVIEW=<dir>`, `cargo test --lib paint::tests::preview` also writes a sample drawing as `paint-flat.png`, `paint-heavy.png` and `paint-light.png` to look at, and `paint::tests::preview_watermark` writes both watermark forms over a sample picture with the pass at Heavy and Off, `paint::tests::preview_banner` writes the banner, `paint::tests::preview_guide` writes the guide over a picture in the video's quarter, and `paint::tests::preview_menu` writes the menu.

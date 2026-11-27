@@ -37,6 +37,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "substitutions",
         sql: include_str!("../../migrations/0005_substitutions.sql"),
     },
+    Migration {
+        version: 6,
+        name: "viewer_settings",
+        sql: include_str!("../../migrations/0006_viewer_settings.sql"),
+    },
 ];
 
 /// Applies the migrations the database has not seen yet. Each one runs in its

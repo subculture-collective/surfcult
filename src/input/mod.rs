@@ -33,9 +33,9 @@ pub enum Key {
     Banner,
     /// A digit of a channel number being entered.
     Digit(u8),
-    /// Go back: closes the guide.
+    /// Go back: closes the guide or the menu.
     Back,
-    /// Open the menu. The run loop ignores it for now.
+    /// Open or close the Picture menu.
     Menu,
     /// Open or close the guide.
     Guide,
