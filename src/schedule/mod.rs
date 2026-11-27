@@ -22,8 +22,23 @@
 //! may run past the end, and a program cut by breaks is always written whole,
 //! so a run ends on a program's last segment. Items with a runtime of 0 are
 //! skipped, and an item id that appears twice in the pool is used once (the
-//! first). Grids are later work; a channel's `grid` setting is ignored for
-//! now. A blocks channel differs: see "Blocks".
+//! first). A channel with a `grid` differs: see "Grids". A blocks channel
+//! differs too: see "Blocks".
+//!
+//! # Grids
+//!
+//! With `grid` set, a program starts only on a multiple of the grid in epoch
+//! time. When the last event ends off the grid (a program of another length,
+//! or the start of a run), the time to the next grid line is a gap, filled
+//! before the next program: whole clips from the break pool, then whole
+//! idents (`breaks.pad`), then whole clips from the `filler` pool, each pool
+//! walked once, a clip placed only if it fits in the time left. Time still
+//! left is one event as long as that time from the shortest ident at least
+//! that long (the longest if none is), else from the filler pool: one clip
+//! repeated as a last resort. Break clips advance the rotation and the repeat
+//! limit as a break does. With no clip at all the gap has no events and is
+//! counted in [`Note::DeadAir`]. A gap is cut where its block or stretch ends.
+//! Without `grid` nothing changes.
 //!
 //! # Breaks
 //!

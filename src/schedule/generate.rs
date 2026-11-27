@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::blocks::Span;
-use super::breaks::{BreakPlan, Rotation, cut_points, usable};
+use super::breaks::{BreakPlan, Piece, Rotation, cut_points, fill_gap, usable};
 use super::rng::{self, SplitMix64};
 use super::sign_off::Night;
 use super::{Generated, MAX_EVENTS, Note, ScheduleError};
@@ -19,6 +19,12 @@ pub(crate) struct Params<'a> {
     pub mode: Mode,
     /// `None` schedules each program whole, with no breaks.
     pub breaks: Option<BreakPlan<'a>>,
+    /// Programs start on multiples of this, in epoch time, and the gap before
+    /// each is filled. `None` runs programs back to back.
+    pub grid_ms: Option<u64>,
+    /// The channel's `filler` pool, which fills grid gaps after the break
+    /// pool and the idents.
+    pub filler: &'a [Clip],
 }
 
 /// One source's program pool and its weight.
@@ -54,6 +60,8 @@ impl<'a> Lane<'a> {
 pub(crate) struct Layout<'a> {
     pub channel: u32,
     pub breaks: Option<BreakPlan<'a>>,
+    /// As [`Params::grid_ms`].
+    pub grid_ms: Option<u64>,
     /// One lane per block, in config order, then the default's lane if there
     /// is one. A span's `block` indexes this list.
     pub lanes: Vec<Lane<'a>>,
@@ -114,6 +122,7 @@ pub(crate) fn generate(
     let layout = Layout {
         channel: params.channel,
         breaks: params.breaks,
+        grid_ms: params.grid_ms,
         lanes: vec![Lane {
             mode: params.mode,
             sources: sources.to_vec(),
@@ -124,7 +133,7 @@ pub(crate) fn generate(
             end_ms: i64::MAX,
             block: Some(0),
         }],
-        filler: &[],
+        filler: params.filler,
         nights: Vec::new(),
         sign_off: None,
     };
@@ -187,6 +196,7 @@ fn run(
         .collect();
     let stretches = stretches(&layout.spans, &span_lanes, &layout.nights);
     let filler = usable(layout.filler);
+    let idents = layout.breaks.as_ref().map(|plan| usable(plan.idents));
 
     let mut rotation = layout.breaks.as_ref().map(|plan| {
         (
@@ -283,6 +293,35 @@ fn run(
                     out.at_ms,
                 )
             });
+            // On a grid the time to the next grid line is filled first, cut at
+            // the end of the stretch.
+            if let Some(grid) = layout.grid_ms.filter(|grid| *grid > 0) {
+                let gap = grid_gap(out.at_ms, grid);
+                if gap > 0 {
+                    let pieces = fill_gap(
+                        rotation.as_mut().map(|(_, rotation)| rotation),
+                        idents.as_deref().unwrap_or(&[]),
+                        &filler,
+                        out.at_ms,
+                        gap,
+                    );
+                    if pieces.is_empty() {
+                        dead_air_ms += gap;
+                        out.at_ms = out
+                            .at_ms
+                            .saturating_add(i64::try_from(gap).unwrap_or(i64::MAX))
+                            .min(span.end_ms);
+                    } else {
+                        let dropped = push_pieces(&mut out, pieces, span.end_ms, &mut last_break)?;
+                        if dropped && let Some((_, rotation)) = rotation.as_mut() {
+                            rotation.continue_after(last_break.as_ref(), span.end_ms);
+                        }
+                    }
+                    if out.at_ms >= limit {
+                        break;
+                    }
+                }
+            }
             let picker = pickers[lane].as_mut().expect("the lane is playable");
             let item = picker.next(out.at_ms);
             let runtime = item.runtime_ms;
@@ -315,24 +354,7 @@ fn run(
                         runtime,
                         EventKind::Program,
                     )?;
-                    for piece in pieces {
-                        let piece_at = out.at_ms;
-                        let placed = out.push_until(
-                            cut_at,
-                            &piece.media_id,
-                            0,
-                            piece.length_ms,
-                            piece.media_duration_ms,
-                            piece.kind,
-                        )?;
-                        if piece.kind == EventKind::Break {
-                            if placed {
-                                last_break = Some((piece_at, piece.media_id));
-                            } else {
-                                dropped_break = true;
-                            }
-                        }
-                    }
+                    dropped_break |= push_pieces(&mut out, pieces, cut_at, &mut last_break)?;
                     segment_from = cut;
                 }
             }
@@ -400,6 +422,48 @@ fn run(
         cursor,
         notes,
     })
+}
+
+/// How far `at_ms` is before the next multiple of `grid_ms`, 0 on a grid line.
+fn grid_gap(at_ms: i64, grid_ms: u64) -> u64 {
+    let rem = i128::from(at_ms).rem_euclid(i128::from(grid_ms));
+    if rem == 0 {
+        0
+    } else {
+        // Both are below `grid_ms`, which is a u64.
+        u64::try_from(i128::from(grid_ms) - rem).unwrap_or(0)
+    }
+}
+
+/// Pushes a break's or gap's pieces, cut at `cut_at`, and records each break
+/// clip that plays in `last_break`. Returns whether a break clip was cut off
+/// entirely.
+fn push_pieces(
+    out: &mut Out,
+    pieces: Vec<Piece>,
+    cut_at: i64,
+    last_break: &mut Option<(i64, MediaId)>,
+) -> Result<bool, ScheduleError> {
+    let mut dropped = false;
+    for piece in pieces {
+        let piece_at = out.at_ms;
+        let placed = out.push_until(
+            cut_at,
+            &piece.media_id,
+            0,
+            piece.length_ms,
+            piece.media_duration_ms,
+            piece.kind,
+        )?;
+        if piece.kind == EventKind::Break {
+            if placed {
+                *last_break = Some((piece_at, piece.media_id));
+            } else {
+                dropped = true;
+            }
+        }
+    }
+    Ok(dropped)
 }
 
 /// Fills from `out.at_ms` up to `limit` with the filler pool's clips, cut at
