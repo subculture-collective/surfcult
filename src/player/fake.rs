@@ -56,6 +56,21 @@ pub enum Command {
         height: u32,
     },
     ClearOverlay(u8),
+    /// Part of an overlay: its place and full size, and the rows shown.
+    ShowOverlayRows {
+        id: u8,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        first_row: u32,
+        rows: u32,
+    },
+    ScrollOverlay {
+        id: u8,
+        first_row: u32,
+        rows: u32,
+    },
     ShowBanner(Banner),
     ClearBanner,
     SetVideoArea(VideoArea),
@@ -229,6 +244,32 @@ impl Player for FakePlayer {
 
     fn set_video_area(&mut self, area: VideoArea) -> Result<(), PlayerError> {
         self.record(Command::SetVideoArea(area))
+    }
+
+    fn show_overlay_rows(
+        &mut self,
+        id: u8,
+        overlay: &Overlay,
+        first_row: u32,
+        rows: u32,
+    ) -> Result<(), PlayerError> {
+        self.record(Command::ShowOverlayRows {
+            id,
+            x: overlay.x,
+            y: overlay.y,
+            width: overlay.width,
+            height: overlay.height,
+            first_row,
+            rows,
+        })
+    }
+
+    fn scroll_overlay(&mut self, id: u8, first_row: u32, rows: u32) -> Result<(), PlayerError> {
+        self.record(Command::ScrollOverlay {
+            id,
+            first_row,
+            rows,
+        })
     }
 
     fn poll_event(&mut self) -> Option<PlayerEvent> {

@@ -6,7 +6,8 @@
 //! top-right quarter is left clear, where the player draws the video
 //! ([`VideoArea::TopRight`](crate::player::VideoArea::TopRight)). The bottom
 //! half is the grid: a header of three half-hour slots, a date row, and
-//! [`ROWS`] channel rows. The clock cell at the head of the grid is a
+//! [`ROWS`] channel rows, drawn as their own overlay ([`draw_rows`]) so they
+//! can scroll. The clock cell at the head of the grid is a
 //! separate overlay ([`draw_clock`]), so the clock can tick without
 //! redrawing the whole guide.
 
@@ -31,6 +32,10 @@ const DATE_Y: f32 = 614.0;
 const DATE_H: f32 = 40.0;
 const ROWS_Y: f32 = 660.0;
 const ROW_H: f32 = 86.0;
+/// The distance from one row's top to the next's, a multiple of 4.
+pub const PITCH: u32 = 92;
+/// The height of the rows on screen.
+pub const VISIBLE: u32 = ROWS as u32 * PITCH;
 const EDGE: f32 = 3.0;
 const MARGIN: u32 = 16;
 
@@ -67,7 +72,7 @@ pub struct GuideView {
     pub slots: [String; 3],
     /// The date row's text.
     pub date: String,
-    /// The rows on screen, at most [`ROWS`].
+    /// Every channel's row, in order; [`draw_rows`] draws them.
     pub rows: Vec<GuideRow>,
 }
 
@@ -166,15 +171,37 @@ pub fn draw(view: &GuideView) -> Overlay {
         YELLOW,
     );
 
-    for (r, row) in view.rows.iter().take(ROWS).enumerate() {
-        let y = ROWS_Y + r as f32 * (ROW_H + GAP);
-        bevel(&mut c, GRID_X, y, CHANNEL_W, ROW_H, CELL);
+    // The video's quarter is cleared last, so nothing drawn above spills
+    // into it.
+    let mut o = c.to_overlay(0, 0);
+    let (qw, qh) = ((sw / 2.0) as usize, (sh / 2.0) as usize);
+    for y in 0..qh {
+        let start = (y * sw as usize + qw) * 4;
+        o.bgra[start..start + qw * 4].fill(0);
+    }
+    o
+}
+
+/// The channel rows, one under another, as one overlay with its top left
+/// at the first row's place on the screen. The guide shows [`VISIBLE`] rows
+/// of it at a time with `Player::show_overlay_rows` and scrolls through the
+/// rest with `Player::scroll_overlay`. Rows are [`PITCH`] pixels apart, a
+/// multiple of 4, so scrolling by whole rows keeps the CRT pass's scanlines
+/// on the screen's rows.
+pub fn draw_rows(rows: &[GuideRow]) -> Overlay {
+    let font = Font::archivo();
+    let slots_x = CHANNEL_W + GAP;
+    let slots_w = GRID_W - CHANNEL_W - GAP;
+    let mut c = Canvas::new(GRID_W as u32, (rows.len() as u32).max(1) * PITCH);
+    for (r, row) in rows.iter().enumerate() {
+        let y = r as f32 * PITCH as f32;
+        bevel(&mut c, 0.0, y, CHANNEL_W, ROW_H, CELL);
         centred(
             &mut c,
             &font,
             &format!("{:02}", row.number),
             32.0,
-            GRID_X,
+            0.0,
             CHANNEL_W,
             y + 38.0,
             YELLOW,
@@ -184,7 +211,7 @@ pub fn draw(view: &GuideView) -> Overlay {
             &font,
             &row.name,
             26.0,
-            GRID_X,
+            0.0,
             CHANNEL_W,
             y + 72.0,
             YELLOW,
@@ -230,15 +257,7 @@ pub fn draw(view: &GuideView) -> Overlay {
         }
     }
 
-    // The video's quarter is cleared last, so nothing drawn above spills
-    // into it.
-    let mut o = c.to_overlay(0, 0);
-    let (qw, qh) = ((sw / 2.0) as usize, (sh / 2.0) as usize);
-    for y in 0..qh {
-        let start = (y * sw as usize + qw) * 4;
-        o.bgra[start..start + qw * 4].fill(0);
-    }
-    o
+    c.to_overlay(GRID_X as i32, ROWS_Y as i32)
 }
 
 /// A continuation arrow at `x`, `y`, pointing left (`dir` -1) or right (1).

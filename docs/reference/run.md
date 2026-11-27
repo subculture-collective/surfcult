@@ -175,9 +175,19 @@ The guide key opens the program guide on the channel being watched ([paint.md](p
 - `guide` and `back` close it without tuning.
 - A digit closes it and starts a channel number as usual.
 
-The grid covers the current half hour and the two after it. The body is drawn in overlay layer 1 (`run::GUIDE_LAYER`) when the guide opens, when the focus moves and when a new half hour begins; the clock cell is a separate overlay in layer 2 (`GUIDE_CLOCK_LAYER`), redrawn each second. Both get the CRT pass at `SURFCULT_CRT`. Closing the guide, changing channel or a player restart removes both and gives the video the whole screen again.
+The grid covers the current half hour and the two after it. It is three overlays, each given the CRT pass at `SURFCULT_CRT`:
 
-Not built yet: scrolling on its own after 5 seconds without a key, and moving through time.
+| Layer | What | Drawn |
+| --- | --- | --- |
+| 1, `run::GUIDE_LAYER` | everything but the channel rows and the clock | when the guide opens, when the focus moves, and when a new half hour begins |
+| 2, `GUIDE_CLOCK_LAYER` | the clock cell | each second |
+| 3, `GUIDE_ROWS_LAYER` | every channel's row in one tall bitmap, with the first four again after the last | with layer 1; four rows of it show at a time (`Player::show_overlay_rows`) |
+
+After 5 seconds without a key (`run::guide::IDLE_MS`), the rows scroll upward on their own: every 100 ms the player shows the bitmap from 4 pixel rows further down (`Player::scroll_overlay`), without drawing or sending it again, and after the last channel the first comes round again. Rows are 92 pixels apart and steps are 4, so the scanlines stay on the screen's rows. The next key only stops the scroll and puts the rows back where the focus is; the wait starts again from that key. Four channels or fewer fit on screen and never scroll.
+
+Closing the guide, changing channel or a player restart removes all three layers and gives the video the whole screen again.
+
+Not built yet: moving through time, which needs left and right keys.
 
 ## The watermark
 
@@ -209,6 +219,6 @@ A program that never starts and never fails, such as a transcode that hangs, kee
 
 ## Tests
 
-`src/run/tests.rs` drives the loop with a virtual clock, a `FakePlayer` wrapped so single programs can fail as a Jellyfin error would, or all of them as a Jellyfin outage would, a `FakeInput`, an in-memory store whose library cache is the media source, and clip pools scanned from a temporary directory with a fake prober. They cover wrapping channel changes, the commands of a tune, returning to a channel at its live position, a program cut by breaks, a stale queue, gaps and off-air time, the banner and its timeout, an unplayable program with and without a filler pool, a program that fails twice on screen, a Jellyfin outage with a break in it and its recovery, a refused tune, a player restart, an unresolvable source at startup, the clock slate until the clock is trusted, the watermark's hold, fade, break form and channel change, and the guide: opening it, the clock's own layer, moving the focus, tuning with OK, closing with Back, the banner going and the watermark hiding. The existing tests run with the watermark off (`Settings::watermark`) so their command lists stay exact; `Rig::watermarked` turns it on. `src/input/evdev.rs` tests parsing `input_event` bytes and `/proc/bus/input/devices`, and `src/input/keymap.rs` the key names, the defaults and the `[keys]` overrides. The loop tests also cover number entry: one digit after the wait, two digits at once, an unknown number and a channel key during entry. The stream resolver is tested against recorded Jellyfin responses. A real MPV test (skipped without `mpv`) checks that MPV accepts `play_program`, `queue_clip` and the banner's overlay.
+`src/run/tests.rs` drives the loop with a virtual clock, a `FakePlayer` wrapped so single programs can fail as a Jellyfin error would, or all of them as a Jellyfin outage would, a `FakeInput`, an in-memory store whose library cache is the media source, and clip pools scanned from a temporary directory with a fake prober. They cover wrapping channel changes, the commands of a tune, returning to a channel at its live position, a program cut by breaks, a stale queue, gaps and off-air time, the banner and its timeout, an unplayable program with and without a filler pool, a program that fails twice on screen, a Jellyfin outage with a break in it and its recovery, a refused tune, a player restart, an unresolvable source at startup, the clock slate until the clock is trusted, the watermark's hold, fade, break form and channel change, and the guide: opening it, the clock's own layer, moving the focus, tuning with OK, closing with Back, the banner going, the watermark hiding, and the rows shown from their tall bitmap (three channels, which never scroll). The scroll itself, its loop and a key stopping it are tested in `src/run/guide.rs`. The existing tests run with the watermark off (`Settings::watermark`) so their command lists stay exact; `Rig::watermarked` turns it on. `src/input/evdev.rs` tests parsing `input_event` bytes and `/proc/bus/input/devices`, and `src/input/keymap.rs` the key names, the defaults and the `[keys]` overrides. The loop tests also cover number entry: one digit after the wait, two digits at once, an unknown number and a channel key during entry. The stream resolver is tested against recorded Jellyfin responses. A real MPV test (skipped without `mpv`) checks that MPV accepts `play_program`, `queue_clip` and the banner's overlay.
 
 Not tested here: the remote, the TV, Jellyfin, the look of the banner and the slates on the Pi, and what MPV reports for a missing file or a Jellyfin that goes away mid-program. That is the owner's check: change channels across three channels and compare each with `surfcult now`.

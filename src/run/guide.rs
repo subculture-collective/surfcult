@@ -5,6 +5,12 @@
 //! on a channel; its program on now (or its first program in the window) is
 //! the focused cell, and the info panel describes it. The rows on screen
 //! follow the focus.
+//!
+//! After [`IDLE_MS`] without a key, the rows scroll upward on their own, 4
+//! pixel rows every [`SCROLL_EVERY_MS`], and loop. The next key stops the
+//! scroll and puts the rows back where the focus is; the key does nothing
+//! else. Scrolling moves the player's offset into one tall bitmap of every
+//! row ([`Guide::top_row`]), so nothing is drawn again.
 
 use chrono::{Datelike, TimeZone, Timelike};
 
@@ -12,13 +18,20 @@ use crate::config::{Channel, Tz};
 use crate::guide::{self, Window};
 use crate::library::{MediaKind, MediaSource};
 use crate::overlay::{clock, program_title};
-use crate::paint::guide::{GuideCell, GuideRow, GuideView, ROWS};
+use crate::paint::guide::{GuideCell, GuideRow, GuideView, PITCH, ROWS};
 use crate::store::Store;
 
 /// The time each of the guide's three slots covers.
 pub const SLOT_MS: i64 = 30 * 60 * 1000;
 /// The time the whole grid covers.
 pub const SPAN_MS: i64 = 3 * SLOT_MS;
+/// How long the guide waits without a key before it scrolls.
+pub const IDLE_MS: i64 = 5_000;
+/// How often a scroll step comes.
+pub const SCROLL_EVERY_MS: i64 = 100;
+/// The pixel rows a scroll step moves: a multiple of 4, so the CRT pass's
+/// scanlines stay on the screen's rows.
+pub const SCROLL_STEP: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Guide {
@@ -30,16 +43,23 @@ pub(super) struct Guide {
     pub(super) drawn_for: Option<i64>,
     /// The clock text last drawn.
     pub(super) clock_drawn: Option<String>,
+    /// The bitmap row the rows overlay starts at on screen now.
+    pub(super) shown_row: Option<u32>,
+    /// When the last key came, or the guide opened.
+    idle_since_ms: i64,
 }
 
 impl Guide {
-    /// A guide with the focus on channel `index` of `count`.
-    pub(super) fn new(index: usize, count: usize) -> Self {
+    /// A guide opened at `now_ms` with the focus on channel `index` of
+    /// `count`.
+    pub(super) fn new(index: usize, count: usize, now_ms: i64) -> Self {
         let mut guide = Self {
             focus: index.min(count.saturating_sub(1)),
             first: 0,
             drawn_for: None,
             clock_drawn: None,
+            shown_row: None,
+            idle_since_ms: now_ms,
         };
         guide.follow(count);
         guide
@@ -47,6 +67,35 @@ impl Guide {
 
     pub(super) fn focus(&self) -> usize {
         self.focus
+    }
+
+    /// Whether the rows are scrolling on their own at `now_ms`. Fewer
+    /// channels than fit on screen never scroll.
+    pub(super) fn scrolling(&self, now_ms: i64, count: usize) -> bool {
+        count > ROWS && now_ms - self.idle_since_ms >= IDLE_MS
+    }
+
+    /// A key came at `now_ms`. Returns whether the rows were scrolling, in
+    /// which case the key only stops them.
+    pub(super) fn touch(&mut self, now_ms: i64, count: usize) -> bool {
+        let was = self.scrolling(now_ms, count);
+        self.idle_since_ms = now_ms;
+        was
+    }
+
+    /// The bitmap row the rows overlay should start at on screen at
+    /// `now_ms`: the focus's rows, or where the scroll has got to. The
+    /// bitmap holds every channel's row and then the first [`ROWS`] again, so
+    /// the loop has no seam.
+    pub(super) fn top_row(&self, now_ms: i64, count: usize) -> u32 {
+        let rest = self.first as u32 * PITCH;
+        if !self.scrolling(now_ms, count) {
+            return rest;
+        }
+        let steps = (now_ms - self.idle_since_ms - IDLE_MS) / SCROLL_EVERY_MS;
+        let moved = u64::try_from(steps).unwrap_or(0) * u64::from(SCROLL_STEP);
+        let loop_len = u64::from(count as u32 * PITCH);
+        ((u64::from(rest) + moved) % loop_len) as u32
     }
 
     /// Moves the focus one row up (`up`) or down, stopping at the ends.
@@ -85,13 +134,14 @@ impl Guide {
             from_ms: from,
             to_ms: from + SPAN_MS,
         };
+        // Every channel, and the first ROWS again after them for the loop.
+        let repeat = if channels.len() > ROWS { ROWS } else { 0 };
         let on_screen: Vec<&Channel> = channels
             .iter()
-            .skip(self.first)
-            .take(ROWS)
+            .chain(channels.iter().take(repeat))
             .copied()
             .collect();
-        let numbers: Vec<u32> = on_screen.iter().map(|c| c.number).collect();
+        let numbers: Vec<u32> = channels.iter().map(|c| c.number).collect();
         let built = guide::build(store, store, &numbers, window).unwrap_or_default();
         let focus_number = channels.get(self.focus).map(|c| c.number);
         let mut info_title = String::new();
@@ -215,7 +265,7 @@ mod tests {
 
     #[test]
     fn the_focus_stops_at_the_ends_and_the_rows_follow_it() {
-        let mut g = Guide::new(0, 6);
+        let mut g = Guide::new(0, 6, 0);
         assert_eq!((g.focus, g.first), (0, 0));
         assert!(!g.step(true, 6), "already at the top");
         for _ in 0..4 {
@@ -236,10 +286,10 @@ mod tests {
     #[test]
     fn opening_on_a_low_channel_fills_the_screen() {
         // The focus on the last of six channels shows the last four.
-        let g = Guide::new(5, 6);
+        let g = Guide::new(5, 6, 0);
         assert_eq!((g.focus, g.first), (5, 2));
         // Fewer channels than rows start at the top.
-        let g = Guide::new(2, 3);
+        let g = Guide::new(2, 3, 0);
         assert_eq!((g.focus, g.first), (2, 0));
     }
 
@@ -249,5 +299,52 @@ mod tests {
         assert_eq!(window_start(10 * half + 1), 10 * half);
         assert_eq!(window_start(10 * half), 10 * half);
         assert_eq!(clock_with_seconds(3_723_000, Tz::UTC), "01:02:03");
+    }
+
+    #[test]
+    fn the_rows_scroll_after_five_seconds_without_a_key_and_loop() {
+        let count = 6;
+        let g = Guide::new(0, count, 1_000);
+        assert_eq!(g.top_row(5_999, count), 0);
+        assert!(!g.scrolling(5_999, count));
+        assert!(g.scrolling(6_000, count));
+        assert_eq!(g.top_row(6_099, count), 0);
+        assert_eq!(g.top_row(6_100, count), SCROLL_STEP);
+        assert_eq!(g.top_row(7_000, count), 10 * SCROLL_STEP);
+        // Six rows of 92 pixels loop after 552 pixel rows: 138 steps.
+        let loop_len = count as u32 * PITCH;
+        assert_eq!(loop_len / SCROLL_STEP, 138);
+        assert_eq!(g.top_row(6_000 + 138 * SCROLL_EVERY_MS, count), 0);
+        assert_eq!(g.top_row(6_000 + 139 * SCROLL_EVERY_MS, count), SCROLL_STEP);
+    }
+
+    #[test]
+    fn a_key_stops_the_scroll_and_the_wait_starts_again() {
+        let count = 6;
+        let mut g = Guide::new(0, count, 0);
+        assert!(!g.touch(4_000, count), "not scrolling yet");
+        assert!(!g.scrolling(8_999, count));
+        assert!(g.touch(9_500, count), "the key stops the scroll");
+        assert_eq!(g.top_row(9_500, count), 0, "back where the focus is");
+        assert_eq!(g.top_row(14_499, count), 0);
+        assert!(g.scrolling(14_500, count));
+    }
+
+    #[test]
+    fn a_scroll_starts_from_the_rows_the_focus_put_on_screen() {
+        let count = 6;
+        let mut g = Guide::new(0, count, 0);
+        for _ in 0..5 {
+            g.step(false, count);
+        }
+        assert_eq!(g.top_row(0, count), 2 * PITCH);
+        assert_eq!(g.top_row(5_100, count), 2 * PITCH + SCROLL_STEP);
+    }
+
+    #[test]
+    fn four_channels_or_fewer_never_scroll() {
+        let g = Guide::new(0, ROWS, 0);
+        assert!(!g.scrolling(60_000, ROWS));
+        assert_eq!(g.top_row(60_000, ROWS), 0);
     }
 }

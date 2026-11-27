@@ -92,6 +92,7 @@ mod ipc;
 #[cfg(test)]
 mod tests;
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs;
@@ -376,6 +377,9 @@ pub struct MpvPlayer<R> {
     /// The text of the card shown last: [`MpvConfig::standby_text`] or a
     /// slate's.
     card_text: String,
+    /// The place and full size of the bitmap each overlay layer shows, for
+    /// scrolling it.
+    overlays: HashMap<u8, (i32, i32, u32, u32)>,
 }
 
 impl<R> MpvPlayer<R> {
@@ -387,6 +391,8 @@ impl<R> MpvPlayer<R> {
     /// Kills MPV and forgets the connection. The next poll starts a new one.
     fn shut_down(&mut self) {
         self.session = None;
+        // A new MPV starts with no overlays.
+        self.overlays.clear();
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -444,6 +450,7 @@ impl<R: StreamResolver> MpvPlayer<R> {
         }
         let mut player = Self {
             card_text: config.standby_text.clone(),
+            overlays: HashMap::new(),
             config,
             resolver,
             child: None,
@@ -695,18 +702,45 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
     }
 
     fn show_overlay(&mut self, id: u8, overlay: &Overlay) -> Result<(), PlayerError> {
+        self.show_overlay_rows(id, overlay, 0, overlay.height)
+    }
+
+    fn show_overlay_rows(
+        &mut self,
+        id: u8,
+        overlay: &Overlay,
+        first_row: u32,
+        rows: u32,
+    ) -> Result<(), PlayerError> {
         check_overlay(id, overlay)?;
+        check_rows(overlay.height, first_row, rows)?;
         let file = self.write_overlay(id, overlay)?;
+        self.overlays
+            .insert(id, (overlay.x, overlay.y, overlay.width, overlay.height));
         self.with_session(|s| {
-            s.overlay_add(
+            s.overlay_add_rows(
                 id,
                 overlay.x,
                 overlay.y,
                 &file,
                 overlay.width,
-                overlay.height,
+                first_row,
+                rows,
             )
         })
+    }
+
+    fn scroll_overlay(&mut self, id: u8, first_row: u32, rows: u32) -> Result<(), PlayerError> {
+        let &(x, y, width, height) = self.overlays.get(&id).ok_or_else(|| {
+            PlayerError::new(format!("overlay layer {id} shows nothing to scroll"))
+        })?;
+        check_rows(height, first_row, rows)?;
+        let file = self
+            .overlay_file(id)
+            .into_os_string()
+            .into_string()
+            .map_err(|_| PlayerError::new("the runtime directory is not UTF-8"))?;
+        self.with_session(|s| s.overlay_add_rows(id, x, y, &file, width, first_row, rows))
     }
 
     fn clear_overlay(&mut self, id: u8) -> Result<(), PlayerError> {
@@ -720,6 +754,7 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
                 "overlay layer {id} is the banner's"
             )));
         }
+        self.overlays.remove(&id);
         self.with_session(|s| s.overlay_remove(id))
     }
 
@@ -789,6 +824,18 @@ fn prepare_runtime_dir(dir: &Path) -> Result<(), PlayerError> {
             "the runtime directory {} is open to other users (mode {:o}); it must be 700",
             dir.display(),
             mode & 0o777
+        )));
+    }
+    Ok(())
+}
+
+/// Checks that rows `first_row` to `first_row + rows` lie in a bitmap
+/// `height` rows tall, and that there is at least one.
+fn check_rows(height: u32, first_row: u32, rows: u32) -> Result<(), PlayerError> {
+    if rows == 0 || first_row.checked_add(rows).is_none_or(|end| end > height) {
+        return Err(PlayerError::new(format!(
+            "rows {first_row} to {} are not in an overlay {height} rows tall",
+            first_row.saturating_add(rows)
         )));
     }
     Ok(())

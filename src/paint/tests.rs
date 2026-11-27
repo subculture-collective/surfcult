@@ -546,13 +546,15 @@ fn preview_guide() {
     crt::apply(&mut body, Crt::Heavy);
     let mut clock = super::guide::draw_clock("21:16:20");
     crt::apply(&mut clock, Crt::Heavy);
+    let mut rows = super::guide::draw_rows(&sample_guide().rows);
+    crt::apply(&mut rows, Crt::Heavy);
     // The picture: a sunset in the top-right quarter, black elsewhere.
     let mut scene = Canvas::new(1920, 1080);
     scene.fill_rect(0.0, 0.0, 1920.0, 1080.0, Rgba::hex(0x000000));
     let (top, bottom) = (Rgba::hex(0xff9a5a), Rgba::hex(0x1f5f8f));
     scene.fill_gradient(960.0, 0.0, 960.0, 540.0, top, bottom);
     let mut rgba = scene.to_overlay(0, 0).bgra;
-    for o in [&body, &clock] {
+    for o in [&body, &clock, &rows] {
         for y in 0..o.height {
             for x in 0..o.width {
                 let s = ((y * o.width + x) * 4) as usize;
@@ -574,4 +576,16 @@ fn preview_guide() {
     let png = tiny_skia::Pixmap::from_vec(rgba, size).unwrap();
     let file = std::path::PathBuf::from(dir).join("guide-heavy.png");
     std::fs::write(file, png.encode_png().unwrap()).unwrap();
+}
+
+#[test]
+fn the_rows_are_one_bitmap_92_pixels_a_row_at_the_grid() {
+    use super::guide::{PITCH, VISIBLE, draw_rows};
+    let rows = draw_rows(&sample_guide().rows);
+    assert_eq!((rows.x, rows.y, rows.width), (96, 660, 1728));
+    assert_eq!(rows.height, 4 * PITCH);
+    assert_eq!(VISIBLE, 4 * PITCH);
+    assert_eq!(PITCH % 4, 0, "scrolling by whole rows keeps the scanlines");
+    assert_eq!(rows.y % 4, 0);
+    assert!(premultiplied(&rows));
 }
