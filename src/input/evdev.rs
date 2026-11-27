@@ -417,7 +417,7 @@ H: Handlers=event3
         assert_eq!(remote(KEY_OK), Some(Key::Banner));
         assert_eq!(remote(KEY_ENTER), Some(Key::Banner));
         assert_eq!(remote(KEY_I), Some(Key::Banner));
-        assert_eq!(remote(105), None); // KEY_LEFT
+        assert_eq!(remote(168), None); // KEY_REWIND
         assert_eq!(remote(KEY_PAGEUP), Some(Key::Next));
         assert_eq!(remote(KEY_5), Some(Key::Digit(5)));
         // Q quits from a keyboard only.

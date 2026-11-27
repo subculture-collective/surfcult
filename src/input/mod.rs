@@ -45,6 +45,10 @@ pub enum Key {
     VolumeUp,
     /// Volume down. The run loop ignores it for now.
     VolumeDown,
+    /// Left: earlier in the guide.
+    Left,
+    /// Right: later in the guide.
+    Right,
     /// Stop surfcult.
     Quit,
 }

@@ -59,7 +59,7 @@ mod watermark;
 
 use std::collections::HashMap;
 
-use guide::{Guide, clock_with_seconds, window_start};
+use guide::{Guide, clock_with_seconds};
 use menu::{CRT_SETTING, Menu, crt_name, next_crt};
 use watermark::Watermark;
 
@@ -425,7 +425,7 @@ impl<P: Player, I: Input> Tv<P, I> {
             // Not used yet: the menu and the volume come later.
             Key::Menu => self.open_menu(),
             // Not used yet: the volume comes later.
-            Key::Back | Key::Mute | Key::VolumeUp | Key::VolumeDown => {}
+            Key::Back | Key::Mute | Key::VolumeUp | Key::VolumeDown | Key::Left | Key::Right => {}
         }
     }
 
@@ -684,6 +684,14 @@ impl<P: Player, I: Input> Tv<P, I> {
                 }
                 true
             }
+            Key::Left | Key::Right => {
+                if let Some(guide) = self.guide.as_mut()
+                    && guide.shift(key == Key::Right)
+                {
+                    guide.drawn_for = None;
+                }
+                true
+            }
             Key::Banner => {
                 let target = self
                     .guide
@@ -759,7 +767,7 @@ impl<P: Player, I: Input> Tv<P, I> {
         };
         let timezone = self.config.timezone;
         let crt = self.settings.crt;
-        let from = window_start(now_ms);
+        let from = guide.from(now_ms);
         if guide.drawn_for != Some(from) {
             let channels: Vec<&Channel> = self
                 .numbers
