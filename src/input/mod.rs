@@ -33,11 +33,11 @@ pub enum Key {
     Banner,
     /// A digit of a channel number being entered.
     Digit(u8),
-    /// Go back. The run loop ignores it for now.
+    /// Go back: closes the guide.
     Back,
     /// Open the menu. The run loop ignores it for now.
     Menu,
-    /// Open the guide. The run loop ignores it for now.
+    /// Open or close the guide.
     Guide,
     /// Mute. The run loop ignores it for now.
     Mute,

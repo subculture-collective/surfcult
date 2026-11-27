@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use super::{Overlay, Player, PlayerError, PlayerEvent, Slate};
+use super::{Overlay, Player, PlayerError, PlayerEvent, Slate, VideoArea};
 use crate::library::MediaId;
 use crate::overlay::Banner;
 
@@ -58,6 +58,7 @@ pub enum Command {
     ClearOverlay(u8),
     ShowBanner(Banner),
     ClearBanner,
+    SetVideoArea(VideoArea),
 }
 
 /// A command and the virtual time it was issued.
@@ -224,6 +225,10 @@ impl Player for FakePlayer {
 
     fn clear_banner(&mut self) -> Result<(), PlayerError> {
         self.record(Command::ClearBanner)
+    }
+
+    fn set_video_area(&mut self, area: VideoArea) -> Result<(), PlayerError> {
+        self.record(Command::SetVideoArea(area))
     }
 
     fn poll_event(&mut self) -> Option<PlayerEvent> {

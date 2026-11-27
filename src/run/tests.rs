@@ -19,7 +19,7 @@ use crate::config::Tz;
 use crate::input::FakeInput;
 use crate::library::{AudioStream, Collection, MediaId, MediaKind, VideoStream};
 use crate::overlay::{Banner, clock};
-use crate::player::{Command, FakePlayer, Overlay, PlayerError, Slate, VirtualClock};
+use crate::player::{Command, FakePlayer, Overlay, PlayerError, Slate, VideoArea, VirtualClock};
 use crate::store::{LibraryEntry, Substitution};
 use crate::timeline::{Event, EventKind};
 
@@ -95,6 +95,9 @@ impl Player for TestPlayer {
     }
     fn clear_banner(&mut self) -> Result<(), PlayerError> {
         self.fake.clear_banner()
+    }
+    fn set_video_area(&mut self, area: VideoArea) -> Result<(), PlayerError> {
+        self.fake.set_video_area(area)
     }
     fn poll_event(&mut self) -> Option<PlayerEvent> {
         self.fake.poll_event()
@@ -252,6 +255,8 @@ impl Rig {
             Box::new(move || trust.get()),
             Settings {
                 watermark,
+                // The pass has its own tests; in a debug build it is slow.
+                crt: Crt::Off,
                 ..Settings::default()
             },
         );
@@ -1065,7 +1070,6 @@ fn keys_without_a_use_yet_do_nothing() {
     for key in [
         Key::Back,
         Key::Menu,
-        Key::Guide,
         Key::Mute,
         Key::VolumeUp,
         Key::VolumeDown,
@@ -1160,4 +1164,140 @@ fn the_watermark_is_off_when_the_settings_say_so() {
     rig.start();
     let live = rig.go_live(T);
     assert_eq!(watermark(&live), []);
+}
+
+/// The guide's commands: its layers shown or cleared, and the video area.
+fn guide_commands(commands: &[Command]) -> Vec<Command> {
+    commands
+        .iter()
+        .filter(|c| match c {
+            Command::ShowOverlay { id, .. } | Command::ClearOverlay(id) => {
+                *id == GUIDE_LAYER || *id == GUIDE_CLOCK_LAYER
+            }
+            Command::SetVideoArea(_) => true,
+            _ => false,
+        })
+        .cloned()
+        .collect()
+}
+
+fn shown(layer: u8, commands: &[Command]) -> usize {
+    commands
+        .iter()
+        .filter(|c| matches!(c, Command::ShowOverlay { id, .. } if *id == layer))
+        .count()
+}
+
+#[test]
+fn the_guide_key_opens_the_guide_with_the_video_in_the_corner() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.step(T + 9_000);
+    rig.take();
+    rig.press(Key::Guide, T + 10_000);
+    let commands = rig.take();
+    let guide = guide_commands(&commands);
+    assert_eq!(guide[0], Command::SetVideoArea(VideoArea::TopRight));
+    assert_eq!(
+        guide[1],
+        Command::ShowOverlay {
+            id: GUIDE_LAYER,
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080
+        }
+    );
+    assert_eq!(shown(GUIDE_CLOCK_LAYER, &commands), 1);
+    // The clock ticks on its own layer; the body is not drawn again.
+    rig.step(T + 10_500);
+    assert_eq!(guide_commands(&rig.take()), []);
+    rig.step(T + 11_000);
+    let tick = rig.take();
+    assert_eq!(shown(GUIDE_CLOCK_LAYER, &tick), 1);
+    assert_eq!(shown(GUIDE_LAYER, &tick), 0);
+}
+
+#[test]
+fn up_and_down_move_the_focus_and_ok_tunes_the_focused_channel() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.press(Key::Guide, T + 10_000);
+    rig.take();
+    // The focus starts on channel 3, the top row: Up does nothing.
+    rig.press(Key::Next, T + 10_200);
+    assert_eq!(shown(GUIDE_LAYER, &rig.take()), 0);
+    rig.press(Key::Previous, T + 10_400);
+    assert_eq!(shown(GUIDE_LAYER, &rig.take()), 1);
+    rig.press(Key::Previous, T + 10_600);
+    rig.take();
+    assert_eq!(rig.tv.channel(), Some(3), "moving the focus does not tune");
+    rig.press(Key::Banner, T + 11_000);
+    let commands = rig.take();
+    assert_eq!(
+        guide_commands(&commands),
+        [
+            Command::ClearOverlay(GUIDE_LAYER),
+            Command::ClearOverlay(GUIDE_CLOCK_LAYER),
+            Command::SetVideoArea(VideoArea::Full),
+        ]
+    );
+    assert!(commands.contains(&Command::ShowStatic), "{commands:?}");
+    assert_eq!(rig.tv.channel(), Some(7));
+}
+
+#[test]
+fn back_closes_the_guide_without_tuning() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.press(Key::Guide, T + 10_000);
+    rig.press(Key::Previous, T + 10_200);
+    rig.take();
+    rig.press(Key::Back, T + 11_000);
+    let commands = rig.take();
+    assert_eq!(
+        guide_commands(&commands),
+        [
+            Command::ClearOverlay(GUIDE_LAYER),
+            Command::ClearOverlay(GUIDE_CLOCK_LAYER),
+            Command::SetVideoArea(VideoArea::Full),
+        ]
+    );
+    assert!(!commands.contains(&Command::ShowStatic));
+    assert_eq!(rig.tv.channel(), Some(3));
+    // Up and Down change channel again once the guide is closed.
+    rig.press(Key::Next, T + 12_000);
+    assert_eq!(rig.tv.channel(), Some(5));
+}
+
+#[test]
+fn opening_the_guide_takes_the_banner_away() {
+    let mut rig = Rig::new();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.take();
+    rig.press(Key::Guide, T + 3_000);
+    let commands = rig.take();
+    assert!(commands.contains(&Command::ClearBanner), "{commands:?}");
+    // The banner's timeout has nothing left to clear.
+    rig.step(T + 20_000);
+    assert!(!rig.take().contains(&Command::ClearBanner));
+}
+
+#[test]
+fn the_watermark_hides_while_the_guide_is_open() {
+    let mut rig = Rig::watermarked();
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.take();
+    rig.press(Key::Guide, T + 2_000);
+    assert_eq!(watermark(&rig.take()), [None]);
 }

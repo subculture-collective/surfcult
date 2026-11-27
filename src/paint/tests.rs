@@ -467,3 +467,111 @@ fn preview_banner() {
         std::fs::write(file, png.encode_png().unwrap()).unwrap();
     }
 }
+
+fn sample_guide() -> super::guide::GuideView {
+    use super::guide::{GuideCell, GuideRow, GuideView};
+    let cell = |title: &str, left: f32, right: f32, movie: bool, focused: bool| GuideCell {
+        title: title.into(),
+        left,
+        right,
+        continues_before: left < 0.0,
+        continues_after: right > 1.0,
+        movie,
+        focused,
+    };
+    GuideView {
+        info: [
+            "Matinee".into(),
+            "“The Long Coast (1987)”".into(),
+            "Saturday".into(),
+            "Channel 4".into(),
+        ],
+        slots: ["21:00".into(), "21:30".into(), "22:00".into()],
+        date: "Saturday November 28".into(),
+        rows: vec![
+            GuideRow {
+                number: 2,
+                name: "TOONS".into(),
+                cells: vec![
+                    cell("The Inkwell Hour", 0.0, 0.333, false, false),
+                    cell("Static Pals", 0.333, 1.0, false, false),
+                ],
+            },
+            GuideRow {
+                number: 3,
+                name: "RIFF".into(),
+                cells: vec![cell("Video Jukebox", -0.5, 1.5, false, false)],
+            },
+            GuideRow {
+                number: 4,
+                name: "MATINEE".into(),
+                cells: vec![
+                    cell("The Long Coast (1987)", -0.3, 0.94, true, true),
+                    cell("Night Matinee", 0.94, 2.0, true, false),
+                ],
+            },
+            GuideRow {
+                number: 5,
+                name: "LAFF TRACK".into(),
+                cells: vec![
+                    cell("Roommates 2×04", 0.0, 0.333, false, false),
+                    cell("Roommates 2×05", 0.333, 0.667, false, false),
+                    cell("Corner Store", 0.667, 1.0, false, false),
+                ],
+            },
+        ],
+    }
+}
+
+#[test]
+fn the_guide_leaves_the_top_right_quarter_clear_for_the_video() {
+    let o = super::guide::draw(&sample_guide());
+    assert_eq!((o.x, o.y, o.width, o.height), (0, 0, 1920, 1080));
+    assert_eq!(at(&o, 1400, 270)[3], 0, "the video's quarter");
+    assert_eq!(at(&o, 400, 270)[3], 255, "the info panel");
+    assert_eq!(at(&o, 1400, 800)[3], 255, "the grid");
+    assert!(premultiplied(&o));
+    let clock = super::guide::draw_clock("21:16:20");
+    assert_eq!((clock.x, clock.y), (96 - 16, 556 - 16));
+}
+
+/// Writes the guide over a sample picture to `SURFCULT_PAINT_PREVIEW`, as
+/// the TV would show it, with the pass at Heavy.
+#[test]
+fn preview_guide() {
+    let Some(dir) = std::env::var_os("SURFCULT_PAINT_PREVIEW") else {
+        return;
+    };
+    let mut body = super::guide::draw(&sample_guide());
+    crt::apply(&mut body, Crt::Heavy);
+    let mut clock = super::guide::draw_clock("21:16:20");
+    crt::apply(&mut clock, Crt::Heavy);
+    // The picture: a sunset in the top-right quarter, black elsewhere.
+    let mut scene = Canvas::new(1920, 1080);
+    scene.fill_rect(0.0, 0.0, 1920.0, 1080.0, Rgba::hex(0x000000));
+    let (top, bottom) = (Rgba::hex(0xff9a5a), Rgba::hex(0x1f5f8f));
+    scene.fill_gradient(960.0, 0.0, 960.0, 540.0, top, bottom);
+    let mut rgba = scene.to_overlay(0, 0).bgra;
+    for o in [&body, &clock] {
+        for y in 0..o.height {
+            for x in 0..o.width {
+                let s = ((y * o.width + x) * 4) as usize;
+                let (sx, sy) = (x as i32 + o.x, y as i32 + o.y);
+                let d = ((sy * 1920 + sx) * 4) as usize;
+                let a = u32::from(o.bgra[s + 3]);
+                for c in 0..3 {
+                    let under = u32::from(rgba[d + c]) * (255 - a) / 255;
+                    rgba[d + c] = (u32::from(o.bgra[s + c]) + under).min(255) as u8;
+                }
+            }
+        }
+    }
+    rgba.as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .for_each(|p| p.swap(0, 2));
+    let size = tiny_skia::IntSize::from_wh(1920, 1080).unwrap();
+    let png = tiny_skia::Pixmap::from_vec(rgba, size).unwrap();
+    let file = std::path::PathBuf::from(dir).join("guide-heavy.png");
+    std::fs::write(file, png.encode_png().unwrap()).unwrap();
+}

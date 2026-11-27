@@ -1305,6 +1305,9 @@ mod real {
         player.play_clip(&clip).unwrap();
         // The clip removed the banner, so clearing it sends nothing.
         player.clear_banner().unwrap();
+        // MPV accepts the guide's video area and the way back.
+        player.set_video_area(VideoArea::TopRight).unwrap();
+        player.set_video_area(VideoArea::Full).unwrap();
         player.stop().unwrap();
     }
 
@@ -1555,4 +1558,21 @@ fn the_banner_layer_is_not_for_other_overlays() {
     assert!(check_overlay(62, &overlay).is_ok());
     let refused = check_overlay(63, &overlay).unwrap_err();
     assert_eq!(refused.to_string(), "overlay layer 63 is the banner's");
+}
+
+#[test]
+fn the_guide_moves_the_video_with_margin_ratios() {
+    let fake = FakeMpv::new();
+    let mut session = fake.connect();
+    session.set_video_area(VideoArea::TopRight).unwrap();
+    session.set_video_area(VideoArea::Full).unwrap();
+    assert_eq!(
+        fake.commands(),
+        [
+            json!(["set_property", "video-margin-ratio-left", 0.5]),
+            json!(["set_property", "video-margin-ratio-bottom", 0.5]),
+            json!(["set_property", "video-margin-ratio-left", 0.0]),
+            json!(["set_property", "video-margin-ratio-bottom", 0.0]),
+        ]
+    );
 }

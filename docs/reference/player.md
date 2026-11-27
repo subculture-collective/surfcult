@@ -42,6 +42,7 @@ Hardware decoding: `--hwdec=drm,v4l2m2m` asks for the Pi's H.265 decoder, then i
 | `clear_overlay(id)` | `overlay-remove <id>` |
 | `show_banner(banner)` | draws the banner with `paint::banner`, runs the CRT pass at `MpvConfig::crt` (Heavy by default), writes it to `overlay-63.bgra` and sends `overlay-add 63 ...` |
 | `clear_banner` | `overlay-remove 63`, only when the banner is up |
+| `set_video_area(area)` | `set_property` `video-margin-ratio-left` and `video-margin-ratio-bottom`: 0.5 each for `VideoArea::TopRight`, which leaves the top-right quarter for the video while the guide is open, and 0 for `Full`. MPV keeps them across files; a restart puts them back to 0 |
 
 `replace` empties MPV's playlist, so static, the stand-by card, a clip and `play_program` drop anything queued. Those four and `stop` also remove the banner; queueing leaves it up. The banner is a bitmap in overlay layer 63, drawn after the display filters; `show_overlay` and `clear_overlay` refuse that layer. See [run.md](run.md#the-banner). `loop-file=inf` only matters for a configured source that ends; the default sources are `lavfi` generators that never end, so nothing loops and there is no seam. A program is appended behind the clip and opened early by the playlist prefetch. It is not preloaded paused, because one MPV process cannot hold a second file paused (ADR 0001, decision 5).
 

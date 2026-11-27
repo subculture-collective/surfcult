@@ -49,6 +49,7 @@
 pub mod app;
 mod clock;
 mod driver;
+mod guide;
 mod now;
 mod streams;
 #[cfg(test)]
@@ -57,6 +58,7 @@ mod watermark;
 
 use std::collections::HashMap;
 
+use guide::{Guide, clock_with_seconds, window_start};
 use watermark::Watermark;
 
 use crate::clips::{Clip, ClipLibrary};
@@ -67,7 +69,7 @@ use crate::library::{LibraryChanges, MediaItem, resolve_pool};
 use crate::overlay::{self, DEFAULT_BANNER_MS};
 use crate::paint::watermark::Form;
 use crate::paint::{self, Crt};
-use crate::player::{Overlay, Player, PlayerEvent, Slate};
+use crate::player::{Overlay, Player, PlayerEvent, Slate, VideoArea};
 use crate::schedule::{self, Extended};
 use crate::store::Store;
 use crate::tuner::{State, Timing, Tuner};
@@ -103,6 +105,10 @@ pub struct Settings {
 
 /// The overlay layer the SCTV watermark is drawn in.
 pub const WATERMARK_LAYER: u8 = 8;
+/// The overlay layer the program guide is drawn in.
+pub const GUIDE_LAYER: u8 = 1;
+/// The overlay layer of the guide's clock cell, drawn over the guide.
+pub const GUIDE_CLOCK_LAYER: u8 = 2;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -147,6 +153,8 @@ pub struct Tv<P, I> {
     /// The channel number being typed: its value, its digits and when it
     /// is tuned if no digit follows.
     entry: Option<(u32, usize, i64)>,
+    /// The program guide, while it is open.
+    guide: Option<Guide>,
     watermark: Watermark,
     /// What the watermark layer shows now: the form and opacity.
     watermark_shown: Option<(Form, f32)>,
@@ -199,6 +207,7 @@ impl<P: Player, I: Input> Tv<P, I> {
             banner_pending: false,
             banner_until_ms: None,
             entry: None,
+            guide: None,
             watermark: Watermark::default(),
             watermark_shown: None,
             watermark_bitmaps: HashMap::new(),
@@ -262,6 +271,7 @@ impl<P: Player, I: Input> Tv<P, I> {
         };
         self.driver.step(now_ms, &mut cx);
         self.banner(now_ms, store);
+        self.draw_guide(now_ms, store);
         self.show_watermark(now_ms);
         if now_ms >= self.upkeep.due_ms {
             self.keep_schedules(now_ms, store);
@@ -372,6 +382,9 @@ impl<P: Player, I: Input> Tv<P, I> {
     }
 
     fn key(&mut self, key: Key, now_ms: i64) {
+        if self.guide.is_some() && self.guide_key(key, now_ms) {
+            return;
+        }
         match key {
             Key::Digit(d) => {
                 let (number, digits, _) = self.entry.unwrap_or((0, 0, 0));
@@ -394,8 +407,9 @@ impl<P: Player, I: Input> Tv<P, I> {
             }
             Key::Banner => self.banner_pending = self.driver.following(),
             Key::Quit => self.quit = true,
-            // Not used yet: the guide, the menu and the volume come later.
-            Key::Back | Key::Menu | Key::Guide | Key::Mute | Key::VolumeUp | Key::VolumeDown => {}
+            Key::Guide => self.open_guide(),
+            // Not used yet: the menu and the volume come later.
+            Key::Back | Key::Menu | Key::Mute | Key::VolumeUp | Key::VolumeDown => {}
         }
     }
 
@@ -430,6 +444,7 @@ impl<P: Player, I: Input> Tv<P, I> {
         // Static replaces the screen, and the banner with it.
         self.banner_until_ms = None;
         self.watermark.leave();
+        self.close_guide();
         self.channel = Some(channel);
         self.tuner.tune(channel, now_ms);
     }
@@ -445,9 +460,11 @@ impl<P: Player, I: Input> Tv<P, I> {
                     self.driver.leave();
                     self.banner_pending = false;
                     self.banner_until_ms = None;
-                    // The restart took the overlays with it.
+                    // The restart took the overlays and the video area with
+                    // it.
                     self.watermark.leave();
                     self.watermark_shown = None;
+                    self.guide = None;
                 }
                 PlayerEvent::ProgramStarted {
                     position_ms,
@@ -538,13 +555,131 @@ impl<P: Player, I: Input> Tv<P, I> {
         }
     }
 
+    /// A key while the guide is open. Returns whether the guide used it;
+    /// a key it does not use goes on to the usual handling.
+    fn guide_key(&mut self, key: Key, now_ms: i64) -> bool {
+        let count = self.numbers.len();
+        match key {
+            Key::Next | Key::Previous => {
+                if let Some(guide) = self.guide.as_mut()
+                    && guide.step(key == Key::Next, count)
+                {
+                    guide.drawn_for = None;
+                }
+                true
+            }
+            Key::Banner => {
+                let target = self
+                    .guide
+                    .as_ref()
+                    .and_then(|g| self.numbers.get(g.focus()).copied());
+                self.close_guide();
+                if let Some(target) = target
+                    && Some(target) != self.channel
+                {
+                    self.tune(target, now_ms);
+                }
+                true
+            }
+            Key::Guide | Key::Back => {
+                self.close_guide();
+                true
+            }
+            // A channel number closes the guide and is entered as usual.
+            Key::Digit(_) => {
+                self.close_guide();
+                false
+            }
+            _ => false,
+        }
+    }
+
+    /// Opens the guide on the channel being watched and moves the video
+    /// into the top-right quarter. The banner goes; the watermark hides
+    /// while the guide is open.
+    fn open_guide(&mut self) {
+        if self.numbers.is_empty() {
+            return;
+        }
+        let index = self
+            .channel
+            .and_then(|c| self.numbers.iter().position(|&n| n == c))
+            .unwrap_or(0);
+        self.guide = Some(Guide::new(index, self.numbers.len()));
+        let player = self.tuner.player_mut();
+        if self.banner_until_ms.take().is_some()
+            && let Err(e) = player.clear_banner()
+        {
+            eprintln!("surfcult: cannot clear the banner: {e}");
+        }
+        if let Err(e) = player.set_video_area(VideoArea::TopRight) {
+            eprintln!("surfcult: cannot move the video for the guide: {e}");
+        }
+    }
+
+    /// Closes the guide, if it is open, and gives the video the whole
+    /// screen again.
+    fn close_guide(&mut self) {
+        if self.guide.take().is_none() {
+            return;
+        }
+        let player = self.tuner.player_mut();
+        for layer in [GUIDE_LAYER, GUIDE_CLOCK_LAYER] {
+            if let Err(e) = player.clear_overlay(layer) {
+                eprintln!("surfcult: cannot clear the guide: {e}");
+            }
+        }
+        if let Err(e) = player.set_video_area(VideoArea::Full) {
+            eprintln!("surfcult: cannot give the video the whole screen: {e}");
+        }
+    }
+
+    /// Draws the guide when it is open: the body when the focus moved or a
+    /// new half hour began, and the clock when its second changed.
+    fn draw_guide(&mut self, now_ms: i64, store: &Store) {
+        let Some(mut guide) = self.guide.take() else {
+            return;
+        };
+        let timezone = self.config.timezone;
+        let crt = self.settings.crt;
+        let from = window_start(now_ms);
+        if guide.drawn_for != Some(from) {
+            let channels: Vec<&Channel> = self
+                .numbers
+                .iter()
+                .filter_map(|n| self.config.channels.iter().find(|c| c.number == *n))
+                .collect();
+            let view = guide.view(&channels, store, now_ms, timezone);
+            let mut body = paint::guide::draw(&view);
+            paint::crt::apply(&mut body, crt);
+            if let Err(e) = self.tuner.player_mut().show_overlay(GUIDE_LAYER, &body) {
+                eprintln!("surfcult: cannot show the guide: {e}");
+            }
+            guide.drawn_for = Some(from);
+        }
+        let clock = clock_with_seconds(now_ms, timezone);
+        if guide.clock_drawn.as_deref() != Some(clock.as_str()) {
+            let mut cell = paint::guide::draw_clock(&clock);
+            paint::crt::apply(&mut cell, crt);
+            if let Err(e) = self
+                .tuner
+                .player_mut()
+                .show_overlay(GUIDE_CLOCK_LAYER, &cell)
+            {
+                eprintln!("surfcult: cannot show the guide's clock: {e}");
+            }
+            guide.clock_drawn = Some(clock);
+        }
+        self.guide = Some(guide);
+    }
+
     /// Shows the watermark in the form and at the opacity due at `now_ms`,
     /// or clears it, when that changed since the last step.
     fn show_watermark(&mut self, now_ms: i64) {
         if !self.settings.watermark {
             return;
         }
-        let want = if self.driver.following() {
+        let want = if self.driver.following() && self.guide.is_none() {
             self.watermark.at(now_ms, self.driver.on_break())
         } else {
             None

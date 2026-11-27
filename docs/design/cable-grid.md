@@ -2,7 +2,7 @@
 
 This is the design for surfcult's TV screens and web admin. The owner chose it on November 27, 2026 after four review rounds, recorded in the Studio study `studio/studies/2026-11-27-surfcult-screen-directions/` in `subcult-tv`.
 
-It is a specification. The drawing layer, the CRT pass, the SCTV watermark and the banner are built ([paint.md](../reference/paint.md), [run.md](../reference/run.md#the-watermark)). The guide has data but no drawing yet ([guide.md](../reference/guide.md)), and there is no TV menu.
+It is a specification. The drawing layer, the CRT pass, the SCTV watermark, the banner and the guide are built ([paint.md](../reference/paint.md), [run.md](../reference/run.md#the-guide)). The guide's auto-scroll and the TV menu are not.
 
 ## Decisions
 
@@ -69,7 +69,7 @@ The mark is the guide's three rows: the top row curls over like a breaking wave,
 
 All TV interface is drawn by Rust into a 1920x1080 premultiplied BGRA bitmap and shown with `show_overlay`. MPV draws overlays after its shaders, so the video's own filters never touch the interface ([player.md](../reference/player.md#the-crt-shader)).
 
-- **Guide.** The top half: an info panel on the left (channel name, the title in quotes, day and channel number, centred) and the program in a window on the right. The bottom half: the grid. The clock cell (`VCR OSD Mono`) and three half-hour time cells head it, a date row sits under them, then channel rows of number over ID and program cells. Cells are bevelled; a program that continues past the grid edge gets a white arrow. The remote moves a yellow outline across the cells.
+- **Guide.** The top half: an info panel on the left (channel name, the title in quotes, day and channel number, centred) and the program in a window on the right. The bottom half: the grid. The clock cell (`VCR OSD Mono`) and three half-hour time cells head it, a date row sits under them, then channel rows of number over ID and program cells. Cells are bevelled; a program that continues past the grid edge gets a white arrow. The remote moves a yellow outline across the cells. As built, the guide gives the video the top-right quarter, so the info panel and the video each take half the width, and the remote moves the focus between channels only; moving through time needs left and right keys, which the key map does not have yet.
 - **Auto-scroll.** After 5 seconds without a remote key, the rows scroll upward on their own and loop. Any remote key stops the scroll and puts the focus back where it was; the idle timer starts again. Scroll steps are whole multiples of 4 rows; see the CRT pass.
 - **Banner.** A band across the bottom: a channel cell (number large, name under it), a main panel with an ochre strip carrying the times and the title under it, and a clock cell. It keeps the earlier banner's timing and content rules. Not built yet: a `NEXT` line under the title.
 - **Menus.** A full-screen violet field, an ochre heading band with the mark, a list panel of rows with the focused row in `focus` and yellow, and a footer line with the date, time and key hints (`▲▼ CHOOSE  ◀▶ CHANGE  BACK CLOSE`).
