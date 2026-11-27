@@ -1,6 +1,6 @@
 # Read API
 
-`surfcult run` serves the web admin and the API described here, with control of the TV; `surfcult serve <channels.toml> <db>` serves the same reads on their own, with no TV to control. The API gives channels, the schedule, the guide and health as JSON over HTTP, the guide as XMLTV, and the web admin page that reads them. The code is in `src/server/`. Every route but `POST /tune` and `POST /crt` is a fixed `GET`, and nothing runs a command, writes to the database or reads a file at run time; those two hand a request to the TV's run loop, which carries it out. Channels come from the parsed `channels.toml` and everything else from the SQLite store. Any other path gets `404` and any other method `405`.
+`surfcult run` serves the web admin and the API described here, with control of the TV; `surfcult serve <channels.toml> <db>` serves the same reads on their own, with no TV to control. The API gives channels, the schedule, the guide and health as JSON over HTTP, the guide as XMLTV, and the web admin page that reads them. The code is in `src/server/`. Every route but `POST /tune`, `POST /crt` and `GET` and `PUT /channels/{number}` is a fixed `GET`, and nothing runs a command or writes to the database. The two `POST`s hand a request to the TV's run loop, which carries it out; the channel routes read and rewrite `channels.toml` ([Editing a channel](#editing-a-channel)). Channels come from the parsed `channels.toml` and everything else from the SQLite store. Any other path gets `404` and any other method `405`.
 
 ## Settings
 
@@ -101,9 +101,43 @@ Inside `surfcult run`, the admin can change what the TV does. The run loop reads
 
 `{"level": "light"}` sets the CRT filter, as the Picture menu would, and stores it. `level` is `heavy`, `light` or `off`, in any case; anything else gets `400`. The answer is `202`.
 
+## Editing a channel
+
+Inside `surfcult run`, the admin can change a channel's settings in `channels.toml`. Under `surfcult serve` both routes answer `503`. Both need the token, and `PUT` takes JSON only, as the control routes do. The code is in `src/server/edit.rs`, and the change to the file's text in `src/config/edit.rs`.
+
+### `GET /channels/{number}`
+
+```json
+{
+  "number": 3,
+  "settings": {
+    "name": "SATURDAY CARTOONS",
+    "source": {"kind": "jellyfin_collection", "name": "Cartoons"},
+    "mode": "shuffle",
+    "grid": "30m",
+    "breaks": {"every": "11m", "length": "2m", "pool": "ads-90s", "pad": null},
+    "filler": "filler"
+  },
+  "pools": ["tune-in", "ads-90s", "filler", "anthem"],
+  "source_kinds": ["jellyfin_library", "jellyfin_collection", "jellyfin_tag", "jellyfin_genre", "jellyfin_series"]
+}
+```
+
+`settings` holds the channel's keys as the file writes them. `source` and `mode` are `null` for a `blocks` or `weighted` channel: the admin does not edit those sources. `grid`, `breaks`, `filler` and `breaks.pad` are `null` when the file leaves them out. `pools` names the interstitial pools, for `breaks` and `filler`. A channel the file does not have gets `404`.
+
+### `PUT /channels/{number}`
+
+The body is `settings` as above. The server reads `channels.toml`, changes that channel's keys and nothing else, and checks the result as `surfcult check-config` would. If the check passes, it writes the file to a temporary file beside it and renames that over it, so a crash leaves the old file or the new one. A symlinked `channels.toml` stays a symlink, and the file keeps its permissions. Comments, blank lines, key order and the other tables stay as they were. The answer is `200` with the settings as written, and the TV regenerates the changed channel from 30 minutes on ([run.md](run.md#the-web-admin)).
+
+- An empty string, like `null`, removes an optional key.
+- The channel number cannot change: it is the channel's identity in the schedule.
+- Settings the file would not accept, such as an unknown pool, a grid like `half an hour`, an empty name, or a `source` for a `blocks` channel, get `422` with the reason. The file is left alone.
+- If the file no longer matches the running config in anything but channel settings, such as a pool, the time zone or a channel added by hand, the answer is `409` and the file is left alone. Restart surfcult to load it. A hand edit to another channel's settings is accepted, and that channel is regenerated too.
+- A file that cannot be written gets `500` with the reason. The service user needs write access to the file and its directory.
+
 ## The web admin
 
-`GET /` is the web admin: one page in the Cable Grid design ([cable-grid.md](../design/cable-grid.md#web-admin)), with its script, stylesheet, fonts and mark compiled into the binary (`assets/web/`, `assets/fonts/`, `assets/brand/`) and served at `/admin.js`, `/admin.css`, `/fonts/archivo-narrow-bold.ttf`, `/fonts/vcr-osd-mono.ttf`, `/mark.svg` and `/favicon.svg` with `Cache-Control: no-cache`. It is read only and draws everything in the browser from the reads above:
+`GET /` is the web admin: one page in the Cable Grid design ([cable-grid.md](../design/cable-grid.md#web-admin)), with its script, stylesheet, fonts and mark compiled into the binary (`assets/web/`, `assets/fonts/`, `assets/brand/`) and served at `/admin.js`, `/admin.css`, `/fonts/archivo-narrow-bold.ttf`, `/fonts/vcr-osd-mono.ttf`, `/mark.svg` and `/favicon.svg` with `Cache-Control: no-cache`. It draws everything in the browser from the reads above:
 
 - **Guide** (`#guide`): every channel's next three hours from the current half hour, from `/guide`, with the program on now outlined in yellow and a line at the current time. At phone width (720 px or less) it becomes an "On now" list: each channel's program on now, a progress bar and what is next.
 - **Channels** (`#channels`): each channel's number, name and mode from `/channels`, its program on now with progress, and the next one.
@@ -111,4 +145,4 @@ Inside `surfcult run`, the admin can change what the TV does. The run loop reads
 
 Times are in the TV's time zone. The page reads again every 30 seconds. When a read answers `401`, the page asks for the token and keeps it in the browser's local storage, sending it as `Authorization: Bearer` with every read.
 
-When `/tv` says the TV can be controlled, the page adds a Tune button to each channel on the Channels view and in the On now list, marks the channel on the TV, and shows the CRT filter's three levels on the System view. After a request it says what it asked for and reads the page again. Channels themselves stay in `channels.toml`; the admin does not edit them.
+When `/tv` says the TV can be controlled, the page adds a Tune button to each channel on the Channels view and in the On now list, marks the channel on the TV, and shows the CRT filter's three levels on the System view. After a request it says what it asked for and reads the page again. The Channels view also gets an Edit button per channel, which opens a form at `#edit-<number>` for the settings above. The form leaves out the source and order of a `blocks` or `weighted` channel. Saving sends `PUT /channels/{number}` and returns to the Channels view; a refusal shows its reason over the Save button. The page does not refresh while the form is open.

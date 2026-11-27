@@ -57,7 +57,7 @@ mod streams;
 mod tests;
 mod watermark;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use guide::{Guide, clock_with_seconds};
 use menu::{CRT_SETTING, Menu, crt_name, next_crt};
@@ -137,6 +137,9 @@ struct Upkeep {
     due_ms: i64,
     /// Library changes from syncs that no schedule has followed yet.
     changes: LibraryChanges,
+    /// Channels whose settings the web admin changed and whose schedule has
+    /// not been regenerated for it yet.
+    reconfigured: BTreeSet<u32>,
     /// The last problem logged for each channel, so it is logged once.
     problems: HashMap<u32, String>,
     clock_logged: bool,
@@ -393,7 +396,26 @@ impl<P: Player, I: Input> Tv<P, I> {
                 }
             }
             AdminCommand::SetCrt(crt) => self.choose_crt(crt, store),
+            AdminCommand::Reconfigure(config) => self.reconfigure(*config, now_ms, store),
         }
+    }
+
+    /// Takes the channels of `config`, the file the web admin just wrote,
+    /// and regenerates the schedule of each channel whose settings changed
+    /// from 30 minutes on ([`schedule::FREEZE_MS`]). The rest of `config` is
+    /// the same as the running one; the server checks that.
+    fn reconfigure(&mut self, config: Config, now_ms: i64, store: &mut Store) {
+        for channel in &config.channels {
+            if self.channel_config(channel.number) != Some(channel) {
+                eprintln!(
+                    "surfcult: channel {} changed in the web admin; regenerating its schedule",
+                    channel.number
+                );
+                self.upkeep.reconfigured.insert(channel.number);
+            }
+        }
+        self.config.channels = config.channels;
+        self.keep_schedules(now_ms, store);
     }
 
     pub fn player(&self) -> &P {
@@ -914,7 +936,10 @@ impl<P: Player, I: Input> Tv<P, I> {
                 }
             };
             let tz = self.config.timezone;
-            let result = if changes.is_empty() {
+            let reconfigured = self.upkeep.reconfigured.contains(&n);
+            let result = if reconfigured {
+                schedule::regenerate(store, channel, &pools, pools_now, tz, now_ms, true)
+            } else if changes.is_empty() {
                 schedule::extend(store, channel, &pools, pools_now, tz, now_ms, true)
             } else {
                 schedule::reschedule(store, channel, &pools, pools_now, tz, now_ms, &changes)
@@ -922,6 +947,7 @@ impl<P: Player, I: Input> Tv<P, I> {
             match result {
                 Ok(Extended::Generated { .. } | Extended::UpToDate { .. }) => {
                     self.upkeep.problems.remove(&n);
+                    self.upkeep.reconfigured.remove(&n);
                 }
                 Ok(Extended::ClockNotTrusted) => {}
                 Err(e) => {

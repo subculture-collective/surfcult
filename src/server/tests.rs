@@ -613,7 +613,17 @@ fn preview_database() {
     }
 }
 
-fn controlled(token: Option<&str>) -> (Router, std::sync::mpsc::Receiver<AdminCommand>) {
+/// A router with a TV, whose `channels.toml` is a copy of the example in
+/// the returned directory.
+fn controlled(
+    token: Option<&str>,
+) -> (
+    Router,
+    std::sync::mpsc::Receiver<AdminCommand>,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("channels.toml"), EXAMPLE).unwrap();
     let (commands, received) = std::sync::mpsc::channel();
     let status = Arc::new(Mutex::new(TvStatus {
         channel: Some(4),
@@ -624,9 +634,13 @@ fn controlled(token: Option<&str>) -> (Router, std::sync::mpsc::Receiver<AdminCo
         store(),
         token.map(|token| ApiToken::new(token).unwrap()),
         fixed_now,
-        Some(Control::new(commands, status)),
+        Some(Control::new(
+            commands,
+            status,
+            dir.path().join("channels.toml"),
+        )),
     );
-    (app, received)
+    (app, received, dir)
 }
 
 fn post_json(uri: &str, body: &str) -> Request<Body> {
@@ -638,7 +652,7 @@ fn post_json(uri: &str, body: &str) -> Request<Body> {
 
 #[test]
 fn tv_reports_the_channel_and_filter_or_that_there_is_no_tv() {
-    let (app, _received) = controlled(None);
+    let (app, _received, _dir) = controlled(None);
     let body: control::TvBody = json(send(app, get_request("/tv")));
     assert_eq!(
         body,
@@ -654,7 +668,7 @@ fn tv_reports_the_channel_and_filter_or_that_there_is_no_tv() {
 
 #[test]
 fn tune_and_crt_hand_the_request_to_the_tv() {
-    let (app, received) = controlled(None);
+    let (app, received, _dir) = controlled(None);
     let response = send(app.clone(), post_json("/tune", r#"{"channel": 5}"#));
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     let response = send(app, post_json("/crt", r#"{"level": "OFF"}"#));
@@ -671,7 +685,7 @@ fn tune_and_crt_hand_the_request_to_the_tv() {
 
 #[test]
 fn bad_control_requests_are_refused_and_nothing_is_sent() {
-    let (app, received) = controlled(None);
+    let (app, received, _dir) = controlled(None);
     for (uri, body, status) in [
         ("/tune", r#"{"channel": 99}"#, StatusCode::NOT_FOUND),
         (
@@ -695,7 +709,7 @@ fn bad_control_requests_are_refused_and_nothing_is_sent() {
 
 #[test]
 fn control_needs_the_token_and_a_tv() {
-    let (app, received) = controlled(Some(TOKEN));
+    let (app, received, _dir) = controlled(Some(TOKEN));
     let response = send(app, post_json("/tune", r#"{"channel": 5}"#));
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     assert_eq!(received.try_iter().count(), 0);
@@ -704,4 +718,171 @@ fn control_needs_the_token_and_a_tv() {
         post_json("/tune", r#"{"channel": 5}"#),
     );
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+}
+
+fn put_json(uri: &str, body: &serde_json::Value) -> Request<Body> {
+    Request::put(uri)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn channels_file(dir: &tempfile::TempDir) -> String {
+    std::fs::read_to_string(dir.path().join("channels.toml")).unwrap()
+}
+
+#[test]
+fn a_channel_reads_as_the_file_writes_it() {
+    let (app, _received, _dir) = controlled(None);
+    let body: edit::EditBody = json(send(app.clone(), get_request("/channels/3")));
+    assert_eq!(body.number, 3);
+    assert_eq!(body.settings.name, "SATURDAY CARTOONS");
+    assert_eq!(body.settings.grid.as_deref(), Some("30m"));
+    assert_eq!(body.settings.mode.as_deref(), Some("shuffle"));
+    assert_eq!(body.pools, ["tune-in", "ads-90s", "filler", "anthem"]);
+    assert!(body.source_kinds.contains(&"jellyfin_genre".to_string()));
+    let blocks: edit::EditBody = json(send(app.clone(), get_request("/channels/5")));
+    assert_eq!(blocks.settings.source, None);
+    assert_eq!(
+        send(app.clone(), get_request("/channels/99")).status(),
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        send(app, get_request("/channels/three")).status(),
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        send(super::tests::app(None), get_request("/channels/3")).status(),
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+}
+
+#[test]
+fn a_saved_channel_rewrites_the_file_and_reaches_the_tv() {
+    let (app, received, dir) = controlled(None);
+    let mut body: edit::EditBody = json(send(app.clone(), get_request("/channels/3")));
+    body.settings.name = "CARTOON PARTY".into();
+    body.settings.grid = Some("1h".into());
+    let response = send(
+        app.clone(),
+        put_json(
+            "/channels/3",
+            &serde_json::to_value(&body.settings).unwrap(),
+        ),
+    );
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved: edit::EditBody = json(response);
+    assert_eq!(saved.settings, body.settings);
+
+    let text = channels_file(&dir);
+    assert_eq!(
+        text,
+        EXAMPLE
+            .replace("\"SATURDAY CARTOONS\"", "\"CARTOON PARTY\"")
+            .replace("grid = \"30m\"", "grid = \"1h\"")
+    );
+    let commands: Vec<AdminCommand> = received.try_iter().collect();
+    let [AdminCommand::Reconfigure(config)] = commands.as_slice() else {
+        panic!("expected one Reconfigure, got {commands:?}");
+    };
+    assert_eq!(**config, Config::parse(&text).unwrap());
+    let channels: ChannelsBody = json(send(app, get_request("/channels")));
+    assert_eq!(channels.channels[0].name, "CARTOON PARTY");
+}
+
+#[test]
+fn an_edit_that_breaks_the_file_is_refused_and_nothing_changes() {
+    let (app, received, dir) = controlled(None);
+    let body: edit::EditBody = json(send(app.clone(), get_request("/channels/3")));
+    let mut unknown_pool = serde_json::to_value(&body.settings).unwrap();
+    unknown_pool["filler"] = "nope".into();
+    let blocks: edit::EditBody = json(send(app.clone(), get_request("/channels/5")));
+    let mut blocks = serde_json::to_value(&blocks.settings).unwrap();
+    blocks["source"] = serde_json::json!({"kind": "jellyfin_library", "name": "Movies"});
+    blocks["mode"] = "shuffle".into();
+    let mut bad_grid = serde_json::to_value(&body.settings).unwrap();
+    bad_grid["grid"] = "half an hour".into();
+    for (uri, body) in [
+        ("/channels/3", unknown_pool),
+        ("/channels/5", blocks),
+        ("/channels/3", bad_grid),
+        (
+            "/channels/3",
+            serde_json::json!({"name": "X", "colour": "red"}),
+        ),
+    ] {
+        let response = send(app.clone(), put_json(uri, &body));
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}"
+        );
+    }
+    assert_eq!(channels_file(&dir), EXAMPLE);
+    assert_eq!(received.try_iter().count(), 0);
+}
+
+#[test]
+fn a_file_changed_by_hand_is_left_for_a_restart() {
+    let (app, received, dir) = controlled(None);
+    let body: edit::EditBody = json(send(app.clone(), get_request("/channels/3")));
+    let by_hand = EXAMPLE.replace("America/Chicago", "Europe/Berlin");
+    std::fs::write(dir.path().join("channels.toml"), &by_hand).unwrap();
+    let response = send(
+        app,
+        put_json(
+            "/channels/3",
+            &serde_json::to_value(&body.settings).unwrap(),
+        ),
+    );
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert!(error_text(response).contains("restart"));
+    assert_eq!(channels_file(&dir), by_hand);
+    assert_eq!(received.try_iter().count(), 0);
+}
+
+#[test]
+fn editing_needs_the_token() {
+    let (app, received, dir) = controlled(Some(TOKEN));
+    for request in [
+        get_request("/channels/3"),
+        put_json("/channels/3", &serde_json::json!({"name": "X"})),
+    ] {
+        assert_eq!(
+            send(app.clone(), request).status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    assert_eq!(channels_file(&dir), EXAMPLE);
+    assert_eq!(received.try_iter().count(), 0);
+}
+
+#[test]
+fn a_symlinked_channels_file_stays_a_symlink() {
+    let (app, _received, dir) = controlled(None);
+    let real = dir.path().join("checkout.toml");
+    std::fs::rename(dir.path().join("channels.toml"), &real).unwrap();
+    std::os::unix::fs::symlink(&real, dir.path().join("channels.toml")).unwrap();
+    let mut body: edit::EditBody = json(send(app.clone(), get_request("/channels/4")));
+    body.settings.name = "LATE MOVIES".into();
+    let response = send(
+        app,
+        put_json(
+            "/channels/4",
+            &serde_json::to_value(&body.settings).unwrap(),
+        ),
+    );
+    assert_eq!(response.status(), StatusCode::OK);
+    let link = dir.path().join("channels.toml");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(
+        std::fs::read_to_string(&real)
+            .unwrap()
+            .contains("\"LATE MOVIES\"")
+    );
 }

@@ -237,6 +237,36 @@ td small { color: var(--muted); }
 .pill.on-tv { background: var(--yellow); color: var(--ink); }
 td.act { text-align: right; white-space: nowrap; }
 .onnow .item.with-tune { grid-template-columns: 58px 1fr auto; }
+.btn.quiet {
+  background: var(--cell);
+  color: var(--white);
+  text-decoration: none;
+  box-shadow: inset 2px 2px 0 var(--hi), inset -2px -2px 0 var(--lo);
+}
+.btn:disabled { filter: grayscale(0.6); cursor: wait; }
+
+/* Editing a channel */
+.edit { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px 18px; align-items: start; }
+.edit .wide { grid-column: 1 / -1; margin: 0; }
+.field { display: grid; gap: 5px; }
+.field label, .edit legend { font: 700 13px var(--display); letter-spacing: 0.06em; color: var(--yellow); }
+.field small { color: var(--muted); font-size: 13px; }
+.field input, .field select {
+  font: 16px var(--body);
+  color: var(--white);
+  background: var(--lo);
+  border: 0;
+  padding: 0 10px;
+  height: 40px;
+  width: 100%;
+  box-shadow: inset 2px 2px 0 #000, inset -2px -2px 0 var(--hi);
+}
+.edit fieldset { border: 2px solid var(--hi); padding: 10px 14px 14px; }
+.edit legend { padding: 0 6px; font-size: 15px; }
+.edit legend input { accent-color: var(--yellow); width: 18px; height: 18px; vertical-align: -3px; }
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px 16px; margin-top: 8px; }
+.fields[hidden] { display: none; }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; }
 .btn:active { box-shadow: inset -2px -2px 0 #ffe9a8, inset 2px 2px 0 #8a4a07; }
 
 .status {

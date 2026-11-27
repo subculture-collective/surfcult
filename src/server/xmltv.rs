@@ -21,7 +21,7 @@ pub(super) async fn guide(State(state): State<AppState>) -> Result<Response, Api
         from_ms,
         to_ms: from_ms.saturating_add(HORIZON_MS),
     };
-    let numbers: Vec<u32> = state.config.channels.iter().map(|c| c.number).collect();
+    let numbers: Vec<u32> = state.config().channels.iter().map(|c| c.number).collect();
     let rows = read_store(&state, move |store| {
         guide::build(store, store, &numbers, window)
     })
@@ -31,7 +31,7 @@ pub(super) async fn guide(State(state): State<AppState>) -> Result<Response, Api
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<tv generator-info-name=\"surfcult\">\n",
     );
-    for channel in &state.config.channels {
+    for channel in &state.config().channels {
         xml.push_str(&format!(
             "  <channel id=\"{}\"><display-name>{}</display-name></channel>\n",
             channel_id(channel.number),

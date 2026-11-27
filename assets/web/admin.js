@@ -1,7 +1,7 @@
 // The surfcult web admin: reads the API in this server and draws the guide,
 // the channels and the system's health. When the server runs inside
-// surfcult run it can also tune the TV and set its CRT filter (/tv, /tune,
-// /crt). See docs/reference/api.md for the API and docs/design/cable-grid.md
+// surfcult run it can also tune the TV, set its CRT filter and edit a
+// channel's settings in channels.toml (/tv, /tune, /crt, /channels/N). See docs/reference/api.md for the API and docs/design/cable-grid.md
 // for the look.
 "use strict";
 
@@ -12,6 +12,8 @@ const TOKEN_KEY = "surfcult-token";
 const VIEWS = ["guide", "channels", "system"];
 
 let timezone;
+/** A message for the status line in place of the next "Updated". */
+let notice = null;
 
 // ---------- small helpers ----------
 
@@ -62,16 +64,15 @@ async function api(path) {
   return body;
 }
 
-/** Sends `body` as JSON to `path`; the TV carries it out at its next step. */
-async function post(path, body) {
+/** Sends `body` as JSON to `path` and returns the answer's JSON, if any. */
+async function post(path, body, method = "POST") {
   const headers = { "Content-Type": "application/json" };
   if (sessionToken) headers.Authorization = `Bearer ${sessionToken}`;
-  const response = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+  const response = await fetch(path, { method, headers, body: JSON.stringify(body) });
   if (response.status === 401) throw new NeedsToken();
-  if (!response.ok) {
-    const answer = await response.json().catch(() => ({}));
-    throw new Error(answer.error || `${path} answered ${response.status}`);
-  }
+  const answer = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(answer.error || `${path} answered ${response.status}`);
+  return answer;
 }
 
 /** What the TV is doing, or `{controllable: false}` for a server without one. */
@@ -256,11 +257,21 @@ function channelsView({ channels, guide, tv }) {
         cell && el("div", { class: "bar-track" }, el("i", { style: { width: `${progress}%` } })),
       ),
       el("td", {}, next ? [`${hm(next.start_ms)} `, el("small", {}, next.title)] : el("small", {}, "Nothing in the next three hours")),
-      tv.controllable && el("td", { class: "act" }, tuneControl(tv, channel.number)),
+      tv.controllable &&
+        el(
+          "td",
+          { class: "act" },
+          el("a", { class: "btn small quiet", href: `#edit-${channel.number}` }, "Edit"),
+          " ",
+          tuneControl(tv, channel.number),
+        ),
     );
   });
+  const note = tv.controllable
+    ? "From channels.toml. Edit changes the file, and the TV follows."
+    : "From channels.toml. Edit that file to change them.";
   return [
-    el("div", { class: "view-head" }, el("h2", {}, "Channels"), el("p", {}, "From channels.toml. Edit that file to change them.")),
+    el("div", { class: "view-head" }, el("h2", {}, "Channels"), el("p", {}, note)),
     el(
       "div",
       { class: "panel table-wrap" },
@@ -348,23 +359,154 @@ function systemView({ health, channels, tv }) {
   ];
 }
 
+// ---------- editing a channel ----------
+
+const SOURCE_LABELS = {
+  jellyfin_library: "Library",
+  jellyfin_collection: "Collection",
+  jellyfin_tag: "Tag",
+  jellyfin_genre: "Genre",
+  jellyfin_series: "Series",
+};
+
+/** The channel number of an `#edit-N` address, or null. */
+function editedChannel() {
+  const match = /^#edit-(\d+)$/.exec(location.hash);
+  return match ? Number(match[1]) : null;
+}
+
+async function loadEdit() {
+  return api(`/channels/${editedChannel()}`);
+}
+
+/** A labelled field. `hint` goes under it. */
+function field(label, id, control, hint) {
+  control.id = id;
+  return el("div", { class: "field" }, el("label", { for: id }, label), control, hint && el("small", {}, hint));
+}
+
+/** A `<select>` of `options` ([value, label] pairs) with `value` chosen; a
+ * value not among them is added, so nothing in the file is lost. */
+function select(name, options, value) {
+  const all = options.some(([v]) => v === value) ? options : [...options, [value, value]];
+  return el("select", { name }, all.map(([v, label]) => el("option", { value: v, selected: v === value }, label)));
+}
+
+function input(name, value, attrs = {}) {
+  return el("input", { name, value: value ?? "", autocomplete: "off", ...attrs });
+}
+
+function editView({ number, settings, pools, source_kinds }) {
+  const poolOptions = (none) => [["", none], ...pools.map((p) => [p, p])];
+  const breaks = settings.breaks;
+  const program = settings.source
+    ? [
+        field("Source", "f-kind", select("kind", source_kinds.map((k) => [k, SOURCE_LABELS[k] ?? k]), settings.source.kind)),
+        field("Source name", "f-source", input("source", settings.source.name, { required: true }), "As Jellyfin names it."),
+        field("Order", "f-mode", select("mode", [["sequential", "In order"], ["shuffle", "Shuffle"]], settings.mode)),
+      ]
+    : [el("p", { class: "note wide" }, "This channel plays blocks or weighted sources. Change those in channels.toml.")];
+  const form = el(
+    "form",
+    { class: "panel edit", id: "edit-form", "data-channel": number },
+    field("Name", "f-name", input("name", settings.name, { required: true, maxlength: 60 })),
+    program,
+    field("Grid", "f-grid", input("grid", settings.grid, { placeholder: "30m" }), "Programs start on this grid, such as 30m. Empty for none."),
+    field("Filler", "f-filler", select("filler", poolOptions("None"), settings.filler ?? "")),
+    el(
+      "fieldset",
+      { class: "wide" },
+      el("legend", {}, el("label", {}, el("input", { type: "checkbox", name: "breaks", checked: Boolean(breaks) }), " Commercial breaks")),
+      el(
+        "div",
+        { class: "fields" },
+        field("Every", "f-every", input("every", breaks?.every ?? "11m"), "Such as 11m."),
+        field("Length", "f-length", input("break_length", breaks?.length ?? "2m"), "Such as 2m."),
+        field("Pool", "f-pool", select("pool", pools.map((p) => [p, p]), breaks?.pool ?? pools[0] ?? "")),
+        field("Pad with", "f-pad", select("pad", poolOptions("Filler pool"), breaks?.pad ?? "")),
+      ),
+    ),
+    el("p", { class: "error wide", id: "edit-error", hidden: true }),
+    el("div", { class: "actions wide" }, el("button", { class: "btn", type: "submit" }, "Save to channels.toml"), el("a", { class: "btn quiet", href: "#channels" }, "Cancel")),
+  );
+  return [
+    el(
+      "div",
+      { class: "view-head" },
+      el("h2", {}, `Channel ${pad(number)}`),
+      el("p", {}, "Saving rewrites this channel in channels.toml. What is on in the next 30 minutes stays; the TV plays the new settings after that."),
+    ),
+    form,
+  ];
+}
+
+/** The form as the settings `PUT /channels/N` takes. */
+function editedSettings(form) {
+  const value = (name) => form.elements[name]?.value.trim() ?? "";
+  const optional = (name) => value(name) || null;
+  const settings = {
+    name: value("name"),
+    source: null,
+    mode: null,
+    grid: optional("grid"),
+    breaks: null,
+    filler: optional("filler"),
+  };
+  if (form.elements.kind) {
+    settings.source = { kind: value("kind"), name: value("source") };
+    settings.mode = value("mode");
+  }
+  if (form.elements.breaks.checked) {
+    settings.breaks = { every: value("every"), length: value("break_length"), pool: value("pool"), pad: optional("pad") };
+  }
+  return settings;
+}
+
+document.addEventListener("submit", async (event) => {
+  const form = event.target.closest("#edit-form");
+  if (!form) return;
+  event.preventDefault();
+  const number = Number(form.dataset.channel);
+  const error = document.getElementById("edit-error");
+  const button = form.querySelector("button[type=submit]");
+  button.disabled = true;
+  try {
+    await post(`/channels/${number}`, editedSettings(form), "PUT");
+    notice = `Saved channel ${pad(number)} to channels.toml.`;
+    location.hash = "channels";
+  } catch (failure) {
+    if (failure instanceof NeedsToken) return render();
+    error.textContent = `Not saved: ${failure.message}`;
+    error.hidden = false;
+    button.disabled = false;
+  }
+});
+
+document.addEventListener("change", (event) => {
+  if (event.target.name !== "breaks") return;
+  event.target.closest("fieldset").querySelector(".fields").hidden = !event.target.checked;
+});
+
 const ROUTES = {
   guide: [loadGuide, guideView],
   channels: [loadChannels, channelsView],
   system: [loadSystem, systemView],
+  edit: [loadEdit, editView],
 };
 
 // ---------- the page ----------
 
 function currentView() {
+  if (editedChannel() !== null) return "edit";
   const name = location.hash.slice(1);
   return VIEWS.includes(name) ? name : "guide";
 }
 
 async function render() {
   const name = currentView();
+  const tab = name === "edit" ? "channels" : name;
   for (const link of document.querySelectorAll(".bar nav a")) {
-    if (link.dataset.view === name) link.setAttribute("aria-current", "page");
+    if (link.dataset.view === tab) link.setAttribute("aria-current", "page");
     else link.removeAttribute("aria-current");
   }
   const view = document.getElementById("view");
@@ -373,7 +515,15 @@ async function render() {
     const data = await load();
     document.getElementById("token").hidden = true;
     view.replaceChildren(...draw(data));
-    document.getElementById("status").textContent = `Updated ${hms(Date.now())}. Refreshes every 30 seconds.`;
+    if (name === "edit") {
+      const breaks = view.querySelector("input[name=breaks]");
+      breaks.closest("fieldset").querySelector(".fields").hidden = !breaks.checked;
+      document.getElementById("f-name").focus();
+      document.getElementById("status").textContent = "Editing. The page does not refresh until you save or cancel.";
+    } else {
+      document.getElementById("status").textContent = notice ?? `Updated ${hms(Date.now())}. Refreshes every 30 seconds.`;
+      notice = null;
+    }
   } catch (error) {
     if (error instanceof NeedsToken) {
       const panel = document.getElementById("token");
@@ -427,5 +577,6 @@ document.getElementById("token-form").addEventListener("submit", (event) => {
 
 window.addEventListener("hashchange", render);
 render();
-setInterval(render, REFRESH_MS);
+// An open edit form is not refreshed under the viewer's typing.
+setInterval(() => currentView() === "edit" || render(), REFRESH_MS);
 setInterval(tick, 1000);

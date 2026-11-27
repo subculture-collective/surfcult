@@ -6,11 +6,12 @@
 //! `127.0.0.1:8090` unless `SURFCULT_API_ADDR` says otherwise. When a token is configured every request must carry
 //! `Authorization: Bearer <token>` or it gets `401`.
 //!
-//! Every route but `POST /tune` and `POST /crt` is a fixed `GET`. Nothing
-//! here runs a command, writes to the store or reads a file at run time; the
-//! two `POST`s hand a request to the TV's run loop ([`Control`]), which
-//! carries it out: channels come from the parsed [`Config`] and the
-//! rest from the [`Store`]. Any other method gets `405` and any other path
+//! Every route but `POST /tune`, `POST /crt` and `PUT /channels/{number}` is
+//! a `GET`. Nothing here runs a command or writes to the store. The two
+//! `POST`s hand a request to the TV's run loop ([`Control`]), which carries
+//! it out; the channel routes read and rewrite `channels.toml` ([`edit`]).
+//! Channels come from the running [`Config`] and the rest from the
+//! [`Store`]. Any other method gets `405` and any other path
 //! `404`.
 //!
 //! The server owns its own [`Store`], opened with [`Store::open_read_only`] on
@@ -33,13 +34,14 @@
 //! Endpoints and JSON shapes are in `docs/reference/api.md`.
 
 mod control;
+mod edit;
 mod settings;
 #[cfg(test)]
 mod tests;
 mod web;
 mod xmltv;
 
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::rejection::QueryRejection;
@@ -80,12 +82,24 @@ pub fn system_now_ms() -> i64 {
 
 #[derive(Clone)]
 struct AppState {
-    config: Arc<Config>,
+    /// The running config. The web admin replaces it when it rewrites
+    /// `channels.toml` ([`edit`]).
+    config: Arc<RwLock<Arc<Config>>>,
     store: Arc<Mutex<Store>>,
     token: Option<Arc<ApiToken>>,
     now: Clock,
     /// The line to the TV, when the server runs inside `surfcult run`.
     control: Option<Control>,
+}
+
+impl AppState {
+    /// The running config.
+    fn config(&self) -> Arc<Config> {
+        self.config
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 /// The read API over `config` and `store`. With `token`, every request needs
@@ -100,7 +114,7 @@ pub fn router(
     control: Option<Control>,
 ) -> Router {
     let state = AppState {
-        config: Arc::new(config),
+        config: Arc::new(RwLock::new(Arc::new(config))),
         store: Arc::new(Mutex::new(store)),
         token: token.map(Arc::new),
         now,
@@ -110,6 +124,7 @@ pub fn router(
     // page's files are not.
     let reads = Router::new()
         .route("/channels", get(channels))
+        .route("/channels/{number}", get(edit::read).put(edit::write))
         .route("/schedule", get(schedule))
         .route("/xmltv.xml", get(xmltv::guide))
         .route("/health", get(health))
@@ -186,7 +201,7 @@ struct ChannelBody {
 
 async fn channels(State(state): State<AppState>) -> Json<ChannelsBody> {
     let channels = state
-        .config
+        .config()
         .channels
         .iter()
         .map(|channel| ChannelBody {
@@ -279,14 +294,14 @@ async fn schedule(
         ));
     }
     let numbers: Vec<u32> = match query.channel {
-        Some(number) if state.config.channels.iter().any(|c| c.number == number) => vec![number],
+        Some(number) if state.config().channels.iter().any(|c| c.number == number) => vec![number],
         Some(number) => {
             return Err(ApiError::new(
                 StatusCode::NOT_FOUND,
                 format!("no channel {number}"),
             ));
         }
-        None => state.config.channels.iter().map(|c| c.number).collect(),
+        None => state.config().channels.iter().map(|c| c.number).collect(),
     };
     let channels = read_store(&state, move |store| {
         numbers
@@ -329,7 +344,7 @@ struct ChannelHealth {
 /// its schema is not the version this build expects.
 async fn health(State(state): State<AppState>) -> Result<Json<HealthBody>, ApiError> {
     let now_ms = (state.now)();
-    let numbers: Vec<u32> = state.config.channels.iter().map(|c| c.number).collect();
+    let numbers: Vec<u32> = state.config().channels.iter().map(|c| c.number).collect();
     read_store(&state, move |store| {
         let schema_version = store.schema_version()?;
         let supported = Store::supported_schema_version();
