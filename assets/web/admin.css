@@ -1,0 +1,241 @@
+/* The surfcult web admin in the Cable Grid design
+   (docs/design/cable-grid.md#web-admin): the TV's violet field, bevelled
+   cells and Archivo Narrow, with no CRT pass. */
+
+@font-face {
+  font-family: "Archivo Narrow";
+  src: url("/fonts/archivo-narrow-bold.ttf") format("truetype");
+  font-weight: 700;
+  font-display: swap;
+}
+@font-face {
+  font-family: "VCR OSD Mono";
+  src: url("/fonts/vcr-osd-mono.ttf") format("truetype");
+  font-display: swap;
+}
+
+:root {
+  --field-top: #2e2180;
+  --field-bottom: #1a1150;
+  --cell: #3a2ca6;
+  --focus: #4a3cc4;
+  --hi: #8e84ff;
+  --lo: #0e0833;
+  --series: #2646c4;
+  --movie: #7c2144;
+  --yellow: #ffd23f;
+  --ochre-top: #f7c64c;
+  --ochre-bottom: #de7f1c;
+  --ink: #2a1200;
+  --white: #ffffff;
+  --muted: #cfcaf7;
+  --shadow: #05020f;
+  --error: #ffc2ad;
+  --display: "Archivo Narrow", "Arial Narrow", sans-serif;
+  --mono: "VCR OSD Mono", ui-monospace, monospace;
+  --body: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  min-height: 100vh;
+  background: linear-gradient(var(--field-bottom), var(--lo)) fixed;
+  color: var(--white);
+  font: 16px/1.5 var(--body);
+  display: flex;
+  flex-direction: column;
+}
+h1, h2, h3 { font-family: var(--display); font-weight: 700; margin: 0; text-shadow: 2px 2px 0 var(--shadow); }
+h2 { font-size: 26px; }
+code { font-family: ui-monospace, monospace; font-size: 0.92em; }
+a { color: var(--yellow); }
+:focus-visible { outline: 3px solid var(--yellow); outline-offset: 2px; }
+
+.bev { box-shadow: inset 2px 2px 0 var(--hi), inset -2px -2px 0 var(--lo); }
+
+/* The header bar */
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 max(16px, env(safe-area-inset-right)) 0 max(16px, env(safe-area-inset-left));
+  min-height: 58px;
+  background: linear-gradient(var(--ochre-top), var(--ochre-bottom));
+  color: var(--ink);
+  flex-wrap: wrap;
+}
+.brand { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font: 700 24px var(--display); }
+.bar nav { display: flex; gap: 6px; flex-wrap: wrap; }
+.bar nav a {
+  font: 700 17px var(--display);
+  color: var(--ink);
+  text-decoration: none;
+  padding: 6px 12px;
+}
+.bar nav a:hover { text-decoration: underline; }
+.bar nav a[aria-current="page"] {
+  background: var(--cell);
+  color: var(--yellow);
+  box-shadow: inset 2px 2px 0 var(--hi), inset -2px -2px 0 var(--lo);
+  text-decoration: none;
+}
+.bar nav a:focus-visible { outline-color: var(--lo); }
+.clock { margin-left: auto; font: 18px var(--mono); }
+
+main {
+  flex: 1;
+  width: 100%;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 20px max(16px, env(safe-area-inset-right)) 32px max(16px, env(safe-area-inset-left));
+  display: grid;
+  gap: 16px;
+  align-content: start;
+}
+.view-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.view-head p { margin: 0; color: var(--muted); }
+.note { color: var(--muted); }
+.panel {
+  background: var(--cell);
+  box-shadow: inset 2px 2px 0 var(--hi), inset -2px -2px 0 var(--lo);
+  padding: 16px;
+}
+.error { color: var(--error); }
+.problem { border-left: 6px solid var(--error); }
+
+/* The guide */
+.grid { display: grid; gap: 4px; overflow-x: auto; }
+.grid-inner { display: grid; gap: 4px; min-width: 860px; }
+.grid .row { display: grid; grid-template-columns: 110px 1fr; gap: 4px; min-height: 56px; }
+.grid .row.head { min-height: 34px; }
+.grid .ch {
+  background: var(--cell);
+  box-shadow: inset 2px 2px 0 var(--hi), inset -2px -2px 0 var(--lo);
+  display: grid;
+  place-content: center;
+  text-align: center;
+  font: 700 16px/1.1 var(--display);
+  color: var(--yellow);
+  text-shadow: 2px 2px 0 var(--shadow);
+  padding: 4px;
+}
+.grid .ch.clock-cell { font: 15px var(--mono); color: var(--white); }
+.grid .lane { position: relative; }
+.grid .slots { display: grid; gap: 4px; }
+.grid .slot {
+  background: var(--cell);
+  box-shadow: inset 2px 2px 0 var(--hi), inset -2px -2px 0 var(--lo);
+  display: grid;
+  place-content: center;
+  font: 700 16px var(--display);
+  color: var(--yellow);
+  text-shadow: 2px 2px 0 var(--shadow);
+}
+.grid .cell {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  padding: 6px 10px;
+  overflow: hidden;
+  background: var(--series);
+  box-shadow: inset 2px 2px 0 rgba(255, 255, 255, 0.35), inset -2px -2px 0 rgba(0, 0, 0, 0.45);
+  font: 700 16px/1.2 var(--display);
+  text-shadow: 2px 2px 0 var(--shadow);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.grid .cell.movie { background: var(--movie); }
+.grid .cell.on { background: var(--focus); outline: 3px solid var(--yellow); outline-offset: -3px; }
+.grid .cell small { display: block; font: 400 12px var(--body); text-shadow: none; opacity: 0.85; }
+.grid .cell.before { padding-left: 22px; }
+.grid .cell.before::before { content: "◀"; position: absolute; left: 6px; top: 50%; transform: translateY(-50%); font-size: 11px; }
+.grid .cell.after::after { content: "▶"; position: absolute; right: 6px; top: 50%; transform: translateY(-50%); font-size: 11px; }
+.grid .now { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--yellow); z-index: 1; pointer-events: none; }
+
+/* On now: the guide at phone width, and part of the channels view */
+.onnow { display: none; gap: 6px; }
+.onnow .item {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--cell);
+  box-shadow: inset 2px 2px 0 var(--hi), inset -2px -2px 0 var(--lo);
+}
+.onnow .n { font: 700 24px/1 var(--display); color: var(--yellow); text-align: center; text-shadow: 2px 2px 0 var(--shadow); }
+.onnow .n small { display: block; font-size: 12px; }
+.onnow .t { font: 700 17px/1.2 var(--display); min-width: 0; overflow-wrap: anywhere; }
+.onnow .s { font-size: 13px; color: var(--muted); }
+.bar-track { height: 6px; background: var(--lo); margin-top: 5px; }
+.bar-track i { display: block; height: 100%; background: var(--yellow); }
+
+@media (max-width: 720px) {
+  .grid { display: none; }
+  .onnow { display: grid; }
+  .bar { padding-block: 8px; gap: 6px 12px; }
+  .brand { font-size: 21px; }
+  .bar nav { order: 3; flex-basis: 100%; }
+  .clock { font-size: 16px; }
+  main { padding-top: 16px; }
+}
+
+/* Tables */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; min-width: 560px; }
+th {
+  text-align: left;
+  font: 700 13px var(--display);
+  letter-spacing: 0.06em;
+  color: var(--yellow);
+  padding: 6px 10px;
+}
+td { padding: 10px; border-top: 1px solid rgba(142, 132, 255, 0.35); vertical-align: top; }
+td.num { font: 700 20px var(--display); color: var(--yellow); font-variant-numeric: tabular-nums; }
+td small { color: var(--muted); }
+
+/* System */
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.fact h3 { font-size: 15px; color: var(--yellow); letter-spacing: 0.04em; }
+.fact p { margin: 4px 0 0; font-size: 20px; }
+.pill { display: inline-block; padding: 1px 8px; font: 700 13px var(--display); background: var(--lo); }
+.pill.warn { background: var(--ochre-bottom); color: var(--ink); }
+.pill.bad { background: var(--movie); }
+
+/* The token form */
+.token { max-width: 520px; margin: 0 auto 32px; width: calc(100% - 32px); }
+.token form { display: grid; gap: 8px; }
+.token label { font: 700 13px var(--display); letter-spacing: 0.06em; color: var(--yellow); }
+.token input {
+  font: 16px var(--body);
+  color: var(--white);
+  background: var(--lo);
+  border: 0;
+  padding: 9px 10px;
+  box-shadow: inset 2px 2px 0 #000, inset -2px -2px 0 var(--hi);
+}
+.btn {
+  justify-self: start;
+  font: 700 16px var(--display);
+  border: 0;
+  padding: 9px 16px;
+  cursor: pointer;
+  color: var(--ink);
+  background: linear-gradient(var(--ochre-top), var(--ochre-bottom));
+  box-shadow: inset 2px 2px 0 #ffe9a8, inset -2px -2px 0 #8a4a07;
+}
+.btn:hover { filter: brightness(1.1); }
+.btn:active { box-shadow: inset -2px -2px 0 #ffe9a8, inset 2px 2px 0 #8a4a07; }
+
+.status {
+  padding: 8px max(16px, env(safe-area-inset-right)) calc(8px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  font-size: 13px;
+  color: var(--muted);
+  border-top: 2px solid var(--hi);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}

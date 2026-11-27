@@ -2,7 +2,7 @@
 
 This is the design for surfcult's TV screens and web admin. The owner chose it on November 27, 2026 after four review rounds, recorded in the Studio study `studio/studies/2026-11-27-surfcult-screen-directions/` in `subcult-tv`.
 
-It is a specification. The drawing layer, the CRT pass, the SCTV watermark, the banner, the guide with its auto-scroll and the Picture menu with the CRT setting are built ([paint.md](../reference/paint.md), [run.md](../reference/run.md#the-guide)). The web admin is not.
+It is a specification. The drawing layer, the CRT pass, the SCTV watermark, the banner, the guide with its auto-scroll and the Picture menu with the CRT setting are built ([paint.md](../reference/paint.md), [run.md](../reference/run.md#the-guide)). The web admin is built read only ([api.md](../reference/api.md#the-web-admin)): it cannot yet edit channels, change the CRT setting or tune the TV.
 
 ## Decisions
 

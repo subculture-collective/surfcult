@@ -297,9 +297,8 @@ fn without_a_token_no_header_is_needed() {
 }
 
 #[test]
-fn only_the_three_reads_exist() {
+fn only_the_reads_and_the_admin_page_exist() {
     for path in [
-        "/",
         "/channels/../../etc/passwd",
         "/config/channels.example.toml",
         "/static/x",
@@ -308,7 +307,7 @@ fn only_the_three_reads_exist() {
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
     for method in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH] {
-        for path in ["/channels", "/schedule", "/health"] {
+        for path in ["/channels", "/schedule", "/health", "/guide", "/"] {
             let request = Request::builder()
                 .method(method.clone())
                 .uri(path)
@@ -486,4 +485,122 @@ fn xmltv_needs_the_token_when_one_is_set() {
     let response = send(app(Some(TOKEN)), get_request("/xmltv.xml"));
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[test]
+fn the_admin_page_and_its_files_need_no_token() {
+    for (path, content_type) in [
+        ("/", "text/html; charset=utf-8"),
+        ("/admin.js", "text/javascript; charset=utf-8"),
+        ("/admin.css", "text/css; charset=utf-8"),
+        ("/mark.svg", "image/svg+xml"),
+        ("/favicon.svg", "image/svg+xml"),
+        ("/fonts/archivo-narrow-bold.ttf", "font/ttf"),
+        ("/fonts/vcr-osd-mono.ttf", "font/ttf"),
+    ] {
+        let response = send(app(Some(TOKEN)), get_request(path));
+        assert_eq!(response.status(), StatusCode::OK, "{path}");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            content_type,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn the_guide_needs_the_token_like_the_other_reads() {
+    let response = send(app(Some(TOKEN)), get_request("/guide"));
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[test]
+fn the_guide_lists_every_channel_with_titled_programs_and_the_time_zone() {
+    let body: web::GuideBody = json(send(app(None), get_request("/guide")));
+    assert_eq!((body.from_ms, body.now_ms), (NOW, NOW));
+    assert_eq!(body.to_ms, NOW + web::DEFAULT_GUIDE_MS);
+    let config = Config::parse(EXAMPLE).unwrap();
+    assert_eq!(body.timezone, config.timezone.name());
+    assert_eq!(body.channels.len(), config.channels.len());
+    let three = body.channels.iter().find(|c| c.number == 3).unwrap();
+    // The break is left out: two programs, titled from the library, or
+    // UNKNOWN PROGRAM for an item it does not have.
+    let titles: Vec<&str> = three.cells.iter().map(|c| c.title.as_str()).collect();
+    assert_eq!(titles, ["A", "UNKNOWN PROGRAM"]);
+    assert_eq!(three.cells[0].start_ms, NOW - 60_000);
+    assert!(!three.cells[0].movie);
+    let five = body.channels.iter().find(|c| c.number == 5).unwrap();
+    assert!(five.cells.is_empty());
+}
+
+#[test]
+fn a_bad_guide_window_is_refused() {
+    for query in [
+        "/guide?from=10&to=10",
+        "/guide?from=10&to=5",
+        "/guide?from=0&to=86400001",
+        "/guide?from=x",
+    ] {
+        let response = send(app(None), get_request(query));
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+    let response = send(app(None), get_request("/guide?from=0&to=86400000"));
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// Writes a database with a lineup of sample programs around the current
+/// time to `SURFCULT_WEB_PREVIEW_DB`, to look at the admin page against.
+#[test]
+fn preview_database() {
+    let Some(path) = std::env::var_os("SURFCULT_WEB_PREVIEW_DB") else {
+        return;
+    };
+    let _ = std::fs::remove_file(&path);
+    let mut store = Store::open(std::path::Path::new(&path)).unwrap();
+    let titles = [
+        ("toons", "The Inkwell Hour", MediaKind::Episode),
+        ("static", "Static Pals", MediaKind::Episode),
+        ("jukebox", "Video Jukebox", MediaKind::Episode),
+        ("coast", "The Long Coast", MediaKind::Movie),
+        ("night", "Night Matinee", MediaKind::Movie),
+        ("room4", "Roommates", MediaKind::Episode),
+        ("corner", "Corner Store", MediaKind::Episode),
+    ];
+    let entries: Vec<LibraryEntry> = titles
+        .iter()
+        .map(|(id, title, kind)| LibraryEntry {
+            item: MediaItem::new(*id, *title, *kind, 60_000),
+            path: None,
+        })
+        .collect();
+    let now = system_now_ms();
+    store
+        .replace_library(&entries, &[], now - 4 * 60_000)
+        .unwrap();
+    let half = 30 * 60_000;
+    let from = now - now % half;
+    let config = Config::parse(EXAMPLE).unwrap();
+    let plans: [&[(&str, i64, i64)]; 4] = [
+        &[
+            ("toons", 0, 1),
+            ("static", 1, 3),
+            ("toons", 3, 4),
+            ("static", 4, 8),
+        ],
+        &[("jukebox", -2, 8)],
+        &[("coast", -1, 3), ("night", 3, 8)],
+        &[
+            ("room4", 0, 1),
+            ("room4", 1, 2),
+            ("corner", 2, 3),
+            ("room4", 3, 8),
+        ],
+    ];
+    for (channel, plan) in config.channels.iter().zip(plans.iter().cycle()) {
+        let events: Vec<Event> = plan
+            .iter()
+            .map(|(id, a, b)| event(from + a * half, from + b * half, id, EventKind::Program))
+            .collect();
+        store.write_events(channel.number, &events).unwrap();
+    }
 }

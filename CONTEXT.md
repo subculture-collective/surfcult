@@ -77,6 +77,7 @@ The words surfcult's code and documentation use, and the code item each one name
 - **Overlay**: a premultiplied BGRA bitmap drawn over the video in one of 64 layers, `player::Overlay`.
 - **Canvas**: a bitmap the TV's interface is drawn into in the Cable Grid design, `paint::Canvas`; `to_overlay` turns it into an overlay.
 - **Guide screen**: the program guide on the TV, opened with the guide key, `run::guide::Guide` for the focus and the rows on screen and `paint::guide` for the drawing. The video moves into the top-right quarter (`player::VideoArea::TopRight`) while it is open. Not the `guide` module, which builds the cells it shows.
+- **Web admin**: the page `surfcult serve` serves at `/`, in the Cable Grid design, `assets/web/` and `server::web`. It reads the API from the browser and changes nothing.
 - **Picture menu**: the TV's settings menu, opened with the menu key, `run::menu` and `paint::menu`. It holds the CRT filter; OK steps it to the next level.
 - **Viewer setting**: a choice the viewer made on the TV, stored by name in the store's `viewer_settings` table (`Store::viewer_setting`), such as `crt`. It wins over the environment's default.
 - **Watermark**: the SCTV station bug in the top-right corner, `paint::watermark`, in overlay layer 8 at 60% opacity. The beside form shows for 3 seconds after a channel change settles and then fades over 1 second; the under form shows through break and filler events. `run::watermark::Watermark` decides which and how opaque.
