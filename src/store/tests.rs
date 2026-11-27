@@ -713,6 +713,69 @@ fn a_collection_pool_resolves_from_the_library_cache() {
 }
 
 #[test]
+fn a_new_id_for_the_same_path_keeps_the_item_and_its_events() {
+    use crate::library::{MediaItem, MediaKind, MediaSource};
+
+    let entry = |id: &str, path: &str| LibraryEntry {
+        item: MediaItem::new(id, id, MediaKind::Episode, 1_320_000),
+        path: Some(path.into()),
+    };
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .replace_library(&[entry("a", "/tv/a.mkv"), entry("b", "/tv/b.mkv")], &[], 1)
+        .unwrap();
+    store
+        .write_events(1, &[event(0, 10, "a", EventKind::Program)])
+        .unwrap();
+    store
+        .write_events(2, &[event(5, 15, "a", EventKind::Program)])
+        .unwrap();
+
+    // Jellyfin gave the file a new id; `b` is gone.
+    let changes = store
+        .replace_library(&[entry("a2", "/tv/a.mkv")], &[], 2)
+        .unwrap();
+
+    assert_eq!(changes.renamed, [(MediaId::new("a"), MediaId::new("a2"))]);
+    assert_eq!(changes.vanished, ids(&["b"]));
+    assert!(changes.resized.is_empty());
+    for channel in [1, 2] {
+        let events = store.events_between(channel, 0, 100).unwrap();
+        assert_eq!(events[0].media_id.as_str(), "a2");
+        store.resolve(&events[0].media_id).unwrap();
+    }
+}
+
+#[test]
+fn substitutions_read_back_by_channel_in_scheduled_order() {
+    let mut store = Store::open_in_memory().unwrap();
+    let substitution = |channel, media: &str, at, replacement: Option<&str>| Substitution {
+        channel,
+        media_id: MediaId::new(media),
+        scheduled_ms: at,
+        replacement: replacement.map(MediaId::new),
+    };
+    store
+        .record_substitution(&substitution(1, "b", 200, None), 9)
+        .unwrap();
+    store
+        .record_substitution(&substitution(1, "a", 100, Some("x")), 9)
+        .unwrap();
+    store
+        .record_substitution(&substitution(2, "c", 50, Some("y")), 9)
+        .unwrap();
+
+    assert_eq!(
+        store.substitutions(1).unwrap(),
+        [
+            substitution(1, "a", 100, Some("x")),
+            substitution(1, "b", 200, None)
+        ]
+    );
+    assert_eq!(store.substitutions(3).unwrap(), []);
+}
+
+#[test]
 fn an_unknown_kind_in_the_database_is_reported_as_corrupt() {
     // The CHECK constraint blocks bad kinds, so test the reader directly.
     let error = build_event(0, 1, "a".into(), 0, 0, "weird").unwrap_err();

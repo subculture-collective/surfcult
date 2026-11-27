@@ -73,12 +73,25 @@ For each kept item: id (the Jellyfin item id), title, kind (`movie` or `episode`
 
 - Jellyfin counts time in ticks of 100 ns. Runtime and chapter starts are stored in milliseconds, ticks divided by 10,000.
 - Items come back in the order Jellyfin listed them (sorted by name). Chapters and streams keep their order.
-- The file path is in the cache and in `Store::library_items()`, but not in `MediaItem`, which is unchanged. The path is for reconciling items by path when an id changes.
+- The file path is in the cache and in `Store::library_items()`, but not in `MediaItem`, which is unchanged. The path is for reconciling items by path when an id changes (see below).
 - An episode carries its series' tags and genres after its own, without repeats, because Jellyfin usually sets them on the series. Empty names are dropped.
 - Libraries are Jellyfin's media folders. An item gets the name of each library whose recursive listing includes it. The library list needs a key that may read `/Library/MediaFolders`.
 - Collections are Jellyfin `BoxSet` items. Each keeps its members in Jellyfin's order. A movie or episode member is kept by its item id, and a series member by its series id when at least one of its episodes is cached. Other members (an item that was skipped, a series with no cached episode) are left out.
 - A database from before migration 0004 has no libraries, tags, genres or series until the next sync replaces the cache.
 - Playback URLs are not cached; `playback` asks Jellyfin each time.
+
+## Keeping the schedule in step
+
+Tdarr replaces files in place, so a sync can find an item with a new runtime, a new id or no item at all. `Store::replace_library` compares the cache it replaces with the new items (`library::reconcile`, which does no I/O) and returns `LibraryChanges`; the sync puts it in `SyncReport::changes`.
+
+- Each cached item is matched with a new one by id, or else by file path with a new item whose id the cache did not have. An item matched by path is `renamed` (old id, new id).
+- A matched item with a different runtime is `resized`, under its new id.
+- A cached item matched neither way is `vanished`. It is not kept in the cache.
+- New items are not listed; nothing is scheduled with them yet.
+
+In the same transaction every stored event of a renamed item, on every channel and at any time, takes the new id. Rewriting the events, rather than keeping the old id as an alias, keeps frozen and future events playable without any lookup at play time: Jellyfin only knows the new id. A sequential channel also continues after the renamed item, because it reads its place from the events. `surfcult run` then follows the changes in each channel's schedule ([Schedule generator](schedule.md#following-library-changes)).
+
+Whether Jellyfin keeps an item's id when Tdarr replaces its file is not verified; the path match covers the case where it does not.
 
 ## Channel sources
 

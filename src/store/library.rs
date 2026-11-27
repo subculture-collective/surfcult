@@ -15,8 +15,8 @@ use rusqlite::{Transaction, params};
 
 use super::{Store, StoreError};
 use crate::library::{
-    AudioStream, Chapter, Collection, MediaId, MediaItem, MediaKind, MediaSource, SeriesEpisode,
-    SourceError, VideoStream,
+    AudioStream, Chapter, Collection, Known, LibraryChanges, MediaId, MediaItem, MediaKind,
+    MediaSource, SeriesEpisode, SourceError, VideoStream, reconcile,
 };
 
 /// One cached item and the file path the source reported for it. The path is
@@ -37,18 +37,31 @@ impl Store {
     /// Every collection member must be the id of one of `entries` or the series
     /// id of one of them, and item ids must not repeat; otherwise nothing
     /// changes and an error comes back.
+    ///
+    /// Returns what changed since the cache it replaced ([`reconcile`]). In
+    /// the same transaction, every stored event of a renamed item, on every
+    /// channel and at any time, takes the item's new id, so the schedule
+    /// still plays it.
     pub fn replace_library(
         &mut self,
         entries: &[LibraryEntry],
         collections: &[Collection],
         synced_at_ms: i64,
-    ) -> Result<(), StoreError> {
+    ) -> Result<LibraryChanges, StoreError> {
         validate(entries, collections)?;
         let action = "replacing the library cache";
         let tx = self
             .conn
             .transaction()
             .map_err(StoreError::database(action))?;
+        let changes = reconcile_with_cache(&tx, entries)?;
+        for (old, new) in &changes.renamed {
+            tx.execute(
+                "UPDATE events SET media_id = ?2 WHERE media_id = ?1",
+                params![old.as_str(), new.as_str()],
+            )
+            .map_err(StoreError::database(action))?;
+        }
         // Chapters, streams, labels and collection members go with their parents.
         tx.execute_batch("DELETE FROM library_collections; DELETE FROM library_items;")
             .map_err(StoreError::database(action))?;
@@ -58,7 +71,8 @@ impl Store {
         for (position, collection) in collections.iter().enumerate() {
             insert_collection(&tx, position, collection)?;
         }
-        tx.commit().map_err(StoreError::database(action))
+        tx.commit().map_err(StoreError::database(action))?;
+        Ok(changes)
     }
 
     /// Every cached item in sync order. Empty before the first sync.
@@ -348,6 +362,46 @@ fn validate(entries: &[LibraryEntry], collections: &[Collection]) -> Result<(), 
         }
     }
     Ok(())
+}
+
+/// What changes when the cache read in `tx` is replaced with `entries`.
+fn reconcile_with_cache(
+    tx: &Transaction<'_>,
+    entries: &[LibraryEntry],
+) -> Result<LibraryChanges, StoreError> {
+    let action = "reading the library cache";
+    let mut statement = tx
+        .prepare_cached("SELECT id, path, runtime_ms FROM library_items ORDER BY position")
+        .map_err(StoreError::database(action))?;
+    let cached: Vec<(MediaId, Option<String>, i64)> = statement
+        .query_map([], |row| {
+            Ok((
+                MediaId::new(row.get::<_, String>(0)?),
+                row.get(1)?,
+                row.get(2)?,
+            ))
+        })
+        .map_err(StoreError::database(action))?
+        .collect::<Result<_, _>>()
+        .map_err(StoreError::database(action))?;
+    let old: Vec<Known<'_>> = cached
+        .iter()
+        .map(|(id, path, runtime_ms)| Known {
+            id,
+            path: path.as_deref(),
+            // The column's CHECK keeps it from being negative.
+            runtime_ms: u64::try_from(*runtime_ms).unwrap_or(0),
+        })
+        .collect();
+    let new: Vec<Known<'_>> = entries
+        .iter()
+        .map(|entry| Known {
+            id: &entry.item.id,
+            path: entry.path.as_deref(),
+            runtime_ms: entry.item.runtime_ms,
+        })
+        .collect();
+    Ok(reconcile(&old, &new))
 }
 
 fn kind_name(kind: MediaKind) -> &'static str {

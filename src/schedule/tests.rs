@@ -10,8 +10,10 @@ use crate::clips::{Clip, Pool as ClipPool};
 use crate::config::{
     Block, Breaks, Channel, Day, Lineup, Mode, Plan, Rotation, Source, Tz, WeightedSource,
 };
-use crate::library::{Chapter, FakeMediaSource, MediaId, MediaItem, MediaKind, resolve_pool};
-use crate::store::Store;
+use crate::library::{
+    Chapter, FakeMediaSource, LibraryChanges, MediaId, MediaItem, MediaKind, resolve_pool,
+};
+use crate::store::{LibraryEntry, Store};
 use crate::timeline::{Event, EventKind};
 
 const MINUTE: i64 = 60_000;
@@ -3250,3 +3252,109 @@ fn clip_events_are_never_fitted() {
 
 mod grid;
 mod sign_off;
+
+// Following library changes.
+
+/// Replaces the store's library cache with `items`, each in the library `All`
+/// that `channel` plays, at the path `/media/<id>`, and returns the changes.
+fn cache(store: &mut Store, items: &[MediaItem]) -> LibraryChanges {
+    let entries: Vec<LibraryEntry> = items
+        .iter()
+        .map(|item| LibraryEntry {
+            item: MediaItem {
+                libraries: vec!["All".into()],
+                ..item.clone()
+            },
+            path: Some(format!("/media/{}", item.id)),
+        })
+        .collect();
+    store.replace_library(&entries, &[], 0).unwrap()
+}
+
+/// `reschedule` for `channel` with its pools resolved from the cache.
+fn reschedule_cached(
+    store: &mut Store,
+    channel: &Channel,
+    now_ms: i64,
+    changes: &LibraryChanges,
+) -> Extended {
+    let pools: Vec<(Source, Vec<MediaItem>)> = channel
+        .plan
+        .sources()
+        .into_iter()
+        .map(|source| (source.clone(), resolve_pool(3, source, &*store).unwrap()))
+        .collect();
+    reschedule(store, channel, &pools, &[], Tz::UTC, now_ms, changes).unwrap()
+}
+
+#[test]
+fn a_vanished_item_is_replaced_after_the_freeze_and_each_replacement_recorded() {
+    // a 0-20, b 20-47, c 47-81, d 81-122 minutes, and so on. `b` leaves the
+    // library; the `b` at 20 minutes is frozen, every later one is replaced.
+    let items = pool(&["a", "b", "c", "d"]);
+    let mut store = setup();
+    let channel = channel(3, Mode::Sequential);
+    let now = at(2026, 6, 1, 12, 0);
+    cache(&mut store, &items);
+    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
+    let before = all_events(&store);
+
+    let kept = [items[0].clone(), items[2].clone(), items[3].clone()];
+    let changes = cache(&mut store, &kept);
+    assert_eq!(changes.vanished, [MediaId::new("b")]);
+    let result = reschedule_cached(&mut store, &channel, now, &changes);
+
+    let boundary = regenerated_from(&result);
+    assert_eq!(boundary, now + 47 * MINUTE);
+    let after = all_events(&store);
+    assert_eq!(after[..2], before[..2]);
+    assert_eq!(after[1].media_id.as_str(), "b");
+    assert!(after[2..].iter().all(|e| e.media_id.as_str() != "b"));
+    assert_covers(&after, now, now + HORIZON_MS);
+
+    let replaced: Vec<i64> = before
+        .iter()
+        .filter(|e| e.media_id.as_str() == "b" && e.start_ms >= boundary)
+        .map(|e| e.start_ms)
+        .collect();
+    let substitutions = store.substitutions(3).unwrap();
+    assert!(!replaced.is_empty());
+    assert_eq!(
+        substitutions
+            .iter()
+            .map(|s| s.scheduled_ms)
+            .collect::<Vec<_>>(),
+        replaced
+    );
+    for substitution in &substitutions {
+        assert_eq!(substitution.media_id.as_str(), "b");
+        let on_then = after
+            .iter()
+            .find(|e| {
+                e.start_ms <= substitution.scheduled_ms && substitution.scheduled_ms < e.end_ms
+            })
+            .unwrap();
+        assert_eq!(substitution.replacement.as_ref(), Some(&on_then.media_id));
+    }
+}
+
+#[test]
+fn a_change_to_an_item_nothing_plays_only_extends_the_schedule() {
+    let items = pool(&["a", "b"]);
+    let mut store = setup();
+    let channel = channel(3, Mode::Sequential);
+    let now = at(2026, 6, 1, 12, 0);
+    cache(&mut store, &items);
+    extend_fixed(&mut store, &channel, &items, &[], now, true).unwrap();
+    let before = all_events(&store);
+    let changes = LibraryChanges {
+        vanished: vec![MediaId::new("gone")],
+        ..LibraryChanges::default()
+    };
+
+    let result = reschedule_cached(&mut store, &channel, now, &changes);
+
+    assert!(matches!(result, Extended::UpToDate { .. }), "{result:?}");
+    assert_eq!(all_events(&store), before);
+    assert_eq!(store.substitutions(3).unwrap(), []);
+}
