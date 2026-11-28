@@ -739,7 +739,21 @@ fn a_channel_reads_as_the_file_writes_it() {
     assert_eq!(body.settings.name, "SATURDAY CARTOONS");
     assert_eq!(body.settings.grid.as_deref(), Some("30m"));
     assert_eq!(body.settings.mode.as_deref(), Some("shuffle"));
-    assert_eq!(body.pools, ["tune-in", "ads-90s", "filler", "anthem"]);
+    let pools: Vec<(&str, &str)> = body
+        .pools
+        .iter()
+        .map(|pool| (pool.name.as_str(), pool.kind.as_str()))
+        .collect();
+    assert_eq!(
+        pools,
+        [
+            ("tune-in", "filler"),
+            ("ads-90s", "commercial"),
+            ("bumps", "bump"),
+            ("filler", "filler"),
+            ("anthem", "filler"),
+        ]
+    );
     assert!(body.source_kinds.contains(&"jellyfin_genre".to_string()));
     let blocks: edit::EditBody = json(send(app.clone(), get_request("/channels/5")));
     assert_eq!(blocks.settings.source, None);

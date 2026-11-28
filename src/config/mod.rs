@@ -69,7 +69,9 @@ pub struct Channel {
     /// Programs start on this grid and gaps are filled.
     pub grid: Option<Duration>,
     pub breaks: Option<Breaks>,
-    /// Pool used to pad commercial breaks the break pool leaves short when
+    /// The clips placed between two programs.
+    pub between: Option<Between>,
+    /// Pool used to pad commercial breaks the break pools leave short when
     /// the `breaks.pad` pool has no clip, fill
     /// grid gaps and play the time a blocks channel has no block or default
     /// for.
@@ -209,14 +211,91 @@ pub struct Block {
 pub struct Breaks {
     pub every: Duration,
     pub length: Duration,
-    pub pool: String,
-    /// The break pool's `rotation`, copied from its `[[interstitial_pool]]`.
-    pub rotation: Rotation,
-    /// The break pool's `repeat_after`, copied from its `[[interstitial_pool]]`.
-    pub repeat_after: Option<Duration>,
+    /// What fills each break: its opening clip, the weighted pools and its
+    /// closing clip.
+    pub fill: Interlude,
     /// The pool of idents and slates that pads a break's shortfall before the
     /// channel's `filler` pool does.
     pub pad: Option<String>,
+}
+
+/// A channel's `between` key: what plays between two programs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Between {
+    /// `None` places one clip from the pools; a length is filled like a
+    /// break, padded like one.
+    pub length: Option<Duration>,
+    pub fill: Interlude,
+}
+
+/// The clips of one break or one `between`: one clip from `open`, clips
+/// drawn from `pools` by weight, then one clip from `close`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Interlude {
+    /// At least one pool, each named once. `pool = "ads"` is
+    /// `pools = [{ pool = "ads" }]`.
+    pub pools: Vec<WeightedPool>,
+    pub open: Option<PoolUse>,
+    pub close: Option<PoolUse>,
+}
+
+/// A pool and its share of the draws, a whole number of at least 1.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WeightedPool {
+    pub pool: PoolUse,
+    pub weight: u32,
+}
+
+/// An interstitial pool named by a channel, with the settings of its
+/// `[[interstitial_pool]]` copied in, so the channel alone says how its
+/// clips are drawn and a change to a pool changes the channels that use it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PoolUse {
+    pub name: String,
+    pub kind: ClipKind,
+    pub rotation: Rotation,
+    pub repeat_after: Option<Duration>,
+}
+
+/// What a pool's clips are, its `kind` key. It decides the event kind they
+/// are scheduled as: commercials and trailers are breaks, which show the
+/// watermark; bumps, stingers and idents are idents, which do not; filler is
+/// filler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipKind {
+    Commercial,
+    Trailer,
+    Bump,
+    Stinger,
+    Ident,
+    Filler,
+}
+
+impl ClipKind {
+    pub const ALL: [Self; 6] = [
+        Self::Commercial,
+        Self::Trailer,
+        Self::Bump,
+        Self::Stinger,
+        Self::Ident,
+        Self::Filler,
+    ];
+
+    /// The name `kind` takes in `channels.toml`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Commercial => "commercial",
+            Self::Trailer => "trailer",
+            Self::Bump => "bump",
+            Self::Stinger => "stinger",
+            Self::Ident => "ident",
+            Self::Filler => "filler",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
+    }
 }
 
 /// The order a pool's clips are drawn in when it fills breaks, its
@@ -236,10 +315,15 @@ pub enum Rotation {
 pub struct InterstitialPool {
     pub name: String,
     pub path: PathBuf,
-    /// The order the clips are drawn in when the pool fills breaks.
+    /// What the clips are. Without a `kind` key, `commercial` for a pool a
+    /// channel's `breaks` draws from (`breaks.pool` or `breaks.pools`) and
+    /// `filler` for any other.
+    pub kind: ClipKind,
+    /// The order the clips are drawn in when breaks or `between` draw from
+    /// the pool.
     pub rotation: Rotation,
-    /// On one channel, a clip from this pool does not play in a break again
-    /// until this long after its last airing started. `None` sets no limit
+    /// On one channel, a clip from this pool is not drawn for a break or
+    /// `between` again until this long after its last airing started. `None` sets no limit
     /// beyond once per break.
     pub repeat_after: Option<Duration>,
 }

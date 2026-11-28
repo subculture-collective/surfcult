@@ -4,15 +4,17 @@
 use std::collections::HashSet;
 
 use super::blocks::{Span, spans};
+use super::breaks::{BetweenPlan, ClipPool, Interlude, memory_ms};
 use super::sign_off::{clip as sign_off_clip, nights};
 use super::{
     BreakPlan, Generated, Lane, Layout, Note, Params, Resume, ScheduleError, SourcePool,
     cooling_target, generate, generate_blocks, generate_fixed,
 };
 use crate::clips::Pool;
-use crate::config::{Channel, Mode, Plan, Source, Tz, WeightedSource};
+use crate::config::{self, Channel, ClipKind, Mode, Plan, PoolUse, Source, Tz, WeightedSource};
 use crate::library::{MediaId, MediaItem};
 use crate::store::Store;
+use crate::timeline::EventKind;
 
 /// How far ahead of `now` a channel's schedule is kept filled: seven days.
 pub const HORIZON_MS: i64 = 7 * 24 * 60 * 60 * 1000;
@@ -43,10 +45,11 @@ pub enum Extended {
 /// channels ignore it.
 ///
 /// `clips` are the scanned clip pools, usually
-/// [`ClipLibrary::pools`](crate::clips::ClipLibrary::pools). The channel's
-/// break pool, its `breaks.pad` pool, its `filler` pool and its sign-off pool
-/// are looked up there by name; a pool that is not there counts as empty. A
-/// channel without breaks, blocks or a sign-off ignores `clips`.
+/// [`ClipLibrary::pools`](crate::clips::ClipLibrary::pools). The pools the
+/// channel's breaks and `between` draw from, its `breaks.pad` pool, its
+/// `filler` pool and its sign-off pool are looked up there by name; a pool
+/// that is not there counts as empty. A channel without breaks, `between`,
+/// blocks or a sign-off ignores `clips`.
 ///
 /// Does nothing unless `clock_trusted` is true: a Pi whose clock has not
 /// synchronized must not store a wrong week. Starts at the later of `now_ms`
@@ -116,42 +119,49 @@ pub(super) fn fill(
     let breaks = channel.breaks.as_ref().map(|breaks| BreakPlan {
         every_ms: millis(breaks.every),
         length_ms: millis(breaks.length),
-        clips: clips_of(&breaks.pool),
-        rotation: breaks.rotation,
-        repeat_after_ms: breaks
-            .repeat_after
-            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
+        fill: interlude(&breaks.fill, clips),
         idents: breaks.pad.as_deref().map_or(&[][..], clips_of),
         filler: channel.filler.as_deref().map_or(&[][..], clips_of),
     });
-    // The rotation continues after the last break clip already stored, and
-    // the repeat limit counts from each clip's last airing. A clip that
-    // started more than `memory_ms` (ROTATION_MEMORY_MS or the pool's
+    let between = channel.between.as_ref().map(|between| BetweenPlan {
+        length_ms: between.length.map(millis),
+        fill: interlude(&between.fill, clips),
+    });
+    // Each rotation continues after its pool's newest clip already stored,
+    // and each repeat limit counts from a clip's last airing. A clip that
+    // started more than `memory_ms` (ROTATION_MEMORY_MS or the longest
     // repeat_after, whichever is longer) before `from_ms` cannot affect the
-    // result: every new break starts at or after `from_ms`, so the rotation
+    // result: every new draw starts at or after `from_ms`, so the rotation
     // starts again at the first clip and the limit has passed either way.
-    // Reading only that window keeps a channel that never stored a break from
+    // Reading only that window keeps a channel that never stored a clip from
     // walking its whole history.
-    let aired = match &breaks {
-        Some(plan) => store.breaks_between(n, from_ms.saturating_sub(plan.memory_ms()), from_ms)?,
-        None => Vec::new(),
+    let aired = if breaks.is_some() || between.is_some() {
+        let memory = memory_ms(breaks.as_ref(), between.as_ref());
+        store.clips_between(n, from_ms.saturating_sub(memory), from_ms)?
+    } else {
+        Vec::new()
     };
-    let last_break = aired.first().cloned();
     let filler = channel.filler.as_deref().map_or(&[][..], clips_of);
     let grid = channel.grid.map(millis);
 
     // The nights off the air and the clip that starts each. Where the last
     // stored event ends, and what it is, tells a run that starts in the gap
     // before a sign-off from one that starts after a program.
-    let (nights, sign_off, last_event) = match &channel.sign_off {
+    // `between` reads it too: it plays before the run's first program when
+    // the last stored event is a program that ends where the run starts.
+    let (nights, sign_off) = match &channel.sign_off {
         Some(config) => (
             nights(config, timezone, from_ms, horizon_ms)?,
             sign_off_clip(clips_of(&config.pool), config.clip.as_deref()),
-            store
-                .last_event_before(n, from_ms)?
-                .map(|event| (event.end_ms, event.kind)),
         ),
-        None => (Vec::new(), None, None),
+        None => (Vec::new(), None),
+    };
+    let last_event = if channel.sign_off.is_some() || between.is_some() {
+        store
+            .last_event_before(n, from_ms)?
+            .map(|event| (event.end_ms, event.kind))
+    } else {
+        None
     };
 
     let generated = match &channel.plan {
@@ -167,7 +177,6 @@ pub(super) fn fill(
             };
             let resume = Resume {
                 recent,
-                last_break,
                 aired,
                 last_event,
             };
@@ -176,6 +185,7 @@ pub(super) fn fill(
                     channel: n,
                     mode: *mode,
                     breaks,
+                    between,
                     grid_ms: grid,
                     filler,
                 };
@@ -186,6 +196,7 @@ pub(super) fn fill(
                 let layout = Layout {
                     channel: n,
                     breaks,
+                    between,
                     grid_ms: grid,
                     lanes: vec![lane],
                     default: None,
@@ -214,6 +225,7 @@ pub(super) fn fill(
             let layout = Layout {
                 channel: n,
                 breaks,
+                between,
                 grid_ms: grid,
                 spans: spans(blocks, timezone, from_ms, horizon_ms)?,
                 lanes,
@@ -224,7 +236,6 @@ pub(super) fn fill(
             };
             let resume = Resume {
                 recent,
-                last_break,
                 aired,
                 last_event,
             };
@@ -254,6 +265,41 @@ pub(super) fn lane_of<'a>(
                     .map_or(&[][..], |(_, items)| items.as_slice()),
             })
             .collect(),
+    }
+}
+
+/// The generator's view of the pools `fill` draws from, their clips looked
+/// up in `clips` by name.
+fn interlude<'a>(fill: &'a config::Interlude, clips: &'a [Pool]) -> Interlude<'a> {
+    let pool_of = |pool: &'a PoolUse| ClipPool {
+        name: &pool.name,
+        clips: clips
+            .iter()
+            .find(|scanned| scanned.name() == pool.name)
+            .map_or(&[][..], Pool::clips),
+        rotation: pool.rotation,
+        repeat_after_ms: pool
+            .repeat_after
+            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX)),
+        kind: event_kind(pool.kind),
+    };
+    Interlude {
+        pools: fill
+            .pools
+            .iter()
+            .map(|entry| (pool_of(&entry.pool), entry.weight))
+            .collect(),
+        open: fill.open.as_ref().map(pool_of),
+        close: fill.close.as_ref().map(pool_of),
+    }
+}
+
+/// The event kind a pool's clips are scheduled as.
+fn event_kind(kind: ClipKind) -> EventKind {
+    match kind {
+        ClipKind::Commercial | ClipKind::Trailer => EventKind::Break,
+        ClipKind::Bump | ClipKind::Stinger | ClipKind::Ident => EventKind::Ident,
+        ClipKind::Filler => EventKind::Filler,
     }
 }
 

@@ -319,6 +319,7 @@ fn clips_come_from_a_scanned_pool() {
             name: "tune-in".into(),
             path: dir.path().to_path_buf(),
             rotation: Default::default(),
+            kind: crate::config::ClipKind::Filler,
             repeat_after: None,
         }],
         prober,

@@ -8,7 +8,8 @@ use super::breaks::cut_points;
 use super::*;
 use crate::clips::{Clip, Pool as ClipPool};
 use crate::config::{
-    Block, Breaks, Channel, Day, Lineup, Mode, Plan, Rotation, Source, Tz, WeightedSource,
+    Block, Breaks, Channel, ClipKind, Day, Interlude, Lineup, Mode, Plan, PoolUse, Rotation,
+    Source, Tz, WeightedPool, WeightedSource,
 };
 use crate::library::{
     Chapter, FakeMediaSource, LibraryChanges, MediaId, MediaItem, MediaKind, resolve_pool,
@@ -31,6 +32,16 @@ fn pool(ids: &[&str]) -> Vec<MediaItem> {
         .collect()
 }
 
+/// A pool named by a channel, in pool order with no repeat limit.
+fn pool_use(name: &str, kind: ClipKind) -> PoolUse {
+    PoolUse {
+        name: name.into(),
+        kind,
+        rotation: Rotation::Order,
+        repeat_after: None,
+    }
+}
+
 fn channel(number: u32, mode: Mode) -> Channel {
     Channel {
         number,
@@ -41,6 +52,7 @@ fn channel(number: u32, mode: Mode) -> Channel {
         },
         grid: None,
         breaks: None,
+        between: None,
         filler: None,
         sign_off: None,
     }
@@ -64,6 +76,25 @@ fn params(mode: Mode) -> Params<'static> {
         filler: &[],
         mode,
         breaks: None,
+        between: None,
+    }
+}
+
+/// What `extend` reads from the store before a run that starts after
+/// `events`: the programs and the clips newest first, and the last event.
+fn resume_after(events: &[Event]) -> Resume {
+    let newest = |program: bool| {
+        events
+            .iter()
+            .rev()
+            .filter(move |e| (e.kind == EventKind::Program) == program)
+    };
+    Resume {
+        recent: newest(true).map(|e| e.media_id.clone()).collect(),
+        aired: newest(false)
+            .map(|e| (e.start_ms, e.media_id.clone()))
+            .collect(),
+        last_event: events.last().map(|e| (e.end_ms, e.kind)),
     }
 }
 
@@ -339,6 +370,7 @@ fn a_shuffle_differs_by_channel() {
             filler: &[],
             mode: Mode::Shuffle,
             breaks: None,
+            between: None,
         };
         let out = generate(
             &params,
@@ -864,13 +896,22 @@ fn clip_id(name: &str) -> String {
     format!("/clips/{name}.mp4")
 }
 
+/// A pool of commercials in pool order with no repeat limit.
+fn ads_pool<'a>(name: &'a str, clips: &'a [Clip]) -> breaks::ClipPool<'a> {
+    breaks::ClipPool {
+        name,
+        clips,
+        rotation: Rotation::Order,
+        repeat_after_ms: None,
+        kind: EventKind::Break,
+    }
+}
+
 fn plan<'a>(every_min: u64, length_s: u64, clips: &'a [Clip], pad: &'a [Clip]) -> BreakPlan<'a> {
     BreakPlan {
         every_ms: every_min * 60 * SECOND,
         length_ms: length_s * SECOND,
-        clips,
-        rotation: Rotation::Order,
-        repeat_after_ms: None,
+        fill: breaks::Interlude::of(ads_pool("ads", clips)),
         idents: &[],
         filler: pad,
     }
@@ -883,6 +924,7 @@ fn with_breaks(mode: Mode, breaks: BreakPlan<'_>) -> Params<'_> {
         filler: &[],
         mode,
         breaks: Some(breaks),
+        between: None,
     }
 }
 
@@ -1106,7 +1148,7 @@ fn break_clips_rotate_and_play_once_per_break() {
     // The rotation continues after the last stored break clip, and an id no
     // longer in the pool starts it again at the first clip.
     let resume = |last: &str| Resume {
-        last_break: Some((-MINUTE, MediaId::new(last))),
+        aired: vec![(-MINUTE, MediaId::new(last))],
         ..Resume::default()
     };
     let out = generate(&params, &single(&items), &resume(&b), 0, 1).unwrap();
@@ -1156,24 +1198,7 @@ fn a_shuffle_with_breaks_resumed_at_a_program_matches_an_unbroken_run() {
         )
         .unwrap();
         assert_eq!(first.events, whole.events[..cut]);
-        // What `extend` reads from the store: the program rows newest first,
-        // and the last break clip.
-        let resume = Resume {
-            recent: first
-                .events
-                .iter()
-                .rev()
-                .filter(|e| e.kind == EventKind::Program)
-                .map(|e| e.media_id.clone())
-                .collect(),
-            last_break: first
-                .events
-                .iter()
-                .rev()
-                .find(|e| e.kind == EventKind::Break)
-                .map(|e| (e.start_ms, e.media_id.clone())),
-            ..Resume::default()
-        };
+        let resume = resume_after(&first.events);
         let rest = generate(&params, &single(&items), &resume, boundary, end).unwrap();
         assert_eq!(rest.events, whole.events[cut..], "cut at {cut}");
     }
@@ -1223,21 +1248,7 @@ fn clips_sharing_a_media_id_count_once() {
         .collect();
     for &cut in &starts[1..5] {
         let boundary = whole.events[cut].start_ms;
-        let first = &whole.events[..cut];
-        let resume = Resume {
-            recent: first
-                .iter()
-                .rev()
-                .filter(|e| e.kind == EventKind::Program)
-                .map(|e| e.media_id.clone())
-                .collect(),
-            last_break: first
-                .iter()
-                .rev()
-                .find(|e| e.kind == EventKind::Break)
-                .map(|e| (e.start_ms, e.media_id.clone())),
-            ..Resume::default()
-        };
+        let resume = resume_after(&whole.events[..cut]);
         let rest = generate(&params, &single(&items), &resume, boundary, end).unwrap();
         assert_eq!(rest.events, whole.events[cut..], "cut at {cut}");
     }
@@ -1250,7 +1261,7 @@ fn the_rotation_starts_over_after_a_day_without_breaks() {
     let params = with_breaks(Mode::Sequential, plan(10, 60, &ads, &[]));
     let first_break = 10 * MINUTE;
     let resume = |started: i64| Resume {
-        last_break: Some((started, MediaId::new(clip_id("a")))),
+        aired: vec![(started, MediaId::new(clip_id("a")))],
         ..Resume::default()
     };
 
@@ -1278,9 +1289,14 @@ fn channel_with_breaks(mode: Mode) -> Channel {
     channel.breaks = Some(Breaks {
         every: Duration::from_secs(11 * 60),
         length: Duration::from_secs(120),
-        pool: "ads".into(),
-        rotation: Rotation::Order,
-        repeat_after: None,
+        fill: Interlude {
+            pools: vec![WeightedPool {
+                pool: pool_use("ads", ClipKind::Commercial),
+                weight: 1,
+            }],
+            open: None,
+            close: None,
+        },
         pad: None,
     });
     channel.filler = Some("filler".into());
@@ -1347,13 +1363,12 @@ fn an_extend_without_its_clip_pools_reports_short_breaks() {
 fn with_rotation(
     rotation: Rotation,
     repeat_after_ms: Option<i64>,
-    plan: BreakPlan<'_>,
+    mut plan: BreakPlan<'_>,
 ) -> BreakPlan<'_> {
-    BreakPlan {
-        rotation,
-        repeat_after_ms,
-        ..plan
-    }
+    let pool = &mut plan.fill.pools[0].0;
+    pool.rotation = rotation;
+    pool.repeat_after_ms = repeat_after_ms;
+    plan
 }
 
 /// Checks that no break clip in `events` starts again less than `limit_ms`
@@ -1549,8 +1564,9 @@ fn the_pad_pool_pads_a_break_before_the_filler_pool_with_idents() {
 fn channel_with_break_settings(mode: Mode, rotation: Rotation, repeat_after: Duration) -> Channel {
     let mut channel = channel_with_breaks(mode);
     let breaks = channel.breaks.as_mut().unwrap();
-    breaks.rotation = rotation;
-    breaks.repeat_after = Some(repeat_after);
+    let pool = &mut breaks.fill.pools[0].pool;
+    pool.rotation = rotation;
+    pool.repeat_after = Some(repeat_after);
     breaks.pad = Some("idents".into());
     channel
 }
@@ -1660,6 +1676,7 @@ fn weighted_params(channel: u32) -> Params<'static> {
         filler: &[],
         mode: Mode::Weighted,
         breaks: None,
+        between: None,
     }
 }
 
@@ -2145,6 +2162,7 @@ fn a_weighted_block_extended_twice_matches_one_unbroken_run_across_dst() {
         channel: 3,
         grid_ms: None,
         breaks: Some(plan(11, 120, clips[0].clips(), clips[1].clips())),
+        between: None,
         spans: spans(blocks, CHICAGO, now, end).unwrap(),
         lanes: blocks
             .iter()
@@ -2256,6 +2274,7 @@ fn layout<'a>(
         channel: 3,
         grid_ms: None,
         breaks: None,
+        between: None,
         spans: spans(blocks, CHICAGO, start, end).unwrap(),
         lanes,
         default,
@@ -2560,6 +2579,7 @@ fn a_blocks_extend_twice_matches_one_unbroken_run_across_dst() {
         channel: 3,
         grid_ms: None,
         breaks: Some(plan(11, 120, clips[0].clips(), clips[1].clips())),
+        between: None,
         spans: spans(blocks, CHICAGO, now, end).unwrap(),
         lanes,
         default: Some(2),
@@ -2592,8 +2612,9 @@ fn a_blocks_extend_with_break_settings_matches_one_unbroken_run() {
     for rotation in [Rotation::Order, Rotation::Shuffle] {
         let mut channel = blocks_channel_with_breaks();
         let breaks = channel.breaks.as_mut().unwrap();
-        breaks.rotation = rotation;
-        breaks.repeat_after = Some(Duration::from_secs(25 * 60));
+        let pool = &mut breaks.fill.pools[0].pool;
+        pool.rotation = rotation;
+        pool.repeat_after = Some(Duration::from_secs(25 * 60));
         breaks.pad = Some("idents".into());
         let mut store = setup();
 
@@ -2622,6 +2643,7 @@ fn a_blocks_extend_with_break_settings_matches_one_unbroken_run() {
             channel: 3,
             grid_ms: None,
             breaks: Some(plan),
+            between: None,
             spans: spans(blocks, CHICAGO, now, end).unwrap(),
             lanes,
             default: Some(2),
@@ -2654,6 +2676,7 @@ fn a_break_clip_cut_off_by_a_block_end_does_not_count_toward_repeat_after() {
             Some(15 * MINUTE),
             plan(11, 120, &ads, &[]),
         )),
+        between: None,
         lanes: vec![lane.clone(), lane],
         default: None,
         spans: vec![
@@ -3251,6 +3274,7 @@ fn clip_events_are_never_fitted() {
 }
 
 mod grid;
+mod interstitials;
 mod sign_off;
 
 // Following library changes.

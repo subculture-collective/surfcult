@@ -31,9 +31,17 @@ pub(super) struct EditBody {
     pub(super) number: u32,
     pub(super) settings: ChannelSettings,
     /// The interstitial pools, for `breaks` and `filler`.
-    pub(super) pools: Vec<String>,
+    pub(super) pools: Vec<PoolBody>,
     /// The source kinds `settings.source.kind` can be.
     pub(super) source_kinds: Vec<String>,
+}
+
+/// An interstitial pool's name and its `kind`, such as `commercial` or
+/// `bump`.
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct PoolBody {
+    pub(super) name: String,
+    pub(super) kind: String,
 }
 
 /// `GET /channels/{number}`: the channel's settings as the file writes them.
@@ -117,7 +125,10 @@ fn body(state: &AppState, number: u32, settings: ChannelSettings) -> EditBody {
             .config()
             .pools
             .iter()
-            .map(|pool| pool.name.clone())
+            .map(|pool| PoolBody {
+                name: pool.name.clone(),
+                kind: pool.kind.name().to_string(),
+            })
             .collect(),
         source_kinds: SOURCE_KINDS.iter().map(|kind| kind.to_string()).collect(),
     }

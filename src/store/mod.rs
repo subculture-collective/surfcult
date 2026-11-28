@@ -60,9 +60,9 @@ const RECENT_PROGRAMS_BEFORE: &str = "SELECT start_ms, media_id FROM events
      ORDER BY start_ms DESC
      LIMIT ?3";
 
-/// The query behind [`Store::breaks_between`]; a test checks its plan.
-const BREAKS_BETWEEN: &str = "SELECT start_ms, media_id FROM events
-     WHERE channel = ?1 AND kind = 'break' AND start_ms >= ?2 AND start_ms < ?3
+/// The query behind [`Store::clips_between`]; a test checks its plan.
+const CLIPS_BETWEEN: &str = "SELECT start_ms, media_id FROM events
+     WHERE channel = ?1 AND kind != 'program' AND start_ms >= ?2 AND start_ms < ?3
      ORDER BY start_ms DESC";
 
 /// How long a call waits for another connection's lock before failing.
@@ -269,22 +269,23 @@ impl Store {
             .map_err(StoreError::database("reading the last program"))
     }
 
-    /// The start time and media id of each of the channel's break events
-    /// that start in `[since_ms, before_ms)`, newest first: the clips a break
-    /// pool's rotation continues after and its repeat limit counts from.
+    /// The start time and media id of each of the channel's clip events
+    /// (break, ident and filler) that start in `[since_ms, before_ms)`,
+    /// newest first: the clips each break and `between` pool's rotation
+    /// continues after and its repeat limit counts from.
     /// Walks back from `before_ms` on the primary key and stops at
     /// `since_ms`, so the cost is one window of events, not the channel's
     /// whole history.
-    pub fn breaks_between(
+    pub fn clips_between(
         &self,
         channel: u32,
         since_ms: i64,
         before_ms: i64,
     ) -> Result<Vec<(i64, MediaId)>, StoreError> {
-        let action = "reading recent breaks";
+        let action = "reading recent clips";
         let mut statement = self
             .conn
-            .prepare_cached(BREAKS_BETWEEN)
+            .prepare_cached(CLIPS_BETWEEN)
             .map_err(StoreError::database(action))?;
         let rows = statement
             .query_map(params![channel, since_ms, before_ms], |row| {

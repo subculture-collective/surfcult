@@ -41,7 +41,7 @@ fn the_example_file_loads_into_typed_config() {
 
     assert_eq!(config.timezone, Tz::America__Chicago);
     assert_eq!(config.channels.len(), 3);
-    assert_eq!(config.pools.len(), 4);
+    assert_eq!(config.pools.len(), 5);
 
     let cartoons = &config.channels[0];
     assert_eq!(cartoons.number, 3);
@@ -61,9 +61,14 @@ fn the_example_file_loads_into_typed_config() {
         Some(Breaks {
             every: Duration::from_secs(11 * 60),
             length: Duration::from_secs(2 * 60),
-            pool: "ads-90s".into(),
-            rotation: Rotation::Order,
-            repeat_after: None,
+            fill: Interlude {
+                pools: vec![WeightedPool {
+                    pool: pool_use("ads-90s", ClipKind::Commercial, Rotation::Order, None),
+                    weight: 1,
+                }],
+                open: Some(pool_use("bumps", ClipKind::Bump, Rotation::Shuffle, None)),
+                close: None,
+            },
             pad: None,
         })
     );
@@ -286,6 +291,206 @@ fn with_break_settings(pool_keys: &str, breaks: &str) -> String {
 
 const BREAKS: &str = "every = \"10m\", length = \"2m\", pool = \"ads\"";
 
+fn pool_use(
+    name: &str,
+    kind: ClipKind,
+    rotation: Rotation,
+    repeat_after: Option<Duration>,
+) -> PoolUse {
+    PoolUse {
+        name: name.into(),
+        kind,
+        rotation,
+        repeat_after,
+    }
+}
+
+/// `with_break_settings` with `bumps` and `stingers` pools of those kinds.
+fn with_interstitials(breaks: &str, between: &str) -> String {
+    let mut text = with_break_settings("", breaks);
+    if !between.is_empty() {
+        text = text.replace(
+            "breaks = {",
+            &format!("between = {{ {between} }}\nbreaks = {{"),
+        );
+    }
+    format!(
+        "{text}[[interstitial_pool]]\nname = \"bumps\"\npath = \"/clips/bumps\"\nkind = \"bump\"\n\
+         [[interstitial_pool]]\nname = \"stingers\"\npath = \"/clips/stingers\"\nkind = \"stinger\"\n"
+    )
+}
+
+#[test]
+fn a_pool_kind_defaults_to_commercial_for_a_break_pool_and_filler_otherwise() {
+    let config = Config::parse(&with_break_settings("", BREAKS)).unwrap();
+    assert_eq!(config.pools[0].kind, ClipKind::Commercial);
+    assert_eq!(config.pools[1].kind, ClipKind::Filler);
+
+    let text = with_break_settings("kind = \"trailer\"", BREAKS);
+    let config = Config::parse(&text).unwrap();
+    assert_eq!(config.pools[0].kind, ClipKind::Trailer);
+    let breaks = config.channels[0].breaks.as_ref().unwrap();
+    assert_eq!(breaks.fill.pools[0].pool.kind, ClipKind::Trailer);
+
+    let found = problems(&with_break_settings("kind = \"advert\"", BREAKS));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].field, "interstitial_pool[0].kind");
+    assert!(found[0].message.contains("commercial, trailer, bump"));
+}
+
+#[test]
+fn breaks_take_weighted_pools_and_open_and_close_clips() {
+    let text = with_interstitials(
+        "every = \"10m\", length = \"2m\", open = \"bumps\", pools = [{ pool = \"ads\", weight = 3 }, { pool = \"idents\" }], close = \"stingers\"",
+        "",
+    );
+    let config = Config::parse(&text).unwrap();
+    let fill = &config.channels[0].breaks.as_ref().unwrap().fill;
+    assert_eq!(
+        *fill,
+        Interlude {
+            pools: vec![
+                WeightedPool {
+                    pool: pool_use("ads", ClipKind::Commercial, Rotation::Order, None),
+                    weight: 3,
+                },
+                WeightedPool {
+                    pool: pool_use("idents", ClipKind::Commercial, Rotation::Order, None),
+                    weight: 1,
+                },
+            ],
+            open: Some(pool_use("bumps", ClipKind::Bump, Rotation::Order, None)),
+            close: Some(pool_use(
+                "stingers",
+                ClipKind::Stinger,
+                Rotation::Order,
+                None
+            )),
+        }
+    );
+    // `pool = "ads"` is the same as one pool of weight 1.
+    let short = Config::parse(&with_break_settings("", BREAKS)).unwrap();
+    let long = Config::parse(&with_break_settings(
+        "",
+        "every = \"10m\", length = \"2m\", pools = [{ pool = \"ads\" }]",
+    ))
+    .unwrap();
+    assert_eq!(short, long);
+}
+
+#[test]
+fn between_takes_one_clip_or_a_length_on_any_channel() {
+    let text = with_interstitials(BREAKS, "pools = [{ pool = \"bumps\" }]");
+    let config = Config::parse(&text).unwrap();
+    let between = config.channels[0].between.as_ref().unwrap();
+    assert_eq!(between.length, None);
+    assert_eq!(
+        between.fill.pools[0].pool,
+        pool_use("bumps", ClipKind::Bump, Rotation::Order, None)
+    );
+
+    let text = with_interstitials(
+        BREAKS,
+        "length = \"30s\", pool = \"ads\", close = \"stingers\"",
+    );
+    let config = Config::parse(&text).unwrap();
+    let between = config.channels[0].between.as_ref().unwrap();
+    assert_eq!(between.length, Some(Duration::from_secs(30)));
+    assert_eq!(between.fill.close.as_ref().unwrap().name, "stingers");
+
+    // Without breaks a pool only `between` draws from keeps the filler kind
+    // and may rotate.
+    let text = with_channel(&format!("{PLAIN}\nbetween = {{ pool = \"ads\" }}")).replace(
+        "path = \"/clips/ads\"",
+        "path = \"/clips/ads\"\nrotation = \"shuffle\"",
+    );
+    let config = Config::parse(&text).unwrap();
+    assert_eq!(config.pools[0].kind, ClipKind::Filler);
+    assert!(config.channels[0].breaks.is_none());
+}
+
+#[test]
+fn rejects_bad_interstitial_pools_naming_each_field() {
+    for (breaks, between, field, needle) in [
+        (
+            "every = \"10m\", length = \"2m\"",
+            "",
+            "channel[0].breaks.pools",
+            "missing",
+        ),
+        (
+            "every = \"10m\", length = \"2m\", pool = \"ads\", pools = [{ pool = \"ads\" }]",
+            "",
+            "channel[0].breaks.pools",
+            "not both",
+        ),
+        (
+            "every = \"10m\", length = \"2m\", pools = []",
+            "",
+            "channel[0].breaks.pools",
+            "missing",
+        ),
+        (
+            "every = \"10m\", length = \"2m\", pools = [{ pool = \"ads\" }, { pool = \"ads\", weight = 2 }]",
+            "",
+            "channel[0].breaks.pools[1]",
+            "same pool",
+        ),
+        (
+            "every = \"10m\", length = \"2m\", pools = [{ pool = \"ads\", weight = 0 }]",
+            "",
+            "channel[0].breaks.pools[0].weight",
+            "at least 1",
+        ),
+        (
+            "every = \"10m\", length = \"2m\", pools = [{ pool = \"promos\" }]",
+            "",
+            "channel[0].breaks.pools[0].pool",
+            "\"promos\"",
+        ),
+        (
+            "every = \"10m\", length = \"2m\", pool = \"ads\", open = \"intro\"",
+            "",
+            "channel[0].breaks.open",
+            "\"intro\"",
+        ),
+        (
+            BREAKS,
+            "pool = \"outro\"",
+            "channel[0].between.pool",
+            "\"outro\"",
+        ),
+        (
+            BREAKS,
+            "close = \"stingers\"",
+            "channel[0].between.pools",
+            "missing",
+        ),
+        (
+            BREAKS,
+            "length = \"0s\", pool = \"bumps\"",
+            "channel[0].between.length",
+            "zero",
+        ),
+    ] {
+        let found = problems(&with_interstitials(breaks, between));
+        assert_eq!(found.len(), 1, "{breaks} {between}: {found:?}");
+        assert_eq!(found[0].field, field, "{breaks} {between}");
+        assert!(
+            found[0].message.contains(needle),
+            "{breaks} {between}: {}",
+            found[0].message
+        );
+    }
+    let text = with_interstitials(BREAKS, "pool = \"bumps\", every = \"5m\"");
+    assert!(matches!(Config::parse(&text), Err(ConfigError::Parse(_))));
+    let text = with_interstitials(
+        "every = \"10m\", length = \"2m\", pools = [{ pool = \"ads\", share = 2 }]",
+        "",
+    );
+    assert!(matches!(Config::parse(&text), Err(ConfigError::Parse(_))));
+}
+
 #[test]
 fn break_settings_load_into_the_pool_and_the_channel_breaks() {
     let text = with_break_settings(
@@ -302,9 +507,19 @@ fn break_settings_load_into_the_pool_and_the_channel_breaks() {
         Some(Breaks {
             every: Duration::from_secs(10 * 60),
             length: Duration::from_secs(2 * 60),
-            pool: "ads".into(),
-            rotation: Rotation::Shuffle,
-            repeat_after: Some(Duration::from_secs(2 * 3600)),
+            fill: Interlude {
+                pools: vec![WeightedPool {
+                    pool: pool_use(
+                        "ads",
+                        ClipKind::Commercial,
+                        Rotation::Shuffle,
+                        Some(Duration::from_secs(2 * 3600)),
+                    ),
+                    weight: 1,
+                }],
+                open: None,
+                close: None,
+            },
             pad: Some("idents".into()),
         })
     );
@@ -312,8 +527,9 @@ fn break_settings_load_into_the_pool_and_the_channel_breaks() {
     // The defaults: pool order, no repeat limit, no pad pool.
     let config = Config::parse(&with_break_settings("rotation = \"order\"", BREAKS)).unwrap();
     let breaks = config.channels[0].breaks.as_ref().unwrap();
+    let ads = &breaks.fill.pools[0].pool;
     assert_eq!(
-        (breaks.rotation, breaks.repeat_after, breaks.pad.as_deref()),
+        (ads.rotation, ads.repeat_after, breaks.pad.as_deref()),
         (Rotation::Order, None, None)
     );
     let config = Config::parse(&with_break_settings("", BREAKS)).unwrap();

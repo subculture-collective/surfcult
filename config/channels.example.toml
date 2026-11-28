@@ -24,10 +24,17 @@ name = "SATURDAY CARTOONS"
 source = { jellyfin_collection = "Cartoons" }
 mode = "shuffle"
 grid = "30m"                                          # programs start on the half hour; gaps are filled
-breaks = { every = "11m", length = "2m", pool = "ads-90s" }
-# Add pad = "<pool>" to pad a break the clips leave short from that pool of
-# idents and slates before the filler pool:
-# breaks = { every = "11m", length = "2m", pool = "ads-90s", pad = "idents" }
+# A break: one clip from `open`, clips from `pool` until `length` is filled,
+# the pad, then one clip from `close` (open and close are optional).
+breaks = { every = "11m", length = "2m", open = "bumps", pool = "ads-90s" }
+# Draw from several pools by weight with `pools` in place of `pool`: here
+# three commercials for every trailer. Add pad = "<pool>" to pad a break the
+# clips leave short from that pool of idents and slates before the filler
+# pool:
+# breaks = { every = "11m", length = "2m", open = "bumps", pools = [
+#   { pool = "ads-90s", weight = 3 },
+#   { pool = "trailers", weight = 1 },
+# ], close = "stingers", pad = "idents" }
 filler = "filler"                                     # pool used to fill grid gaps
 
 # Sources: jellyfin_library, jellyfin_collection, jellyfin_tag,
@@ -38,6 +45,12 @@ name = "MOVIE NIGHT"
 source = { jellyfin_library = "Movies" }
 mode = "sequential"
 # No grid: long, irregular programs.
+# Between every two programs: one clip from the pool (`pools` takes weights as
+# in `breaks`, and `open` and `close` work as there). With a `length` it is
+# filled and padded like a break. It does not play before the first program
+# of a block or across a sign-off. It works with or without `breaks`.
+between = { pool = "bumps" }
+# between = { length = "2m", open = "bumps", pool = "ads-90s", close = "bumps" }
 # End each night with one clip, then go off the air. `at` is when the clip
 # starts and `until` when the channel comes back, both HH:MM in the time zone
 # above; `until` is the next morning when it is not after `at`. `pool` is an
@@ -97,7 +110,11 @@ mode = "weighted"
 # standby_filters = ["crt", "glitch"]
 # glitch_every = "20s"
 
-# Pools of short local clips.
+# Pools of short local clips. `kind` says what the clips are: commercial |
+# trailer | bump | stinger | ident | filler. Commercials and trailers are
+# scheduled as breaks, with the watermark; bumps, stingers and idents as
+# idents, without it; filler as filler. Without `kind` a pool a channel's
+# breaks draw from is a commercial pool and any other pool is filler.
 [[interstitial_pool]]
 name = "tune-in"
 path = "/var/lib/surfcult/clips/tune-in"
@@ -105,11 +122,18 @@ path = "/var/lib/surfcult/clips/tune-in"
 [[interstitial_pool]]
 name = "ads-90s"
 path = "/var/lib/surfcult/clips/ads-90s"
-# When the pool fills breaks:
+kind = "commercial"
+# When breaks or between draw from the pool:
 # rotation = "order"     # order: pool order, continuing from break to break (the
 #                        # default); shuffle: a new random order for each break
 # repeat_after = "2h"    # on one channel, a clip does not air again until 2h after
 #                        # its last airing started; without it, only once per break
+
+[[interstitial_pool]]
+name = "bumps"
+path = "/var/lib/surfcult/clips/bumps"
+kind = "bump"
+rotation = "shuffle"
 
 [[interstitial_pool]]
 name = "filler"

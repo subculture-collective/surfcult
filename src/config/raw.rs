@@ -14,8 +14,9 @@ use crate::input::KeyMap;
 
 use super::duration::{parse_duration, parse_minute_of_day};
 use super::{
-    Block, Breaks, Channel, Config, DEFAULT_TUNE_IN_POOL, Day, Display, Filter, InterstitialPool,
-    Lineup, Mode, Plan, Problem, Rotation, SignOff, Source, Tz, WeightedSource,
+    Between, Block, Breaks, Channel, ClipKind, Config, DEFAULT_TUNE_IN_POOL, Day, Display, Filter,
+    Interlude, InterstitialPool, Lineup, Mode, Plan, PoolUse, Problem, Rotation, SignOff, Source,
+    Tz, WeightedPool, WeightedSource,
 };
 
 #[derive(Deserialize)]
@@ -50,6 +51,7 @@ struct RawChannel {
     mode: String,
     grid: Option<String>,
     breaks: Option<RawBreaks>,
+    between: Option<RawBetween>,
     filler: Option<String>,
     default: Option<RawLineup>,
     #[serde(default)]
@@ -71,8 +73,74 @@ struct RawSignOff {
 struct RawBreaks {
     every: String,
     length: String,
-    pool: String,
+    pool: Option<String>,
+    pools: Option<Vec<RawPoolEntry>>,
+    open: Option<String>,
+    close: Option<String>,
     pad: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawBetween {
+    length: Option<String>,
+    pool: Option<String>,
+    pools: Option<Vec<RawPoolEntry>>,
+    open: Option<String>,
+    close: Option<String>,
+}
+
+/// The keys `breaks` and `between` share, as [`RawInterlude`].
+macro_rules! interlude_keys {
+    ($raw:ty) => {
+        impl $raw {
+            fn fill(&self) -> RawInterlude<'_> {
+                RawInterlude {
+                    pool: self.pool.as_deref(),
+                    pools: self.pools.as_deref(),
+                    open: self.open.as_deref(),
+                    close: self.close.as_deref(),
+                }
+            }
+        }
+    };
+}
+interlude_keys!(RawBreaks);
+interlude_keys!(RawBetween);
+
+/// The pool keys of a `breaks` or `between` table.
+#[derive(Clone, Copy)]
+struct RawInterlude<'a> {
+    pool: Option<&'a str>,
+    pools: Option<&'a [RawPoolEntry]>,
+    open: Option<&'a str>,
+    close: Option<&'a str>,
+}
+
+impl<'a> RawInterlude<'a> {
+    /// The pools it draws from by weight, whether named by `pool` or listed
+    /// in `pools`.
+    fn drawn(self) -> impl Iterator<Item = &'a str> {
+        self.pool.into_iter().chain(
+            self.pools
+                .into_iter()
+                .flatten()
+                .map(|entry| entry.pool.as_str()),
+        )
+    }
+
+    /// Every pool it names.
+    fn named(self) -> impl Iterator<Item = &'a str> {
+        self.drawn().chain(self.open).chain(self.close)
+    }
+}
+
+/// One entry of `pools`: `{ pool = "ads", weight = 3 }`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPoolEntry {
+    pool: String,
+    weight: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -166,6 +234,7 @@ impl<'de> Deserialize<'de> for RawWeightedSource {
 struct RawPool {
     name: String,
     path: PathBuf,
+    kind: Option<String>,
     rotation: Option<String>,
     repeat_after: Option<String>,
 }
@@ -200,10 +269,31 @@ impl RawConfig {
             }
         };
 
+        // A pool a channel's breaks draw from holds commercials unless its
+        // `kind` says otherwise; any other pool holds filler.
+        let fills_breaks = |name: &str| {
+            self.channel.iter().any(|raw| {
+                raw.breaks
+                    .as_ref()
+                    .is_some_and(|b| b.fill().drawn().any(|pool| pool == name))
+            })
+        };
         let mut pools = Vec::new();
         let mut pool_index: HashMap<&str, usize> = HashMap::new();
         for (i, pool) in self.interstitial_pool.iter().enumerate() {
             let at = |key: &str| format!("interstitial_pool[{i}].{key}");
+            let kind = match pool.kind.as_deref() {
+                None if fills_breaks(&pool.name) => ClipKind::Commercial,
+                None => ClipKind::Filler,
+                Some(name) => ClipKind::from_name(name).unwrap_or_else(|| {
+                    let known: Vec<&str> = ClipKind::ALL.iter().map(|k| k.name()).collect();
+                    problems.add(
+                        at("kind"),
+                        format!("unknown kind {name:?}; use {}", known.join(", ")),
+                    );
+                    ClipKind::Filler
+                }),
+            };
             let rotation = match pool.rotation.as_deref() {
                 None | Some("order") => Rotation::Order,
                 Some("shuffle") => Rotation::Shuffle,
@@ -234,6 +324,7 @@ impl RawConfig {
             pools.push(InterstitialPool {
                 name: pool.name.clone(),
                 path: pool.path.clone(),
+                kind,
                 rotation,
                 repeat_after,
             });
@@ -253,15 +344,19 @@ impl RawConfig {
             }
         }
 
-        // Rotation and repeat limits only drive the filling of breaks, so they
-        // are refused on a pool no channel uses as its break pool rather than
-        // silently ignored.
+        // Rotation and repeat limits only drive the drawing of break and
+        // `between` clips, so they are refused on a pool no channel draws
+        // such clips from rather than silently ignored.
         for (i, pool) in self.interstitial_pool.iter().enumerate() {
-            let is_break_pool = self
-                .channel
-                .iter()
-                .any(|raw| raw.breaks.as_ref().is_some_and(|b| b.pool == pool.name));
-            if is_break_pool {
+            let rotates = self.channel.iter().any(|raw| {
+                let breaks = raw.breaks.as_ref().map(RawBreaks::fill);
+                let between = raw.between.as_ref().map(RawBetween::fill);
+                breaks
+                    .into_iter()
+                    .chain(between)
+                    .any(|fill| fill.named().any(|name| name == pool.name))
+            });
+            if rotates {
                 continue;
             }
             for (key, set) in [
@@ -272,7 +367,7 @@ impl RawConfig {
                     problems.add(
                         format!("interstitial_pool[{i}].{key}"),
                         format!(
-                            "applies only to a break pool, and no channel uses {:?} as breaks.pool",
+                            "applies only to a pool that breaks or between draw from, and no channel draws from {:?}",
                             pool.name
                         ),
                     );
@@ -348,12 +443,7 @@ impl RawChannel {
         let breaks = self.breaks.as_ref().and_then(|b| {
             let every = positive_duration(&b.every, &at("breaks.every"), problems);
             let length = positive_duration(&b.length, &at("breaks.length"), problems);
-            if !pools.contains_key(b.pool.as_str()) {
-                problems.add(
-                    at("breaks.pool"),
-                    format!("no interstitial_pool named {:?}", b.pool),
-                );
-            }
+            let fill = check_interlude(b.fill(), &at("breaks"), pools, configured, problems);
             if let Some(pad) = &b.pad
                 && !pools.contains_key(pad.as_str())
             {
@@ -362,8 +452,6 @@ impl RawChannel {
                     format!("no interstitial_pool named {pad:?}"),
                 );
             }
-            // The break pool's own settings. A missing pool is reported above.
-            let pool = pools.get(b.pool.as_str()).map(|&j| &configured[j]);
             match (every, length) {
                 (Some(every), Some(length)) if length >= every => {
                     problems.add(at("breaks.length"), "must be shorter than breaks.every");
@@ -372,13 +460,26 @@ impl RawChannel {
                 (Some(every), Some(length)) => Some(Breaks {
                     every,
                     length,
-                    pool: b.pool.clone(),
-                    rotation: pool.map_or(Rotation::Order, |pool| pool.rotation),
-                    repeat_after: pool.and_then(|pool| pool.repeat_after),
+                    fill: fill?,
                     pad: b.pad.clone(),
                 }),
                 _ => None,
             }
+        });
+
+        let between = self.between.as_ref().and_then(|b| {
+            let length = b
+                .length
+                .as_deref()
+                .map(|text| positive_duration(text, &at("between.length"), problems));
+            let fill = check_interlude(b.fill(), &at("between"), pools, configured, problems)?;
+            Some(Between {
+                length: match length {
+                    Some(checked) => Some(checked?),
+                    None => None,
+                },
+                fill,
+            })
         });
 
         if let Some(filler) = &self.filler
@@ -404,6 +505,7 @@ impl RawChannel {
             plan: plan?,
             grid,
             breaks,
+            between,
             filler: self.filler.clone(),
             sign_off,
         })
@@ -469,6 +571,92 @@ impl RawChannel {
             mode: mode?,
         })
     }
+}
+
+/// Checks the pools of a `breaks` or `between` table at `prefix`: exactly
+/// one of `pool` and `pools`, every name an `[[interstitial_pool]]`, each
+/// listed once with a weight of at least 1. `None` when something is wrong.
+fn check_interlude(
+    raw: RawInterlude<'_>,
+    prefix: &str,
+    pools: &HashMap<&str, usize>,
+    configured: &[InterstitialPool],
+    problems: &mut Problems,
+) -> Option<Interlude> {
+    let before = problems.0.len();
+    let field = |key: &str| format!("{prefix}.{key}");
+    let pool_use = |name: &str, key: &str, problems: &mut Problems| match pools.get(name) {
+        Some(&j) => {
+            let pool = &configured[j];
+            Some(PoolUse {
+                name: pool.name.clone(),
+                kind: pool.kind,
+                rotation: pool.rotation,
+                repeat_after: pool.repeat_after,
+            })
+        }
+        None => {
+            problems.add(key, format!("no interstitial_pool named {name:?}"));
+            None
+        }
+    };
+    let mut drawn = Vec::new();
+    match (raw.pool, raw.pools) {
+        (Some(name), None) => {
+            if let Some(pool) = pool_use(name, &field("pool"), problems) {
+                drawn.push(WeightedPool { pool, weight: 1 });
+            }
+        }
+        (None, Some(list)) if !list.is_empty() => {
+            for (j, entry) in list.iter().enumerate() {
+                let at = format!("{prefix}.pools[{j}]");
+                if let Some(first) = list[..j].iter().position(|other| other.pool == entry.pool) {
+                    problems.add(
+                        &at,
+                        format!(
+                            "is the same pool as {prefix}.pools[{first}]; list it once and add the weights"
+                        ),
+                    );
+                }
+                let weight = match entry.weight {
+                    None => Some(1),
+                    Some(weight) => u32::try_from(weight).ok().filter(|w| *w >= 1).or_else(|| {
+                        problems.add(
+                            format!("{at}.weight"),
+                            format!("{weight} is not a weight; use a whole number of at least 1"),
+                        );
+                        None
+                    }),
+                };
+                let pool = pool_use(&entry.pool, &format!("{at}.pool"), problems);
+                if let (Some(pool), Some(weight)) = (pool, weight) {
+                    drawn.push(WeightedPool { pool, weight });
+                }
+            }
+        }
+        (Some(_), Some(_)) => problems.add(
+            field("pools"),
+            "set pool or pools, not both; pool = \"ads\" is pools = [{ pool = \"ads\" }]",
+        ),
+        (None, _) => problems.add(
+            field("pools"),
+            "missing; name the clips to draw, such as pools = [{ pool = \"ads\", weight = 3 }] or pool = \"ads\"",
+        ),
+    }
+    let open = raw
+        .open
+        .map(|name| pool_use(name, &field("open"), problems));
+    let close = raw
+        .close
+        .map(|name| pool_use(name, &field("close"), problems));
+    if problems.0.len() > before {
+        return None;
+    }
+    Some(Interlude {
+        pools: drawn,
+        open: open.flatten(),
+        close: close.flatten(),
+    })
 }
 
 fn check_sign_off(

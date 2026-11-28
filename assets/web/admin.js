@@ -397,7 +397,7 @@ function input(name, value, attrs = {}) {
 }
 
 function editView({ number, settings, pools, source_kinds }) {
-  const poolOptions = (none) => [["", none], ...pools.map((p) => [p, p])];
+  const poolOptions = (none) => [["", none], ...pools.map((p) => [p.name, `${p.name} (${p.kind})`])];
   const breaks = settings.breaks;
   const program = settings.source
     ? [
@@ -422,7 +422,7 @@ function editView({ number, settings, pools, source_kinds }) {
         { class: "fields" },
         field("Every", "f-every", input("every", breaks?.every ?? "11m"), "Such as 11m."),
         field("Length", "f-length", input("break_length", breaks?.length ?? "2m"), "Such as 2m."),
-        field("Pool", "f-pool", select("pool", pools.map((p) => [p, p]), breaks?.pool ?? pools[0] ?? "")),
+        field("Pool", "f-pool", select("pool", pools.map((p) => [p.name, `${p.name} (${p.kind})`]), breaks?.pool ?? pools[0]?.name ?? "")),
         field("Pad with", "f-pad", select("pad", poolOptions("Filler pool"), breaks?.pad ?? "")),
       ),
     ),

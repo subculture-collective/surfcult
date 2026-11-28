@@ -51,6 +51,9 @@ pub struct BreaksSetting {
     pub pad: Option<String>,
 }
 
+/// The keys of `breaks` that [`BreaksSetting`] edits.
+const BREAKS_KEYS: &[&str] = &["every", "length", "pool", "pad"];
+
 /// The keys a `source` table can have, as in [`Source`](super::Source).
 pub const SOURCE_KINDS: &[&str] = &[
     "jellyfin_library",
@@ -102,7 +105,20 @@ pub fn set_channel(
 ) -> Result<String, EditError> {
     let mut doc = parse(text)?;
     let table = channel(&mut doc, number)?;
-    let one_source = read(table).source.is_some();
+    let current = read(table);
+    let one_source = current.source.is_some();
+    // `breaks` with keys the admin does not edit, such as `pools`, `open` or
+    // `close`, is left as it is when the admin leaves it so, and otherwise
+    // edited in the file.
+    let breaks_kept = table
+        .get("breaks")
+        .and_then(Item::as_table_like)
+        .is_some_and(|breaks| breaks.iter().any(|(key, _)| !BREAKS_KEYS.contains(&key)));
+    if breaks_kept && settings.breaks.is_some() && settings.breaks != current.breaks {
+        return Err(refused(format!(
+            "channel {number}'s breaks use pools, open or close; change them in channels.toml"
+        )));
+    }
 
     let name = settings.name.trim();
     if name.is_empty() {
@@ -153,6 +169,7 @@ pub fn set_channel(
         None => {
             table.remove("breaks");
         }
+        Some(_) if breaks_kept => {}
         Some(breaks) => {
             let fields = [
                 ("every", Some(breaks.every.trim())),
@@ -409,7 +426,10 @@ path = "/clips/filler"
         let channel = &Config::parse(&text).unwrap().channels[1];
         assert_eq!(channel.grid, Some(std::time::Duration::from_secs(1800)));
         let breaks = channel.breaks.as_ref().unwrap();
-        assert_eq!((breaks.pool.as_str(), &breaks.pad), ("ads", &None));
+        assert_eq!(
+            (breaks.fill.pools[0].pool.name.as_str(), &breaks.pad),
+            ("ads", &None)
+        );
         assert_eq!(channel.filler.as_deref(), Some("filler"));
     }
 
@@ -430,6 +450,38 @@ path = "/clips/filler"
             written,
             text.replace("every = \"11m\" # often", "every = \"12m\" # often")
         );
+    }
+
+    #[test]
+    fn breaks_with_weighted_pools_and_between_are_kept_or_refused() {
+        let text = TEXT.replace(
+            "breaks = { every = \"11m\", length = \"2m\", pool = \"ads\" }",
+            "breaks = { every = \"11m\", length = \"2m\", open = \"filler\", pools = [{ pool = \"ads\", weight = 2 }] }\nbetween = { pool = \"filler\" }",
+        );
+        let read = channel_settings(&text, 3).unwrap();
+        assert_eq!(read.breaks.as_ref().unwrap().pool, "");
+
+        // A change elsewhere leaves `breaks` and `between` as they are.
+        let mut renamed = read.clone();
+        renamed.name = "TOONS".into();
+        let written = set_channel(&text, 3, &renamed).unwrap();
+        assert_eq!(written, text.replace("\"SATURDAY CARTOONS\"", "\"TOONS\""));
+        Config::parse(&written).unwrap();
+
+        // A change to them is refused rather than written half.
+        let mut changed = read.clone();
+        changed.breaks.as_mut().unwrap().pool = "ads".into();
+        assert!(matches!(
+            set_channel(&text, 3, &changed),
+            Err(EditError::Refused(_))
+        ));
+
+        // Turning breaks off removes them; `between` stays.
+        let mut off = read;
+        off.breaks = None;
+        let written = set_channel(&text, 3, &off).unwrap();
+        assert!(!written.contains("pools ="));
+        assert!(written.contains("between = { pool = \"filler\" }"));
     }
 
     #[test]
