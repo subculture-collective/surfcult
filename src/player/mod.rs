@@ -54,6 +54,7 @@ pub mod mpv;
 use std::fmt;
 use std::path::Path;
 
+pub use crate::config::Picture;
 use crate::library::MediaId;
 use crate::overlay::Banner;
 use crate::paint::Crt;
@@ -260,6 +261,14 @@ pub trait Player {
     /// Draws the video in `area` from now on, whatever plays. A restart
     /// puts it back to [`VideoArea::Full`].
     fn set_video_area(&mut self, area: VideoArea) -> Result<(), PlayerError>;
+
+    /// Plays every program queued or played from now on as a song with
+    /// `picture`, or as a video with `None`. A song has no picture of its
+    /// own: with [`Picture::Cover`] the player shows none and the caller
+    /// draws the cover card as an overlay; with [`Picture::Visualizer`] the
+    /// player draws one from the sound. Clips, static and the stand-by card
+    /// are not affected, and it survives a restart.
+    fn set_picture(&mut self, picture: Option<Picture>) -> Result<(), PlayerError>;
 
     /// The next thing the player reports, oldest first, or `None`.
     fn poll_event(&mut self) -> Option<PlayerEvent>;

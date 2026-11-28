@@ -176,6 +176,14 @@ impl Driver {
         self.following.is_some()
     }
 
+    /// The media of the program event on screen, when one is.
+    pub(super) fn program(&self) -> Option<&MediaId> {
+        match self.following.as_ref().map(|f| &f.on) {
+            Some(On::Event(event)) if event.kind == EventKind::Program => Some(&event.media_id),
+            _ => None,
+        }
+    }
+
     /// Whether a break or filler event is on screen.
     pub(super) fn on_break(&self) -> bool {
         matches!(

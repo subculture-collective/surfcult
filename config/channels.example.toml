@@ -99,7 +99,8 @@ mode = "weighted"
 # channel without `picture` never plays a song, even through a genre songs
 # share. Weighted genres make a radio format. `breaks` and `between` work as
 # on any channel; songs are short, so `between` suits them better than breaks.
-# picture: cover | visualizer
+# picture: cover (the album cover with the artist, title and album) |
+#          visualizer (a spectrum drawn from the sound, with a now-playing line)
 [[channel]]
 number = 6
 name = "PUNK"
@@ -111,6 +112,13 @@ sources = [
 ]
 mode = "weighted"
 between = { pool = "bumps" }
+# The same with a visualizer:
+# picture = "visualizer"
+# sources = [
+#   { jellyfin_genre = "Electronic", weight = 3 },
+#   { jellyfin_genre = "Downtempo" },
+#   { jellyfin_genre = "Ambient" },
+# ]
 
 # Display filters (optional). The defaults are shown.
 #   filters          on everything on screen: programs, clips, static and the

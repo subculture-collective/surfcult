@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{Settings, Tv, clock_trusted, jellyfin_streams};
+use super::{JellyfinCovers, Settings, Tv, clock_trusted, jellyfin_streams};
 use crate::clips::{ClipLibrary, FfprobeProber};
 use crate::config::Config;
 use crate::input::EvdevInput;
@@ -70,6 +70,8 @@ pub fn run(config_path: &Path, db_path: &Path) -> Result<(), String> {
 
     let worker = SyncWorker::spawn(JellyfinClient::new(jellyfin.clone()), sync_every)
         .map_err(|e| format!("cannot start the sync thread: {e}"))?;
+    let covers = JellyfinCovers::spawn(JellyfinClient::new(jellyfin.clone()))
+        .map_err(|e| format!("cannot start the cover thread: {e}"))?;
     let (resolver, transcodes) = jellyfin_streams(&jellyfin);
     let mut mpv = MpvConfig::new(runtime_dir()?).with_display(&config.display);
     mpv.crt = settings.crt;
@@ -114,6 +116,7 @@ pub fn run(config_path: &Path, db_path: &Path) -> Result<(), String> {
         Box::new(clock_trusted),
         settings,
     );
+    tv.set_covers(Box::new(covers));
     tv.start(now_ms(), &mut store);
     while !stop.load(Ordering::Relaxed) && !tv.quit_requested() {
         let now = now_ms();

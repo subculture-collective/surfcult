@@ -38,6 +38,14 @@ pub trait JellyfinHttp: Send + Sync {
 
     /// Sends `DELETE <server><path_and_query>`. The response body is ignored.
     fn delete(&self, path_and_query: &str, authorization: &str) -> Result<(), HttpError>;
+
+    /// As [`JellyfinHttp::get`], for a body that is not text, such as an
+    /// image. The default is `get`'s body as bytes, which test transports
+    /// use.
+    fn get_bytes(&self, path_and_query: &str, authorization: &str) -> Result<Vec<u8>, HttpError> {
+        self.get(path_and_query, authorization)
+            .map(String::into_bytes)
+    }
 }
 
 /// [`JellyfinHttp`] over `ureq`, with a short timeout. Redirects are not
@@ -106,6 +114,27 @@ impl JellyfinHttp for UreqHttp {
             .header("Authorization", authorization)
             .call();
         read_body(response).map(drop)
+    }
+
+    fn get_bytes(&self, path_and_query: &str, authorization: &str) -> Result<Vec<u8>, HttpError> {
+        let response = self
+            .agent
+            .get(&self.url(path_and_query))
+            .header("Authorization", authorization)
+            .call();
+        let mut response = response.map_err(|source| HttpError::Unreachable(source.to_string()))?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(HttpError::Status(status));
+        }
+        let mut body = Vec::new();
+        response
+            .body_mut()
+            .as_reader()
+            .take(MAX_BODY_BYTES)
+            .read_to_end(&mut body)
+            .map_err(|source| HttpError::Unreachable(source.to_string()))?;
+        Ok(body)
     }
 }
 

@@ -19,7 +19,9 @@ use crate::config::Tz;
 use crate::input::FakeInput;
 use crate::library::{AudioStream, Collection, MediaId, MediaKind, VideoStream};
 use crate::overlay::{Banner, clock};
-use crate::player::{Command, FakePlayer, Overlay, PlayerError, Slate, VideoArea, VirtualClock};
+use crate::player::{
+    Command, FakePlayer, Overlay, Picture, PlayerError, Slate, VideoArea, VirtualClock,
+};
 use crate::store::{LibraryEntry, Substitution};
 use crate::timeline::{Event, EventKind};
 
@@ -101,6 +103,9 @@ impl Player for TestPlayer {
     }
     fn set_crt(&mut self, crt: Crt) -> Result<(), PlayerError> {
         self.fake.set_crt(crt)
+    }
+    fn set_picture(&mut self, picture: Option<Picture>) -> Result<(), PlayerError> {
+        self.fake.set_picture(picture)
     }
     fn show_overlay_rows(
         &mut self,
@@ -185,15 +190,25 @@ impl Rig {
     }
 
     fn with_five(five_source: &str) -> Self {
-        Self::build(five_source, false)
+        Self::build(five_source, false, "")
+    }
+
+    /// As [`Rig::new`], with channel 3 a music channel with `picture`. The
+    /// library also has `song`, on album `alb`, and `single`, on none.
+    fn music(picture: &str) -> Self {
+        Self::build(
+            "jellyfin_collection = \"Cartoons\"",
+            false,
+            &format!("picture = \"{picture}\""),
+        )
     }
 
     /// As [`Rig::new`], with the SCTV watermark on.
     fn watermarked() -> Self {
-        Self::build("jellyfin_collection = \"Cartoons\"", true)
+        Self::build("jellyfin_collection = \"Cartoons\"", true, "")
     }
 
-    fn build(five_source: &str, watermark: bool) -> Self {
+    fn build(five_source: &str, watermark: bool, three_extra: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         for (pool, file, _) in CLIPS {
             let pool = dir.path().join(pool);
@@ -216,6 +231,7 @@ impl Rig {
             name = "THREE"
             source = {{ jellyfin_collection = "Cartoons" }}
             mode = "sequential"
+            {three_extra}
             [[channel]]
             number = 5
             name = "FIVE"
@@ -242,6 +258,13 @@ impl Rig {
             item("show", "The Show", "hevc"),
             item("movie", "The Movie", "h264"),
             item("tc", "Transcoded", "av1"),
+            MediaItem {
+                artists: vec!["The Band".into()],
+                album: Some("The Record".into()),
+                album_id: Some(MediaId::new("alb")),
+                ..MediaItem::new("song", "The Song", MediaKind::Song, 4 * MIN as u64)
+            },
+            MediaItem::new("single", "The Single", MediaKind::Song, 3 * MIN as u64),
         ]
         .into_iter()
         .map(|item| LibraryEntry { item, path: None })
@@ -1543,4 +1566,162 @@ fn a_change_made_before_the_clock_is_trusted_waits_for_it() {
     rig.trusted.set(true);
     rig.tv.step(T + 2 * MIN, &mut rig.store);
     assert_ne!(rig.store.events_between(3, T, i64::MAX).unwrap(), before);
+}
+
+// ---- music channels -----------------------------------------------------
+
+type Answers = Vec<(MediaId, Option<Image>)>;
+
+/// Covers whose requests a test reads and whose answers it sends.
+#[derive(Clone, Default)]
+struct TestCovers {
+    asked: Rc<std::cell::RefCell<Vec<MediaId>>>,
+    answers: Rc<std::cell::RefCell<Answers>>,
+}
+
+impl Covers for TestCovers {
+    fn request(&mut self, id: &MediaId) {
+        self.asked.borrow_mut().push(id.clone());
+    }
+    fn take(&mut self) -> Vec<(MediaId, Option<Image>)> {
+        self.answers.borrow_mut().drain(..).collect()
+    }
+}
+
+fn picture_layer(commands: &[Command]) -> Vec<Command> {
+    commands
+        .iter()
+        .filter(|c| {
+            matches!(
+                c,
+                Command::ShowOverlay {
+                    id: PICTURE_LAYER,
+                    ..
+                } | Command::ClearOverlay(PICTURE_LAYER)
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+const CARD: Command = Command::ShowOverlay {
+    id: PICTURE_LAYER,
+    x: 0,
+    y: 0,
+    width: 1920,
+    height: 1080,
+};
+
+/// A PNG of one blue pixel, as Jellyfin would send a cover.
+fn cover_png() -> Image {
+    let mut canvas = paint::Canvas::new(1, 1);
+    canvas.fill_rect(0.0, 0.0, 1.0, 1.0, paint::Rgba::hex(0x0000ff));
+    Image::decode_png(&canvas.png()).unwrap()
+}
+
+#[test]
+fn a_cover_channel_shows_the_card_for_each_song_and_hides_it_for_a_break() {
+    let mut rig = Rig::music("cover");
+    let covers = TestCovers::default();
+    rig.tv.set_covers(Box::new(covers.clone()));
+    let ad1 = rig.clip("ad1.mp4");
+    rig.write(
+        3,
+        &[
+            program(T - 10 * MIN, T + MIN, "song", 0),
+            event(T + MIN, T + MIN + 30_000, &ad1, 0, EventKind::Break),
+            program(T + MIN + 30_000, T + 50 * MIN, "single", 0),
+        ],
+    );
+    rig.start();
+    let started = rig.commands();
+    assert!(started.contains(&Command::SetPicture(Some(Picture::Cover))));
+    // Static and the tune-in clip have no card.
+    rig.step(T + 500);
+    assert_eq!(picture_layer(&rig.commands()), []);
+
+    let live = rig.go_live(T);
+    // The card shows as soon as the song is on, with the mark until the
+    // cover arrives; the cover is asked for by the album's id.
+    assert_eq!(picture_layer(&live), [CARD]);
+    assert_eq!(*covers.asked.borrow(), [MediaId::new("alb")]);
+    rig.step(T + 3_000);
+    assert_eq!(picture_layer(&rig.take()), []);
+    covers
+        .answers
+        .borrow_mut()
+        .push((MediaId::new("alb"), Some(cover_png())));
+    rig.step(T + 3_020);
+    assert_eq!(picture_layer(&rig.take()), [CARD], "redrawn with the cover");
+    rig.step(T + 3_040);
+    assert_eq!(picture_layer(&rig.take()), []);
+
+    // The break clip plays without the card.
+    rig.step(T + MIN);
+    let at_break = rig.take();
+    assert!(
+        at_break.contains(&Command::PlayClip(ad1.into())),
+        "{at_break:?}"
+    );
+    assert_eq!(
+        picture_layer(&at_break),
+        [Command::ClearOverlay(PICTURE_LAYER)]
+    );
+    // The next song gets its own card; with no album it asks for its own image.
+    rig.step(T + MIN + 30_000);
+    rig.fake().program_started(0);
+    rig.step(T + MIN + 30_020);
+    assert_eq!(picture_layer(&rig.take()), [CARD]);
+    assert_eq!(
+        *covers.asked.borrow(),
+        [MediaId::new("alb"), MediaId::new("single")]
+    );
+    // The guide hides it.
+    rig.press(Key::Guide, T + 2 * MIN);
+    assert_eq!(
+        picture_layer(&rig.take()),
+        [Command::ClearOverlay(PICTURE_LAYER)]
+    );
+}
+
+#[test]
+fn a_visualizer_channel_shows_the_now_playing_line() {
+    let mut rig = Rig::music("visualizer");
+    rig.write(3, &[program(T - 10 * MIN, T + 50 * MIN, "song", 0)]);
+    rig.start();
+    assert!(
+        rig.commands()
+            .contains(&Command::SetPicture(Some(Picture::Visualizer)))
+    );
+
+    let live = rig.go_live(T);
+
+    let shown = picture_layer(&live);
+    let [Command::ShowOverlay { x, y, width, .. }] = shown[..] else {
+        panic!("{shown:?}");
+    };
+    assert_eq!((x, y), (80, 38));
+    assert!(width < 1920, "a line, not a card");
+}
+
+#[test]
+fn tuning_from_a_music_channel_to_a_video_channel_puts_the_picture_back() {
+    let mut rig = Rig::music("cover");
+    hour_everywhere(&mut rig);
+    rig.start();
+    rig.go_live(T);
+    rig.press(Key::Next, T + MIN);
+    let commands = rig.take();
+    assert!(
+        commands.contains(&Command::SetPicture(None)),
+        "{commands:?}"
+    );
+    // Going on to another video channel sends nothing more.
+    rig.go_live(T + MIN);
+    rig.press(Key::Next, T + 2 * MIN);
+    assert!(
+        !rig.take()
+            .iter()
+            .any(|c| matches!(c, Command::SetPicture(_)))
+    );
 }

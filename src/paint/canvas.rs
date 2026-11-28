@@ -1,8 +1,8 @@
 //! A bitmap to draw the interface into.
 
 use tiny_skia::{
-    Color, FillRule, GradientStop, LinearGradient, Paint, Path, Pixmap, Point, Rect, Shader,
-    SpreadMode, Transform,
+    Color, FillRule, FilterQuality, GradientStop, LinearGradient, Paint, Path, Pixmap, PixmapPaint,
+    Point, Rect, Shader, SpreadMode, Transform,
 };
 
 use super::Font;
@@ -187,6 +187,25 @@ impl Canvas {
         font.width(text, px, tracking)
     }
 
+    /// Draws `image` scaled to fill the rectangle `x`, `y`, `w`, `h`.
+    pub fn image(&mut self, image: &Image, x: f32, y: f32, w: f32, h: f32) {
+        let pixmap = &image.0;
+        let sx = w / pixmap.width() as f32;
+        let sy = h / pixmap.height() as f32;
+        let paint = PixmapPaint {
+            quality: FilterQuality::Bilinear,
+            ..PixmapPaint::default()
+        };
+        self.pixmap.draw_pixmap(
+            0,
+            0,
+            pixmap.as_ref(),
+            &paint,
+            Transform::from_row(sx, 0.0, 0.0, sy, x, y),
+            None,
+        );
+    }
+
     /// The pixel at `x`, `y` as premultiplied red, green, blue and alpha.
     pub fn pixel(&self, x: u32, y: u32) -> Option<[u8; 4]> {
         self.pixmap
@@ -214,5 +233,30 @@ impl Canvas {
     #[cfg(test)]
     pub fn png(&self) -> Vec<u8> {
         self.pixmap.encode_png().expect("a PNG of the canvas")
+    }
+}
+
+/// A decoded picture, such as an album cover, to draw with [`Canvas::image`].
+#[derive(Clone)]
+pub struct Image(Pixmap);
+
+impl Image {
+    /// Decodes a PNG file, or `None` when the bytes are not one.
+    pub fn decode_png(bytes: &[u8]) -> Option<Self> {
+        Pixmap::decode_png(bytes).ok().map(Self)
+    }
+
+    pub fn width(&self) -> u32 {
+        self.0.width()
+    }
+
+    pub fn height(&self) -> u32 {
+        self.0.height()
+    }
+}
+
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Image({}x{})", self.width(), self.height())
     }
 }

@@ -282,6 +282,34 @@ fn commands_become_mpv_commands() {
 }
 
 #[test]
+fn a_song_plays_without_its_cover_art_or_through_the_visualizer() {
+    let fake = FakeMpv::new();
+    let mut session = fake.connect();
+    let song = Stream::new("http://jellyfin/Audio/s/stream?static=true");
+    session.set_picture(Some(Picture::Cover));
+    session.queue_program(&song, 1_000).unwrap();
+    session.set_picture(Some(Picture::Visualizer));
+    session.play_program(&song, 2_000).unwrap();
+    session.set_picture(None);
+    session.queue_program(&song, 3_000).unwrap();
+
+    let loads: Vec<Value> = fake
+        .commands()
+        .into_iter()
+        .filter(|c| c[0] == "loadfile")
+        .map(|c| c[4].clone())
+        .collect();
+    assert_eq!(
+        loads,
+        [
+            json!({ "start": "1.000", "sid": "no", "vid": "no" }),
+            json!({ "start": "2.000", "sid": "no", "lavfi-complex": VISUALIZER }),
+            json!({ "start": "3.000", "sid": "no" }),
+        ]
+    );
+}
+
+#[test]
 fn a_looping_clip_plays_or_queues_with_loop_file() {
     let fake = FakeMpv::new();
     let mut session = fake.connect();
@@ -652,6 +680,7 @@ fn player_with(
         standby_shaders,
         glitch,
         overlays: HashMap::new(),
+        picture: None,
     }
 }
 
@@ -1211,6 +1240,69 @@ mod real {
 
     fn auth() -> Vec<(String, String)> {
         vec![("Authorization".into(), KEY.into())]
+    }
+
+    /// A song: a FLAC file of a tone with noise, `seconds` long.
+    fn make_song(dir: &Path, seconds: u32) -> PathBuf {
+        let path = dir.join("song.flac");
+        let status = Command::new("ffmpeg")
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi"])
+            .arg("-i")
+            .arg(format!(
+                "sine=f=220:d={seconds},aformat=channel_layouts=stereo"
+            ))
+            .args(["-c:a", "flac"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "ffmpeg failed");
+        path
+    }
+
+    #[test]
+    fn a_song_plays_through_the_visualizer_and_without_its_picture_on_a_cover_channel() {
+        if !tools() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let song = make_song(dir.path(), 4);
+        let url = song.to_str().unwrap().to_owned();
+        let resolver = move |_: &MediaId, _: u64| Ok(Stream::new(url.clone()));
+        let mut player = MpvPlayer::start(headless(&dir.path().join("run")), resolver).unwrap();
+
+        player.set_picture(Some(Picture::Visualizer)).unwrap();
+        player.play_program(&MediaId::new("s"), 1_000).unwrap();
+        let events = wait_for(&mut player, 15, |e| {
+            matches!(e, PlayerEvent::ProgramStarted { .. } | PlayerEvent::Failed)
+        });
+        assert!(
+            matches!(events[..], [PlayerEvent::ProgramStarted { .. }]),
+            "{events:?}"
+        );
+        // MPV draws the graph's 640x360 picture from the sound.
+        let session = player.session.as_mut().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let width = loop {
+            let width = session.get_property("video-params/w").ok();
+            if width.is_some() || Instant::now() > deadline {
+                break width;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert_eq!(width, Some(json!(640)));
+
+        // A cover channel's song has no video track at all.
+        player.set_picture(Some(Picture::Cover)).unwrap();
+        player.play_program(&MediaId::new("s"), 1_000).unwrap();
+        let events = wait_for(&mut player, 15, |e| {
+            matches!(e, PlayerEvent::ProgramStarted { .. } | PlayerEvent::Failed)
+        });
+        assert!(
+            matches!(events[..], [PlayerEvent::ProgramStarted { .. }]),
+            "{events:?}"
+        );
+        let session = player.session.as_mut().unwrap();
+        assert_eq!(session.get_property("vid").unwrap(), json!(false));
     }
 
     #[test]

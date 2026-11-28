@@ -628,3 +628,116 @@ fn preview_menu() {
     let file = std::path::PathBuf::from(dir).join("menu-heavy.png");
     std::fs::write(file, png.encode_png().unwrap()).unwrap();
 }
+
+// ---- the music picture --------------------------------------------------
+
+fn song() -> now_playing::NowPlaying {
+    now_playing::NowPlaying {
+        title: "The Song".into(),
+        artists: "The Band, A Guest".into(),
+        album: Some("The Record".into()),
+    }
+}
+
+/// A cover of one colour, `side` pixels square, decoded from a PNG.
+fn cover(side: u32, rgb: u32) -> Image {
+    let mut canvas = Canvas::new(side, side);
+    canvas.fill_rect(0.0, 0.0, side as f32, side as f32, Rgba::hex(rgb));
+    Image::decode_png(&canvas.png()).unwrap()
+}
+
+#[test]
+fn the_cover_card_fills_the_screen_with_the_cover_centred() {
+    let card = now_playing::card(&song(), Some(&cover(300, 0x00ff00)));
+
+    assert_eq!(
+        (card.x, card.y, card.width, card.height),
+        (0, 0, 1920, 1080)
+    );
+    assert!(premultiplied(&card));
+    // Opaque everywhere, so nothing of the player shows through.
+    assert!(card.bgra.as_chunks::<4>().0.iter().all(|p| p[3] == 255));
+    // The cover, scaled up to the 440-pixel box from y 96.
+    assert_eq!(at(&card, 960, 96 + 220), [0, 255, 0, 255]);
+    assert_eq!(at(&card, 960 - 210, 100), [0, 255, 0, 255]);
+    // The field outside it.
+    assert_ne!(at(&card, 300, 300), [0, 255, 0, 255]);
+    // The ochre band under it carries the artist.
+    let band = at(&card, 960 - 500, 96 + 440 + 10 + 26 + 4);
+    assert!(band[2] > 200 && band[1] > 150, "{band:?}");
+    // Nothing is drawn where the channel banner shows.
+    let field = at(&card, 960, 1079 - 90);
+    assert_eq!(at(&card, 300, 1079 - 90), field);
+}
+
+#[test]
+fn a_cover_keeps_its_shape_and_a_missing_one_shows_the_mark() {
+    let mut wide = Canvas::new(400, 200);
+    wide.fill_rect(0.0, 0.0, 400.0, 200.0, Rgba::hex(0xff0000));
+    let wide = Image::decode_png(&wide.png()).unwrap();
+    let card = now_playing::card(&song(), Some(&wide));
+    // 440 by 220, centred in the box.
+    assert_eq!(at(&card, 960, 96 + 220), [0, 0, 255, 255]);
+    assert_ne!(at(&card, 960, 96 + 20), [0, 0, 255, 255]);
+
+    let bare = now_playing::card(&song(), None);
+    let yellow = [YELLOW.b, YELLOW.g, YELLOW.r, 255];
+    let marked = (96..536)
+        .flat_map(|y| (740..1180).map(move |x| (x, y)))
+        .any(|(x, y)| at(&bare, x, y) == yellow);
+    assert!(marked, "the mark in the frame");
+}
+
+#[test]
+fn the_now_playing_line_sits_across_the_top() {
+    let line = now_playing::line(&song());
+
+    assert_eq!((line.x, line.y), (80, 38));
+    assert!(line.width < 1920 && line.height < 120);
+    assert!(premultiplied(&line));
+    // Ochre inside, transparent in the margin.
+    let inside = at(&line, 20, 20);
+    assert!(inside[3] == 255 && inside[2] > 200, "{inside:?}");
+    assert_eq!(at(&line, 2, 2)[3], 0);
+}
+
+/// Writes the cover card with a sample cover and without one, at Heavy, and
+/// the now-playing line over black, to `SURFCULT_PAINT_PREVIEW`.
+#[test]
+fn preview_now_playing() {
+    let Some(dir) = std::env::var_os("SURFCULT_PAINT_PREVIEW") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let mut sample = Canvas::new(600, 600);
+    sample.fill_gradient(
+        0.0,
+        0.0,
+        600.0,
+        600.0,
+        Rgba::hex(0xe05a2b),
+        Rgba::hex(0x2b8fe0),
+    );
+    sample.fill_rect(150.0, 150.0, 300.0, 300.0, Rgba::hex(0x111111));
+    let sample = Image::decode_png(&sample.png()).unwrap();
+    let long = now_playing::NowPlaying {
+        title: "A Song Title Long Enough To Need Cutting Off Before The Edge Of The Screen".into(),
+        ..song()
+    };
+    let write = |name: &str, o: &Overlay| {
+        let mut rgba = o.bgra.clone();
+        for p in rgba.as_chunks_mut::<4>().0 {
+            p.swap(0, 2);
+            p[3] = 255;
+        }
+        let size = tiny_skia::IntSize::from_wh(o.width, o.height).unwrap();
+        let png = tiny_skia::Pixmap::from_vec(rgba, size).unwrap();
+        png.save_png(dir.join(format!("now-playing-{name}.png")))
+            .unwrap();
+    };
+    let mut card = now_playing::card(&song(), Some(&sample));
+    crt::apply(&mut card, Crt::Heavy);
+    write("cover", &card);
+    write("bare", &now_playing::card(&long, None));
+    write("line", &now_playing::line(&song()));
+}
