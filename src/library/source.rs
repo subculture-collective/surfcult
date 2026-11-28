@@ -42,6 +42,27 @@ pub trait MediaSource {
         items.retain(|item| query.matches(item));
         Ok(items)
     }
+
+    /// The episodes, in [`MediaSource::list_items`] order, of the first
+    /// series in that order named `name` among the items a channel playing
+    /// `plays` may schedule; empty when there is none. The library cache
+    /// answers this in SQL from an index, so a series source does not read
+    /// the rest of the library.
+    fn series_episodes(&self, plays: Plays, name: &str) -> Result<Vec<MediaItem>, SourceError> {
+        let items = self.query_items(&ItemQuery { plays, label: None })?;
+        let Some(series) = items.iter().find_map(|item| {
+            item.series
+                .as_ref()
+                .filter(|series| series.series_name == name)
+                .map(|series| series.series_id.clone())
+        }) else {
+            return Ok(Vec::new());
+        };
+        Ok(items
+            .into_iter()
+            .filter(|item| item.series.as_ref().map(|s| &s.series_id) == Some(&series))
+            .collect())
+    }
 }
 
 /// Which items a program pool asks for: those a channel playing `plays` may

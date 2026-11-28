@@ -87,7 +87,9 @@ pub(super) struct FetchedLibrary {
 
 impl FetchedLibrary {
     /// A hash of the items and collections, to tell whether two fetches
-    /// found the same library without keeping both.
+    /// found the same library without keeping both. The store keeps it
+    /// across restarts; `DefaultHasher` may hash differently after a Rust
+    /// upgrade, which costs one rewrite of the cache.
     pub fn fingerprint(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         self.entries.hash(&mut hasher);

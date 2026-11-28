@@ -20,6 +20,8 @@ ttf-parser = { version = "0.25.1", default-features = false, features = ["std"] 
 ureq = { version = "3.5.2", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
+# Hooks count the SQLite work a query does, in the library cache tests.
+rusqlite = { version = "0.43.0", features = ["bundled", "hooks"] }
 tempfile = "3.27.0"
 tiny-skia = { version = "0.12.0", default-features = false, features = ["std", "png-format"] }
 tower = { version = "0.5.3", features = ["util"] }

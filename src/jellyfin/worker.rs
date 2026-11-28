@@ -25,7 +25,8 @@ type Fetched = Result<(FetchedLibrary, u64), JellyfinError>;
 /// if the process exits first, the fetch is simply abandoned.
 pub struct SyncWorker {
     results: Receiver<Fetched>,
-    /// The fingerprint of the snapshot [`apply`](Self::apply) last wrote.
+    /// The fingerprint of the snapshot [`apply`](Self::apply) last wrote or
+    /// found unchanged; until then the one the store recorded is used.
     written: Cell<Option<u64>>,
     /// Dropped with the worker to stop the thread; the thread waits on the
     /// other end.
@@ -68,8 +69,10 @@ impl SyncWorker {
     ///
     /// Every pending result is taken. Each snapshot is a whole library, so
     /// only the newest successful one is written; older ones are discarded
-    /// unwritten. A snapshot that matches the one this worker last wrote is
-    /// not written again: the cache already holds it, and writing tens of
+    /// unwritten. A snapshot that matches the one this worker last wrote, or
+    /// before its first write the one the store recorded
+    /// ([`Store::library_fingerprint`]), perhaps before a restart, is not
+    /// written again: the cache already holds it, and writing tens of
     /// thousands of songs costs seconds on a Raspberry Pi. Only the sync time
     /// moves ([`Store::mark_library_synced`]), and the report says
     /// `written: false`. What comes back depends on the newest pending result:
@@ -105,11 +108,19 @@ impl SyncWorker {
             }
         }
         let written = newest_snapshot.map(|(snapshot, fingerprint)| {
-            if self.written.get() == Some(fingerprint) {
+            // Until this worker writes, the last write is the one the store
+            // recorded, perhaps before a restart.
+            let last = match self.written.get() {
+                Some(last) => Some(last),
+                None => store.library_fingerprint()?,
+            };
+            if last == Some(fingerprint) {
                 store.mark_library_synced(synced_at_ms)?;
+                self.written.set(Some(fingerprint));
                 return Ok(unchanged(&snapshot));
             }
             let report = write_fetched(store, &snapshot, synced_at_ms)?;
+            store.record_library_fingerprint(fingerprint)?;
             self.written.set(Some(fingerprint));
             Ok(report)
         });
