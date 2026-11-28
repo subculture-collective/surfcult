@@ -11,25 +11,25 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::{Transaction, params};
+use rusqlite::{ToSql, Transaction, params};
 
 use super::{Store, StoreError};
 use crate::library::{
-    AudioStream, Chapter, Collection, Known, LibraryChanges, MediaId, MediaItem, MediaKind,
-    MediaSource, SeriesEpisode, SourceError, VideoStream, reconcile,
+    AudioStream, Chapter, Collection, ItemQuery, Known, Label, LibraryChanges, MediaId, MediaItem,
+    MediaKind, MediaSource, Plays, SeriesEpisode, SourceError, VideoStream, reconcile,
 };
 
 /// One cached item and the file path the source reported for it. The path is
 /// kept next to [`MediaItem`] because the media model does not carry it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LibraryEntry {
     pub item: MediaItem,
     pub path: Option<String>,
 }
 
 /// The columns of `library_items` that [`read_entry`] reads, in its order.
-const ITEM_COLUMNS: &str =
-    "id, title, kind, runtime_ms, path, series_id, series_name, season, episode, album";
+const ITEM_COLUMNS: &str = "i.id, i.title, i.kind, i.runtime_ms, i.path, i.series_id, \
+     i.series_name, i.season, i.episode, i.album, i.album_id";
 
 impl Store {
     /// In one transaction, replaces the whole library cache with `entries` and
@@ -71,27 +71,69 @@ impl Store {
         for (position, collection) in collections.iter().enumerate() {
             insert_collection(&tx, position, collection)?;
         }
+        record_sync(&tx, synced_at_ms)?;
         tx.commit().map_err(StoreError::database(action))?;
         Ok(changes)
     }
 
     /// Every cached item in sync order. Empty before the first sync.
     pub fn library_items(&self) -> Result<Vec<LibraryEntry>, StoreError> {
+        self.library_items_where("1", &[])
+    }
+
+    /// The cached items `query` matches, in sync order. The items, and their
+    /// chapters, streams and labels, are picked in SQL, so the rows of
+    /// items that do not match are never read.
+    pub fn library_items_matching(
+        &self,
+        query: &ItemQuery<'_>,
+    ) -> Result<Vec<LibraryEntry>, StoreError> {
+        let kind = match query.plays {
+            Plays::Videos => "i.kind <> 'song'",
+            Plays::Songs => "i.kind = 'song'",
+        };
+        let Some(label) = query.label else {
+            return self.library_items_where(kind, &[]);
+        };
+        let (label_kind, name) = match label {
+            Label::Library(name) => ("library", name),
+            Label::Tag(name) => ("tag", name),
+            Label::Genre(name) => ("genre", name),
+        };
+        self.library_items_where(
+            &format!(
+                "{kind} AND i.id IN (SELECT item_id FROM library_item_labels \
+                 WHERE kind = ?1 AND name = ?2)"
+            ),
+            &[&label_kind, &name],
+        )
+    }
+
+    /// The cached items whose `library_items` row (as `i`) meets `filter`, a
+    /// SQL condition with its `parameters`, in sync order.
+    fn library_items_where(
+        &self,
+        filter: &str,
+        parameters: &[&dyn ToSql],
+    ) -> Result<Vec<LibraryEntry>, StoreError> {
         let action = "reading the library cache";
         let mut statement = self
             .conn
             .prepare_cached(&format!(
-                "SELECT {ITEM_COLUMNS} FROM library_items ORDER BY position"
+                "SELECT {ITEM_COLUMNS} FROM library_items i WHERE {filter} ORDER BY i.position"
             ))
             .map_err(StoreError::database(action))?;
         let rows = statement
-            .query_map([], read_entry)
+            .query_map(parameters, read_entry)
             .map_err(StoreError::database(action))?;
         let mut entries = Vec::new();
         for row in rows {
             entries.push(row.map_err(StoreError::database(action))??);
         }
         drop(statement);
+        if entries.is_empty() {
+            return Ok(entries);
+        }
 
         let index: HashMap<String, usize> = entries
             .iter()
@@ -100,13 +142,14 @@ impl Store {
             .collect();
         let mut chapters = self
             .conn
-            .prepare_cached(
-                "SELECT item_id, start_ms, name FROM library_chapters
-                 ORDER BY item_id, position",
-            )
+            .prepare_cached(&format!(
+                "SELECT c.item_id, c.start_ms, c.name FROM library_chapters c
+                 JOIN library_items i ON i.id = c.item_id WHERE {filter}
+                 ORDER BY c.item_id, c.position"
+            ))
             .map_err(StoreError::database(action))?;
         let rows = chapters
-            .query_map([], |row| {
+            .query_map(parameters, |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     read_chapter(row.get(1)?, row.get(2)?),
@@ -123,13 +166,17 @@ impl Store {
 
         let mut streams = self
             .conn
-            .prepare_cached(
-                "SELECT item_id, kind, codec, width, height, bit_depth, channels, language
-                 FROM library_streams ORDER BY item_id, kind, position",
-            )
+            .prepare_cached(&format!(
+                "SELECT s.item_id, s.kind, s.codec, s.width, s.height, s.bit_depth, s.channels,
+                        s.language
+                 FROM library_streams s JOIN library_items i ON i.id = s.item_id
+                 WHERE {filter} ORDER BY s.item_id, s.kind, s.position"
+            ))
             .map_err(StoreError::database(action))?;
         let rows = streams
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, read_stream(row)?)))
+            .query_map(parameters, |row| {
+                Ok((row.get::<_, String>(0)?, read_stream(row)?))
+            })
             .map_err(StoreError::database(action))?;
         for row in rows {
             let (id, stream) = row.map_err(StoreError::database(action))?;
@@ -144,13 +191,14 @@ impl Store {
 
         let mut labels = self
             .conn
-            .prepare_cached(
-                "SELECT item_id, kind, name FROM library_item_labels
-                 ORDER BY item_id, kind, position",
-            )
+            .prepare_cached(&format!(
+                "SELECT l.item_id, l.kind, l.name FROM library_item_labels l
+                 JOIN library_items i ON i.id = l.item_id WHERE {filter}
+                 ORDER BY l.item_id, l.kind, l.position"
+            ))
             .map_err(StoreError::database(action))?;
         let rows = labels
-            .query_map([], |row| {
+            .query_map(parameters, |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -173,7 +221,7 @@ impl Store {
         let mut statement = self
             .conn
             .prepare_cached(&format!(
-                "SELECT {ITEM_COLUMNS} FROM library_items WHERE id = ?1"
+                "SELECT {ITEM_COLUMNS} FROM library_items i WHERE i.id = ?1"
             ))
             .map_err(StoreError::database(action))?;
         let mut rows = statement
@@ -288,13 +336,29 @@ impl Store {
         Ok(collections)
     }
 
-    /// When the cache was last replaced, or `None` before the first sync.
+    /// When the last sync finished, whether it replaced the cache or
+    /// [found it unchanged](Self::mark_library_synced), or `None` before the
+    /// first sync.
     pub fn library_synced_at_ms(&self) -> Result<Option<i64>, StoreError> {
         self.conn
-            .query_row("SELECT MAX(synced_at_ms) FROM library_items", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT (SELECT synced_at_ms FROM library_sync WHERE id = 1)",
+                [],
+                |row| row.get(0),
+            )
             .map_err(StoreError::database("reading the sync time"))
+    }
+
+    /// Records a sync at `synced_at_ms` that found the library as cached
+    /// and left the cache alone. Does nothing before the first sync.
+    pub fn mark_library_synced(&mut self, synced_at_ms: i64) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "UPDATE library_sync SET synced_at_ms = ?1 WHERE id = 1",
+                [synced_at_ms],
+            )
+            .map(drop)
+            .map_err(StoreError::database("recording the sync time"))
     }
 }
 
@@ -315,6 +379,11 @@ impl MediaSource for Store {
 
     fn list_collections(&self) -> Result<Vec<Collection>, SourceError> {
         self.library_collections().map_err(unavailable)
+    }
+
+    fn query_items(&self, query: &ItemQuery<'_>) -> Result<Vec<MediaItem>, SourceError> {
+        let entries = self.library_items_matching(query).map_err(unavailable)?;
+        Ok(entries.into_iter().map(|entry| entry.item).collect())
     }
 }
 
@@ -409,6 +478,7 @@ fn kind_name(kind: MediaKind) -> &'static str {
         MediaKind::Movie => "movie",
         MediaKind::Episode => "episode",
         MediaKind::MusicVideo => "music_video",
+        MediaKind::Song => "song",
     }
 }
 
@@ -424,8 +494,8 @@ fn insert_entry(
     // `validate` has checked that the runtime and chapter starts fit an i64.
     tx.prepare_cached(
         "INSERT INTO library_items (id, position, title, kind, runtime_ms, path, synced_at_ms,
-                                    series_id, series_name, season, episode, album)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                                    series_id, series_name, season, episode, album, album_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
     )
     .and_then(|mut s| {
         s.execute(params![
@@ -441,6 +511,7 @@ fn insert_entry(
             series.and_then(|s| s.season),
             series.and_then(|s| s.number),
             item.album,
+            item.album_id.as_ref().map(MediaId::as_str),
         ])
     })
     .map_err(StoreError::database(action))?;
@@ -521,6 +592,16 @@ fn insert_entry(
     Ok(())
 }
 
+fn record_sync(tx: &Transaction<'_>, synced_at_ms: i64) -> Result<(), StoreError> {
+    tx.execute(
+        "INSERT INTO library_sync (id, synced_at_ms) VALUES (1, ?1)
+         ON CONFLICT (id) DO UPDATE SET synced_at_ms = excluded.synced_at_ms",
+        [synced_at_ms],
+    )
+    .map(drop)
+    .map_err(StoreError::database("recording the sync time"))
+}
+
 fn insert_collection(
     tx: &Transaction<'_>,
     position: usize,
@@ -560,10 +641,12 @@ fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<LibraryEntry, 
     let season: Option<i64> = row.get(7)?;
     let episode: Option<i64> = row.get(8)?;
     let album: Option<String> = row.get(9)?;
+    let album_id: Option<String> = row.get(10)?;
     Ok(
         build_entry(id, title, &kind, runtime_ms, path).and_then(|mut entry| {
             entry.item.series = build_series(series_id, series_name, season, episode)?;
             entry.item.album = album;
+            entry.item.album_id = album_id.map(MediaId::new);
             Ok(entry)
         }),
     )
@@ -580,6 +663,7 @@ fn build_entry(
         "movie" => MediaKind::Movie,
         "episode" => MediaKind::Episode,
         "music_video" => MediaKind::MusicVideo,
+        "song" => MediaKind::Song,
         other => return Err(StoreError::Corrupt(format!("unknown item kind {other:?}"))),
     };
     let runtime_ms = u64::try_from(runtime_ms)
@@ -784,6 +868,106 @@ mod tests {
             store.library_item(&MediaId::new("v")).unwrap(),
             Some(entries[0].clone())
         );
+    }
+
+    fn song(id: &str, genre: &str) -> LibraryEntry {
+        LibraryEntry {
+            item: MediaItem {
+                audio: vec![AudioStream {
+                    codec: "flac".into(),
+                    channels: 2,
+                    language: None,
+                }],
+                libraries: vec!["Music".into()],
+                genres: vec![genre.into()],
+                artists: vec!["Band".into()],
+                album: Some("Record".into()),
+                album_id: Some(MediaId::new(format!("album-{id}"))),
+                ..MediaItem::new(id, format!("Song {id}"), MediaKind::Song, 200_000)
+            },
+            path: Some(format!("/music/{id}.flac")),
+        }
+    }
+
+    #[test]
+    fn the_sync_time_is_the_last_sync_whether_it_wrote_or_not() {
+        let mut store = Store::open_in_memory().unwrap();
+        store.mark_library_synced(3).unwrap();
+        assert_eq!(store.library_synced_at_ms().unwrap(), None, "no sync yet");
+
+        store
+            .replace_library(&[song("s", "Punk")], &[], 10)
+            .unwrap();
+        assert_eq!(store.library_synced_at_ms().unwrap(), Some(10));
+        store.mark_library_synced(20).unwrap();
+        assert_eq!(store.library_synced_at_ms().unwrap(), Some(20));
+        // An empty library still counts as synced.
+        store.replace_library(&[], &[], 30).unwrap();
+        assert_eq!(store.library_synced_at_ms().unwrap(), Some(30));
+    }
+
+    #[test]
+    fn a_song_round_trips_with_its_album_id() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut bare = song("t", "Punk");
+        bare.item.album_id = None;
+        let entries = vec![song("s", "Punk"), bare];
+
+        store.replace_library(&entries, &[], 1).unwrap();
+
+        assert_eq!(store.library_items().unwrap(), entries);
+        assert_eq!(
+            store.library_item(&MediaId::new("s")).unwrap(),
+            Some(entries[0].clone())
+        );
+    }
+
+    #[test]
+    fn a_query_reads_only_the_items_it_matches() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut film = entry("film", MediaKind::Movie);
+        film.item.genres = vec!["Comedy".into()];
+        let entries = vec![
+            film.clone(),
+            song("joke", "Comedy"),
+            song("loud", "Punk"),
+            labelled_episode("ep", "s"),
+        ];
+        store.replace_library(&entries, &[], 1).unwrap();
+        let ids = |query: ItemQuery<'_>| -> Vec<String> {
+            store
+                .library_items_matching(&query)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.item.id.to_string())
+                .collect()
+        };
+        let query = |plays, label| ItemQuery { plays, label };
+
+        assert_eq!(ids(query(Plays::Videos, None)), ["film", "ep"]);
+        assert_eq!(ids(query(Plays::Songs, None)), ["joke", "loud"]);
+        assert_eq!(
+            ids(query(Plays::Videos, Some(Label::Genre("Comedy")))),
+            ["film"]
+        );
+        assert_eq!(
+            ids(query(Plays::Songs, Some(Label::Genre("Comedy")))),
+            ["joke"]
+        );
+        assert_eq!(
+            ids(query(Plays::Songs, Some(Label::Library("Music")))),
+            ["joke", "loud"]
+        );
+        assert!(ids(query(Plays::Videos, Some(Label::Tag("Nope")))).is_empty());
+        // A matched item comes back whole, with its chapters, streams and labels.
+        let matched = store
+            .library_items_matching(&query(Plays::Videos, Some(Label::Genre("Comedy"))))
+            .unwrap();
+        assert_eq!(matched, [film]);
+        let episode = store
+            .library_items_matching(&query(Plays::Videos, Some(Label::Tag("Retro"))))
+            .unwrap();
+        assert_eq!(episode, [entries[3].clone()]);
     }
 
     #[test]

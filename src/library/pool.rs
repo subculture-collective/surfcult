@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 
-use super::model::{MediaId, MediaItem};
-use super::source::{MediaSource, SourceError};
+use super::model::{MediaId, MediaItem, Plays};
+use super::source::{ItemQuery, Label, MediaSource, SourceError};
 use crate::config::Source;
 
 /// Why a channel's source could not be turned into a program pool. It names
@@ -12,6 +12,8 @@ use crate::config::Source;
 pub struct PoolError {
     /// The channel number the caller passed.
     pub channel: u32,
+    /// What the channel plays, so a song channel's error says it found no song.
+    pub plays: Plays,
     pub source: Source,
     pub reason: PoolErrorReason,
 }
@@ -37,7 +39,10 @@ impl fmt::Display for PoolError {
         };
         write!(f, "channel {}: {key} {name:?} ", self.channel)?;
         match &self.reason {
-            PoolErrorReason::NotFound => f.write_str("matches nothing in the library"),
+            PoolErrorReason::NotFound => match self.plays {
+                Plays::Videos => f.write_str("matches nothing in the library"),
+                Plays::Songs => f.write_str("matches no song in the library"),
+            },
             PoolErrorReason::Source(error) => write!(f, "cannot be read: {error}"),
         }
     }
@@ -56,6 +61,11 @@ impl Error for PoolError {
 /// the items to schedule, in the order
 /// [`schedule::extend`](crate::schedule::extend) expects. Names match
 /// exactly, including case.
+///
+/// Only items a channel playing `plays` may schedule are considered
+/// ([`MediaKind::played_by`](super::MediaKind::played_by)): a video channel
+/// never gets a song, even through a genre songs share, and a song channel
+/// gets only songs.
 ///
 /// - A collection is the first collection named `name`. Its members come in
 ///   collection order. A member that is a series becomes that series'
@@ -80,15 +90,17 @@ impl Error for PoolError {
 /// silently falls back to the whole library.
 pub fn resolve_pool(
     channel: u32,
+    plays: Plays,
     source: &Source,
     media: &impl MediaSource,
 ) -> Result<Vec<MediaItem>, PoolError> {
     let error = |reason| PoolError {
         channel,
+        plays,
         source: source.clone(),
         reason,
     };
-    match pool_for(source, media) {
+    match pool_for(plays, source, media) {
         Ok(Some(pool)) => Ok(pool),
         Ok(None) => Err(error(PoolErrorReason::NotFound)),
         Err(source) => Err(error(PoolErrorReason::Source(source))),
@@ -97,9 +109,15 @@ pub fn resolve_pool(
 
 /// The pool for `source`, or `None` when nothing matches it.
 fn pool_for(
+    plays: Plays,
     source: &Source,
     media: &impl MediaSource,
 ) -> Result<Option<Vec<MediaItem>>, SourceError> {
+    let all = ItemQuery { plays, label: None };
+    let labelled = |label| ItemQuery {
+        plays,
+        label: Some(label),
+    };
     let pool = match source {
         Source::JellyfinCollection(name) => {
             let Some(collection) = media
@@ -109,13 +127,13 @@ fn pool_for(
             else {
                 return Ok(None);
             };
-            return Ok(Some(expand(&collection.members, media.list_items()?)));
+            return Ok(Some(expand(&collection.members, media.query_items(&all)?)));
         }
-        Source::JellyfinLibrary(name) => matching(media, |item| item.libraries.contains(name))?,
-        Source::JellyfinTag(name) => matching(media, |item| item.tags.contains(name))?,
-        Source::JellyfinGenre(name) => matching(media, |item| item.genres.contains(name))?,
+        Source::JellyfinLibrary(name) => matching(media, labelled(Label::Library(name)))?,
+        Source::JellyfinTag(name) => matching(media, labelled(Label::Tag(name)))?,
+        Source::JellyfinGenre(name) => matching(media, labelled(Label::Genre(name)))?,
         Source::JellyfinSeries(name) => {
-            let items = media.list_items()?;
+            let items = media.query_items(&all)?;
             let Some(series) = items.iter().find_map(|item| {
                 item.series
                     .as_ref()
@@ -134,14 +152,9 @@ fn pool_for(
     Ok((!pool.is_empty()).then_some(pool))
 }
 
-/// The items `keep` accepts, with each series gathered by [`gather_series`].
-fn matching(
-    media: &impl MediaSource,
-    keep: impl Fn(&MediaItem) -> bool,
-) -> Result<Vec<MediaItem>, SourceError> {
-    Ok(gather_series(
-        media.list_items()?.into_iter().filter(|item| keep(item)),
-    ))
+/// The items `query` matches, with each series gathered by [`gather_series`].
+fn matching(media: &impl MediaSource, query: ItemQuery<'_>) -> Result<Vec<MediaItem>, SourceError> {
+    Ok(gather_series(media.query_items(&query)?.into_iter()))
 }
 
 fn series_of(item: &MediaItem) -> Option<&MediaId> {
@@ -271,12 +284,13 @@ mod tests {
     }
 
     fn resolve(source: &Source, media: &impl MediaSource) -> Result<Vec<MediaItem>, PoolError> {
-        resolve_pool(CHANNEL, source, media)
+        resolve_pool(CHANNEL, Plays::Videos, source, media)
     }
 
     fn not_found(source: Source) -> PoolError {
         PoolError {
             channel: CHANNEL,
+            plays: Plays::Videos,
             source,
             reason: PoolErrorReason::NotFound,
         }
@@ -563,6 +577,64 @@ mod tests {
                 .to_string(),
             "channel 3: jellyfin_collection \"Cartoons\" cannot be read: \
              media source unavailable: down"
+        );
+    }
+
+    // ---- songs ----------------------------------------------------------
+
+    fn song(id: &str, genre: &str) -> MediaItem {
+        MediaItem {
+            genres: vec![genre.into()],
+            libraries: vec!["Music".into()],
+            ..MediaItem::new(id, id, MediaKind::Song, 240_000)
+        }
+    }
+
+    fn mixed() -> FakeMediaSource {
+        FakeMediaSource::new()
+            .with_item(MediaItem {
+                genres: vec!["Comedy".into()],
+                ..movie("film")
+            })
+            .with_item(song("tune", "Comedy"))
+            .with_item(song("punk", "Punk"))
+            .with_collection("Mixed", &["film", "tune"])
+    }
+
+    #[test]
+    fn a_video_channel_never_gets_a_song_through_a_shared_genre() {
+        let media = mixed();
+        let genre = |name: &str| Source::JellyfinGenre(name.into());
+
+        assert_eq!(ids(&resolve(&genre("Comedy"), &media).unwrap()), ["film"]);
+        assert_eq!(
+            resolve(&genre("Punk"), &media).unwrap_err(),
+            not_found(genre("Punk"))
+        );
+        assert_eq!(
+            ids(&resolve(&collection("Mixed"), &media).unwrap()),
+            ["film"]
+        );
+    }
+
+    #[test]
+    fn a_song_channel_gets_only_songs() {
+        let media = mixed();
+        let songs = |source: Source| resolve_pool(CHANNEL, Plays::Songs, &source, &media);
+
+        assert_eq!(
+            ids(&songs(Source::JellyfinGenre("Comedy".into())).unwrap()),
+            ["tune"]
+        );
+        assert_eq!(
+            ids(&songs(Source::JellyfinLibrary("Music".into())).unwrap()),
+            ["tune", "punk"]
+        );
+        assert_eq!(ids(&songs(collection("Mixed")).unwrap()), ["tune"]);
+        let err = songs(Source::JellyfinTag("Retro".into())).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "channel 3: jellyfin_tag \"Retro\" matches no song in the library"
         );
     }
 }

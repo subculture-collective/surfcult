@@ -1,0 +1,80 @@
+{
+ "Items": [
+  {
+   "Name": "Fixture Anthem",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "50a90000-0000-4000-8000-000000000001",
+   "RunTimeTicks": 2051000000,
+   "Container": "flac",
+   "Path": "/media/fixtures/Music/Fixture Band/Fixture Record/01 - Fixture Anthem.flac",
+   "Type": "Audio",
+   "IsFolder": false,
+   "MediaType": "Audio",
+   "LocationType": "FileSystem",
+   "IndexNumber": 1,
+   "ParentIndexNumber": 1,
+   "Album": "Fixture Record",
+   "AlbumId": "a1b00000-0000-4000-8000-000000000001",
+   "AlbumArtist": "Fixture Band",
+   "Artists": ["Fixture Band"],
+   "ArtistItems": [{ "Name": "Fixture Band", "Id": "a1a1a1a1-0000-4000-8000-000000000003" }],
+   "MediaStreams": [
+    {
+     "Type": "Audio",
+     "Codec": "flac",
+     "IsDefault": true,
+     "Index": 0,
+     "Channels": 2,
+     "ChannelLayout": "stereo",
+     "SampleRate": 44100,
+     "BitDepth": 16
+    },
+    {
+     "Type": "EmbeddedImage",
+     "Codec": "mjpeg",
+     "Index": 1,
+     "Width": 600,
+     "Height": 600
+    }
+   ],
+   "Genres": ["Punk", "Comedy"]
+  },
+  {
+   "Name": "Fixture Single",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "50a90000-0000-4000-8000-000000000002",
+   "RunTimeTicks": 1500000000,
+   "Container": "mp3",
+   "Path": "/media/fixtures/Music/Fixture Duo/Fixture Single.mp3",
+   "Type": "Audio",
+   "IsFolder": false,
+   "MediaType": "Audio",
+   "LocationType": "FileSystem",
+   "Artists": ["Fixture Duo", "Guest Artist"],
+   "MediaStreams": [
+    {
+     "Type": "Audio",
+     "Codec": "mp3",
+     "IsDefault": true,
+     "Index": 0,
+     "Channels": 2,
+     "SampleRate": 44100
+    }
+   ],
+   "Genres": ["Punk"]
+  },
+  {
+   "Name": "Fixture Silence",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "50a90000-0000-4000-8000-000000000003",
+   "Container": "flac",
+   "Type": "Audio",
+   "IsFolder": false,
+   "MediaType": "Audio",
+   "LocationType": "FileSystem",
+   "Genres": ["Punk"]
+  }
+ ],
+ "TotalRecordCount": 3,
+ "StartIndex": 0
+}

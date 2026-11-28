@@ -40,7 +40,12 @@ fn the_example_file_loads_into_typed_config() {
     let config = Config::parse(EXAMPLE).expect("example is valid");
 
     assert_eq!(config.timezone, Tz::America__Chicago);
-    assert_eq!(config.channels.len(), 3);
+    assert_eq!(config.channels.len(), 4);
+    assert!(config.channels[..3].iter().all(|c| c.picture.is_none()));
+    let punk = &config.channels[3];
+    assert_eq!(punk.picture, Some(Picture::Cover));
+    assert_eq!(punk.plays(), Plays::Songs);
+    assert_eq!(config.channels[0].plays(), Plays::Videos);
     assert_eq!(config.pools.len(), 5);
 
     let cartoons = &config.channels[0];
@@ -1136,4 +1141,31 @@ fn rejects_keys_that_are_not_lists_of_names() {
         Config::parse("timezone = \"UTC\"\n[keys]\nguide = \"KEY_G\"\n"),
         Err(ConfigError::Parse(_))
     ));
+}
+
+#[test]
+fn a_picture_makes_a_channel_play_songs() {
+    for (text, picture) in [
+        ("cover", Picture::Cover),
+        ("visualizer", Picture::Visualizer),
+    ] {
+        let config =
+            Config::parse(&with_channel(&format!("{PLAIN}\npicture = \"{text}\""))).unwrap();
+        assert_eq!(config.channels[0].picture, Some(picture));
+        assert_eq!(config.channels[0].plays(), Plays::Songs);
+    }
+    let plain = Config::parse(&with_channel(PLAIN)).unwrap();
+    assert_eq!(plain.channels[0].picture, None);
+    assert_eq!(plain.channels[0].plays(), Plays::Videos);
+}
+
+#[test]
+fn an_unknown_picture_is_a_problem() {
+    let found = problems(&with_channel(&format!("{PLAIN}\npicture = \"album\"")));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].field, "channel[0].picture");
+    assert_eq!(
+        found[0].message,
+        "unknown picture \"album\"; use cover or visualizer"
+    );
 }

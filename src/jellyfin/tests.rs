@@ -11,7 +11,9 @@ use std::time::Duration;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::library::{LibraryChanges, MediaId, MediaKind, MediaSource, SeriesEpisode, SourceError};
+use crate::library::{
+    LibraryChanges, MediaId, MediaKind, MediaSource, Plays, SeriesEpisode, SourceError,
+};
 use crate::store::Store;
 
 const ITEMS: &str = include_str!("../../tests/fixtures/jellyfin/items-page.json");
@@ -226,6 +228,7 @@ fn a_sync_fills_the_cache_with_runtime_chapters_streams_and_path() {
             collections: 2,
             skipped: 1,
             changes: LibraryChanges::default(),
+            written: true,
         }
     );
     let movie = store.resolve(&MediaId::new(MOVIE_1)).unwrap();
@@ -413,7 +416,7 @@ fn every_source_kind_resolves_from_a_synced_cache() {
 
     let (client, mut store) = client_and_store(&FakeHttp::fixtures(500));
     sync(&client, &mut store, SYNCED_AT).unwrap();
-    let resolve = |source: Source| resolve_pool(7, &source, &store);
+    let resolve = |source: Source| resolve_pool(7, Plays::Videos, &source, &store);
     let pool = |source: Source| ids(&resolve(source).unwrap()).join(" ");
 
     // Collection B lists movie 4 and the series, which becomes its episode.
@@ -519,7 +522,8 @@ fn music_video_sources_resolve_from_a_synced_cache() {
 
     let (client, mut store) = client_and_store(&with_music_videos());
     sync(&client, &mut store, SYNCED_AT).unwrap();
-    let pool = |source: Source| ids(&resolve_pool(7, &source, &store).unwrap()).join(" ");
+    let pool =
+        |source: Source| ids(&resolve_pool(7, Plays::Videos, &source, &store).unwrap()).join(" ");
 
     assert_eq!(
         pool(Source::JellyfinLibrary("Music Videos".into())),
@@ -528,6 +532,140 @@ fn music_video_sources_resolve_from_a_synced_cache() {
     assert_eq!(pool(Source::JellyfinGenre("Hip-Hop".into())), VIDEO_2);
     assert_eq!(pool(Source::JellyfinGenre("Rock".into())), VIDEO_1);
     assert_eq!(pool(Source::JellyfinTag("Official Video".into())), VIDEO_1);
+}
+
+const SONG_1: &str = "50a90000-0000-4000-8000-000000000001";
+const SONG_2: &str = "50a90000-0000-4000-8000-000000000002";
+const MUSIC_LIBRARY: &str = "66666666-6666-6666-6666-666666666666";
+/// Three `Audio` items, written by hand in the shape Jellyfin sends. The
+/// third has no runtime.
+const SONGS: &str = include_str!("../../tests/fixtures/jellyfin/songs-page.json");
+
+/// The recorded fixtures plus a `Music` library holding the songs in
+/// [`SONGS`], at most `cap` items per page.
+fn with_songs(cap: usize) -> Arc<FakeHttp> {
+    let list = |body: &str| serde_json::from_str::<Value>(body).unwrap()["Items"].clone();
+    FakeHttp::new(move |path| {
+        if param(path, "ParentId") == Some(MUSIC_LIBRARY) {
+            let items = match param(path, "IncludeItemTypes") {
+                Some("Audio") => list(SONGS).as_array().unwrap().clone(),
+                _ => Vec::new(),
+            };
+            return Ok(page(&items, path, cap));
+        }
+        if path.starts_with("/Library/MediaFolders?") {
+            let mut folders = list(MEDIA_FOLDERS).as_array().unwrap().clone();
+            folders.push(json!({
+                "Name": "Music", "Id": MUSIC_LIBRARY,
+                "Type": "CollectionFolder", "CollectionType": "music", "IsFolder": true
+            }));
+            return Ok(page(&folders, path, cap));
+        }
+        serve_fixtures(path, cap, ITEMS)
+    })
+}
+
+#[test]
+fn a_sync_caches_the_songs_of_a_music_library() {
+    let http = with_songs(2);
+    let (client, mut store) = client_and_store(&http);
+
+    let report = sync(&client, &mut store, SYNCED_AT).unwrap();
+
+    // Four videos, two songs; a placeholder episode and the song without a
+    // runtime are skipped.
+    assert_eq!((report.items, report.skipped), (6, 2));
+    let song = store.resolve(&MediaId::new(SONG_1)).unwrap();
+    assert_eq!(song.kind, MediaKind::Song);
+    assert_eq!(song.title, "Fixture Anthem");
+    assert_eq!(song.artists, ["Fixture Band"]);
+    assert_eq!(song.album.as_deref(), Some("Fixture Record"));
+    assert_eq!(
+        song.album_id,
+        Some(MediaId::new("a1b00000-0000-4000-8000-000000000001"))
+    );
+    assert_eq!(song.genres, ["Punk", "Comedy"]);
+    assert_eq!(song.libraries, ["Music"]);
+    assert_eq!(song.runtime_ms, 205_100);
+    assert!(song.video.is_empty(), "the cover is not a picture");
+    assert_eq!(song.audio[0].codec, "flac");
+    assert_eq!(song.display_title(), "Fixture Band – Fixture Anthem");
+    let entries = store.library_items().unwrap();
+    let path = entries
+        .iter()
+        .find(|e| e.item.id.as_str() == SONG_1)
+        .unwrap();
+    assert_eq!(
+        path.path.as_deref(),
+        Some("/media/fixtures/Music/Fixture Band/Fixture Record/01 - Fixture Anthem.flac")
+    );
+
+    let single = store.resolve(&MediaId::new(SONG_2)).unwrap();
+    assert_eq!(single.album, None);
+    assert_eq!(single.album_id, None);
+
+    // Songs are asked for once per music library, page by page, without
+    // images or user data.
+    let song_pages: Vec<String> = http
+        .paths()
+        .into_iter()
+        .filter(|p| param(p, "IncludeItemTypes") == Some("Audio"))
+        .collect();
+    let starts: Vec<_> = song_pages
+        .iter()
+        .map(|p| param(p, "StartIndex").unwrap())
+        .collect();
+    assert_eq!(starts, ["0", "2"]);
+    for p in &song_pages {
+        assert_eq!(param(p, "ParentId"), Some(MUSIC_LIBRARY), "{p}");
+        assert_eq!(param(p, "Fields"), Some("Path,Genres,MediaStreams"), "{p}");
+        assert_eq!(param(p, "EnableImages"), Some("false"), "{p}");
+    }
+    // No other request asks for songs.
+    assert!(
+        http.paths()
+            .iter()
+            .filter(|p| p.contains("Audio"))
+            .all(|p| param(p, "ParentId") == Some(MUSIC_LIBRARY))
+    );
+}
+
+#[test]
+fn songs_reach_only_channels_that_play_songs() {
+    use crate::config::Source;
+    use crate::library::resolve_pool;
+
+    let (client, mut store) = client_and_store(&with_songs(500));
+    sync(&client, &mut store, SYNCED_AT).unwrap();
+    let pool = |plays, source: Source| {
+        resolve_pool(7, plays, &source, &store)
+            .map(|items| ids(&items).join(" "))
+            .map_err(|e| e.to_string())
+    };
+    let comedy = || Source::JellyfinGenre("Comedy".into());
+
+    // Movie 1 and the song share "Comedy"; each kind of channel gets its own.
+    assert_eq!(
+        pool(Plays::Videos, comedy()).unwrap(),
+        [MOVIE_1, EPISODE_2, MOVIE_3].join(" ")
+    );
+    assert_eq!(pool(Plays::Songs, comedy()).unwrap(), SONG_1);
+    assert_eq!(
+        pool(Plays::Songs, Source::JellyfinGenre("Punk".into())).unwrap(),
+        [SONG_1, SONG_2].join(" ")
+    );
+    assert_eq!(
+        pool(Plays::Videos, Source::JellyfinGenre("Punk".into())).unwrap_err(),
+        "channel 7: jellyfin_genre \"Punk\" matches nothing in the library"
+    );
+    assert_eq!(
+        pool(
+            Plays::Songs,
+            Source::JellyfinLibrary("Fixture Movies".into())
+        )
+        .unwrap_err(),
+        "channel 7: jellyfin_library \"Fixture Movies\" matches no song in the library"
+    );
 }
 
 #[test]
@@ -1199,6 +1337,47 @@ fn an_h265_1080p_item_gets_a_direct_play_url() {
 }
 
 #[test]
+fn a_song_gets_an_audio_direct_play_url() {
+    let http = FakeHttp::with_post(|_, _| {
+        Ok(json!({
+            "MediaSources": [{
+                "Id": "50a9000000004000800000000000000a",
+                "SupportsDirectPlay": true,
+                "MediaStreams": [
+                    { "Type": "Audio", "Codec": "flac", "Channels": 2 },
+                    { "Type": "EmbeddedImage", "Codec": "mjpeg" }
+                ]
+            }],
+            "PlaySessionId": "session"
+        })
+        .to_string())
+    });
+
+    let playback = client(&http)
+        .playback(&MediaId::new(SONG_1), 30_000)
+        .unwrap();
+
+    assert_eq!(
+        playback,
+        Playback::Direct {
+            path_and_query: format!(
+                "/Audio/{SONG_1}/stream?static=true&mediaSourceId=50a9000000004000800000000000000a"
+            ),
+            seek_ms: 30_000,
+        }
+    );
+    let profile = super::playback::device_profile();
+    let audio = &profile["DirectPlayProfiles"][1];
+    assert_eq!(audio["Type"], "Audio");
+    assert!(audio.get("Container").is_none(), "any container plays");
+    let codecs: Vec<&str> = audio["AudioCodec"].as_str().unwrap().split(',').collect();
+    assert!(
+        codecs.contains(&"flac") && codecs.contains(&"mp3"),
+        "{codecs:?}"
+    );
+}
+
+#[test]
 fn an_item_outside_the_profile_gets_a_transcode_url() {
     let http = fake_jellyfin();
     let client = client(&http);
@@ -1736,6 +1915,35 @@ fn the_worker_fetches_at_once_and_apply_writes_what_sync_would() {
 }
 
 #[test]
+fn an_unchanged_library_is_not_written_again_but_its_sync_time_moves() {
+    let worker =
+        SyncWorker::spawn(client(&FakeHttp::fixtures(500)), Duration::from_millis(1)).unwrap();
+    let mut store = Store::open_in_memory().unwrap();
+    let first = apply_soon(&worker, &mut store).unwrap();
+    assert!(first.written);
+    // Something else changes the cache; the worker does not know.
+    store.replace_library(&[], &[], 5).unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let again = loop {
+        assert!(std::time::Instant::now() < deadline, "no second fetch");
+        if let Some(result) = worker.apply(&mut store, SYNCED_AT + 9) {
+            break result.unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+
+    assert!(!again.written);
+    assert_eq!(
+        (again.items, again.collections),
+        (first.items, first.collections)
+    );
+    assert_eq!(again.changes, LibraryChanges::default());
+    assert!(store.list_items().unwrap().is_empty(), "not written again");
+    assert_eq!(store.library_synced_at_ms().unwrap(), Some(SYNCED_AT + 9));
+}
+
+#[test]
 fn a_failed_fetch_is_reported_by_apply_and_leaves_the_cache_untouched() {
     let mut store = Store::open_in_memory().unwrap();
     sync(&client(&FakeHttp::fixtures(500)), &mut store, SYNCED_AT - 1).unwrap();
@@ -1936,4 +2144,128 @@ fn the_profile_offers_every_subtitle_format_as_external() {
             "{needed}"
         );
     }
+}
+
+// ---- cost ---------------------------------------------------------------
+
+/// What a sync of a music library the size of the owner's (about 32,000
+/// songs) costs: run with
+/// `cargo test --release -- --ignored --nocapture sync_cost` and read the
+/// printed times. Peak memory is the process's, so measure it from outside
+/// (`/usr/bin/time -v`). docs/reference/jellyfin.md records the results.
+#[test]
+#[ignore = "a measurement, not a check; see docs/reference/jellyfin.md"]
+fn sync_cost_of_a_music_library() {
+    use std::time::Instant;
+
+    use crate::config::Source;
+    use crate::library::resolve_pool;
+
+    const SONGS: usize = 32_000;
+    const GENRES: [&str; 8] = [
+        "Punk",
+        "Rock",
+        "Hip Hop",
+        "Electronic",
+        "Jazz",
+        "Indie Rock",
+        "Ska",
+        "Ambient",
+    ];
+    let song = |i: usize| {
+        json!({
+            "Name": format!("Song number {i}"),
+            "ServerId": "00000000000000000000000000000000",
+            "Id": format!("{i:032x}"),
+            "RunTimeTicks": 2_400_000_000i64 + (i as i64 % 900) * 1_000_000,
+            "Container": "flac",
+            "Path": format!("/media/music/Artist {a}/Album {b}/{i:02} - Song number {i}.flac",
+                a = i / 32, b = i / 12),
+            "Type": "Audio", "IsFolder": false, "MediaType": "Audio",
+            "LocationType": "FileSystem",
+            "IndexNumber": i % 12, "ParentIndexNumber": 1,
+            "Album": format!("Album {}", i / 12),
+            "AlbumId": format!("{:032x}", 1_000_000 + i / 12),
+            "AlbumArtist": format!("Artist {}", i / 32),
+            "Artists": [format!("Artist {}", i / 32)],
+            "ArtistItems": [{ "Name": format!("Artist {}", i / 32), "Id": format!("{:032x}", 2_000_000 + i / 32) }],
+            "MediaStreams": [
+                { "Type": "Audio", "Codec": "flac", "IsDefault": true, "Index": 0,
+                  "Channels": 2, "ChannelLayout": "stereo", "SampleRate": 44100, "BitDepth": 16,
+                  "BitRate": 900_000, "DisplayTitle": "FLAC - Stereo" },
+                { "Type": "EmbeddedImage", "Codec": "mjpeg", "Index": 1, "Width": 600, "Height": 600 }
+            ],
+            "Genres": [GENRES[i % GENRES.len()], GENRES[(i / 7) % GENRES.len()]]
+        })
+    };
+    let http = FakeHttp::new(move |path| {
+        if param(path, "ParentId") == Some(MUSIC_LIBRARY) {
+            if param(path, "IncludeItemTypes") != Some("Audio") {
+                return Ok(page(&[], path, 500));
+            }
+            let start: usize = param(path, "StartIndex").unwrap().parse().unwrap();
+            let items: Vec<Value> = (start..SONGS.min(start + 500)).map(song).collect();
+            return Ok(json!({ "Items": items, "TotalRecordCount": SONGS }).to_string());
+        }
+        if path.starts_with("/Library/MediaFolders?") {
+            let folders = [json!({
+                "Name": "Music", "Id": MUSIC_LIBRARY,
+                "Type": "CollectionFolder", "CollectionType": "music", "IsFolder": true
+            })];
+            return Ok(page(&folders, path, 500));
+        }
+        serve_fixtures(path, 500, ITEMS)
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path().join("surfcult.db")).unwrap();
+    let client = client(&http);
+
+    let started = Instant::now();
+    let fetched = client.fetch_library().unwrap();
+    let fetch = started.elapsed();
+    assert_eq!(fetched.entries.len(), SONGS + 4);
+    let started = Instant::now();
+    super::sync::write_fetched(&mut store, &fetched, SYNCED_AT).unwrap();
+    let write = started.elapsed();
+    drop(fetched);
+    let started = Instant::now();
+    let again = client.fetch_library().unwrap();
+    super::sync::write_fetched(&mut store, &again, SYNCED_AT + 1).unwrap();
+    let resync = started.elapsed();
+    drop(again);
+
+    let started = Instant::now();
+    let punk = resolve_pool(
+        7,
+        Plays::Songs,
+        &Source::JellyfinGenre("Punk".into()),
+        &store,
+    )
+    .unwrap();
+    let genre = started.elapsed();
+    let started = Instant::now();
+    let comedy = resolve_pool(
+        7,
+        Plays::Videos,
+        &Source::JellyfinGenre("Comedy".into()),
+        &store,
+    )
+    .unwrap();
+    let video = started.elapsed();
+    let started = Instant::now();
+    let all = store.list_items().unwrap();
+    let everything = started.elapsed();
+    let bytes = std::fs::metadata(dir.path().join("surfcult.db"))
+        .unwrap()
+        .len();
+
+    assert_eq!(all.len(), SONGS + 4);
+    assert_eq!(comedy.len(), 3);
+    println!(
+        "{SONGS} songs: fetch and parse {fetch:?}, write {write:?}, \
+         fetch and replace again {resync:?}; one genre ({} songs) {genre:?}, \
+         a video genre {video:?}, the whole cache {everything:?}; database {} KiB",
+        punk.len(),
+        bytes / 1024
+    );
 }

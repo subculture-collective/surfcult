@@ -108,6 +108,7 @@ fn channels_come_from_the_config() {
             (3, "SATURDAY CARTOONS", "shuffle", Some(1_800_000)),
             (4, "MOVIE NIGHT", "sequential", None),
             (5, "ALL DAY CARTOONS", "blocks", None),
+            (6, "PUNK", "weighted", None),
         ]
     );
 }
@@ -155,7 +156,7 @@ fn without_parameters_the_schedule_is_every_channel_for_a_day_from_now() {
         .iter()
         .map(|c| (c.number, c.events.len()))
         .collect();
-    assert_eq!(counts, vec![(3, 3), (4, 1), (5, 0)]);
+    assert_eq!(counts, vec![(3, 3), (4, 1), (5, 0), (6, 0)]);
 }
 
 #[test]
@@ -212,6 +213,10 @@ fn health_reports_the_schema_the_sync_time_and_each_horizon() {
                 },
                 ChannelHealth {
                     number: 5,
+                    scheduled_until_ms: None,
+                },
+                ChannelHealth {
+                    number: 6,
                     scheduled_until_ms: None,
                 },
             ],

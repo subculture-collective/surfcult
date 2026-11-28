@@ -16,6 +16,7 @@ pub use chrono_tz::Tz;
 use serde::Deserialize;
 
 pub use crate::input::KeyMap;
+use crate::library::Plays;
 pub use crate::player::Filter;
 use crate::player::{DEFAULT_GLITCH_EVERY, DEFAULT_STANDBY_FILTERS};
 
@@ -78,6 +79,28 @@ pub struct Channel {
     pub filler: Option<String>,
     /// The broadcast that ends each night and the time off the air after it.
     pub sign_off: Option<SignOff>,
+    /// What the screen shows while a song plays. A channel with a picture
+    /// plays songs and nothing else; a channel without one plays videos.
+    pub picture: Option<Picture>,
+}
+
+impl Channel {
+    /// Whether the channel plays songs or videos, from its `picture`.
+    pub fn plays(&self) -> Plays {
+        match self.picture {
+            Some(_) => Plays::Songs,
+            None => Plays::Videos,
+        }
+    }
+}
+
+/// A music channel's `picture` key: what is on screen while a song plays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Picture {
+    /// The album cover with the artist, title and album.
+    Cover,
+    /// A picture MPV draws from the sound, with a now-playing line.
+    Visualizer,
 }
 
 /// A channel's nightly sign-off: one clip that starts at `at_minute`, after

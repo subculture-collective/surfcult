@@ -1,7 +1,8 @@
 //! The Jellyfin sync step: copies the library from Jellyfin into the library
 //! cache in the [`Store`].
 //!
-//! [`sync`] fetches every playable movie and episode, and every collection, and
+//! [`sync`] fetches every playable movie, episode, music video and song, and
+//! every collection, and
 //! replaces the cache in one transaction. Nothing else in surfcult talks to
 //! Jellyfin: the `Store` is the [`MediaSource`] the rest reads, so the library
 //! stays available while Jellyfin is down, and a failed sync leaves the cache

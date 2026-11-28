@@ -12,7 +12,7 @@ use crate::config::{
     Source, Tz, WeightedPool, WeightedSource,
 };
 use crate::library::{
-    Chapter, FakeMediaSource, LibraryChanges, MediaId, MediaItem, MediaKind, resolve_pool,
+    Chapter, FakeMediaSource, LibraryChanges, MediaId, MediaItem, MediaKind, Plays, resolve_pool,
 };
 use crate::store::{LibraryEntry, Store};
 use crate::timeline::{Event, EventKind};
@@ -55,6 +55,7 @@ fn channel(number: u32, mode: Mode) -> Channel {
         between: None,
         filler: None,
         sign_off: None,
+        picture: None,
     }
 }
 
@@ -870,7 +871,7 @@ fn a_resolved_collection_pool_schedules_only_its_items() {
     let Plan::Fixed { sources, .. } = &channel.plan else {
         unreachable!()
     };
-    let items = resolve_pool(channel.number, &sources[0].source, &media).unwrap();
+    let items = resolve_pool(channel.number, Plays::Videos, &sources[0].source, &media).unwrap();
     let mut store = setup();
     let now = at(2026, 6, 1, 12, 0);
 
@@ -3306,7 +3307,12 @@ fn reschedule_cached(
         .plan
         .sources()
         .into_iter()
-        .map(|source| (source.clone(), resolve_pool(3, source, &*store).unwrap()))
+        .map(|source| {
+            (
+                source.clone(),
+                resolve_pool(3, Plays::Videos, source, &*store).unwrap(),
+            )
+        })
         .collect();
     reschedule(store, channel, &pools, &[], Tz::UTC, now_ms, changes).unwrap()
 }

@@ -17,8 +17,9 @@ mod source;
 
 pub use fake::FakeMediaSource;
 pub use model::{
-    AudioStream, Chapter, Collection, MediaId, MediaItem, MediaKind, SeriesEpisode, VideoStream,
+    AudioStream, Chapter, Collection, MediaId, MediaItem, MediaKind, Plays, SeriesEpisode,
+    VideoStream,
 };
 pub use pool::{PoolError, PoolErrorReason, resolve_pool};
 pub use reconcile::{Known, LibraryChanges, reconcile};
-pub use source::{MediaSource, SourceError};
+pub use source::{ItemQuery, Label, MediaSource, SourceError};
