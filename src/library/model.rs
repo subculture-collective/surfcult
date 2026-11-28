@@ -24,6 +24,7 @@ impl fmt::Display for MediaId {
 pub enum MediaKind {
     Movie,
     Episode,
+    MusicVideo,
 }
 
 /// A chapter mark, used to pick commercial-break cut points.
@@ -78,6 +79,10 @@ pub struct MediaItem {
     /// The episode's series, or `None` for a movie or for an episode the
     /// source does not place in a series.
     pub series: Option<SeriesEpisode>,
+    /// The music video's artists, in the source's order. Empty for other kinds.
+    pub artists: Vec<String>,
+    /// The music video's album, when the source names one.
+    pub album: Option<String>,
 }
 
 impl MediaItem {
@@ -101,6 +106,25 @@ impl MediaItem {
             tags: Vec::new(),
             genres: Vec::new(),
             series: None,
+            artists: Vec::new(),
+            album: None,
+        }
+    }
+
+    /// The title the banner and the guide show: `Series: Title` for an
+    /// episode in a named series, `Artist – Title` for an item with artists
+    /// (several are joined with commas), and the plain title otherwise.
+    pub fn display_title(&self) -> String {
+        match &self.series {
+            Some(series) if !series.series_name.is_empty() => {
+                return format!("{}: {}", series.series_name, self.title);
+            }
+            _ => {}
+        }
+        if self.artists.is_empty() {
+            self.title.clone()
+        } else {
+            format!("{} – {}", self.artists.join(", "), self.title)
         }
     }
 }

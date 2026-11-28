@@ -15,6 +15,7 @@ The words surfcult's code and documentation use, and the code item each one name
 - **Transcode session**: the device id and play session id of a transcode surfcult started, `jellyfin::TranscodeSession`. `JellyfinClient::stop_transcode` stops it when playback ends.
 - **Program pool**: the ordered items a channel, block or default draws its programs from, built from its source by `library::resolve_pool(channel, source, media)`; `schedule::extend` takes one per source. A collection keeps its member order and expands each series in it to its episodes; a library, tag or genre keeps the cache's order with each series' episodes gathered together; a series gives its episodes. A source that matches nothing is a `PoolError` naming the channel and the source, never the whole library.
 - **Episode order**: season, then episode number, `library::SeriesEpisode`. Season 0 (specials) comes first, missing numbers come last, and ties keep the cache's order.
+- **Music video**: a Jellyfin `MusicVideo` item, `library::MediaKind::MusicVideo`, cached with its artists and album (`MediaItem::artists`, `MediaItem::album`) and played like a movie. Its display title is `Artist – Title` (`MediaItem::display_title`).
 - **Series member**: a collection member that is a series id rather than an item id, `library::Collection::members`. It stands for all of the series' cached episodes.
 
 ## Clips

@@ -1,10 +1,10 @@
 # Jellyfin source
 
-`surfcult` reads its media library from Jellyfin and keeps a copy in SQLite. The code is in `src/jellyfin/`; the cache tables are in `migrations/0002_library_cache.sql`.
+`surfcult` reads its media library from Jellyfin and keeps a copy in SQLite. The code is in `src/jellyfin/`; the cache tables are in `migrations/0002_library_cache.sql` and later migrations.
 
 ## How it works
 
-`jellyfin::sync(&client, &mut store, now_ms)` fetches every playable movie and episode and every collection from Jellyfin, then replaces the cache in the `Store` in one transaction, recording `now_ms` as the sync time. The caller supplies the time; the sync step never reads the clock. `Store` implements the `MediaSource` trait, and `list_items`, `resolve` and `list_collections` read only the cache. They never call Jellyfin, so they keep working with the data of the last good sync when Jellyfin is down. `sync` fetches on the calling thread.
+`jellyfin::sync(&client, &mut store, now_ms)` fetches every playable movie, episode and music video and every collection from Jellyfin, then replaces the cache in the `Store` in one transaction, recording `now_ms` as the sync time. The caller supplies the time; the sync step never reads the clock. `Store` implements the `MediaSource` trait, and `list_items`, `resolve` and `list_collections` read only the cache. They never call Jellyfin, so they keep working with the data of the last good sync when Jellyfin is down. `sync` fetches on the calling thread.
 
 `jellyfin::SyncWorker::spawn(client, every)` fetches on a background thread named `jellyfin-sync` instead: once at start, then every `every`. It sends each result back over a channel and never touches the store, because `Store` is not `Sync`. The thread that owns the store calls `worker.apply(&mut store, now_ms)`, which does not block. It takes every pending result and writes only the newest successful snapshot, since each one is a whole library. It returns `None` when nothing is pending, the report of that write when the newest result is a snapshot, and the error when the newest result is a failed fetch; a snapshot that arrived before that failure is still written. A failed write leaves the cache as it was and its error is returned. Dropping the worker stops the thread without waiting for the next interval, though it does wait for a fetch in progress. If the worker thread panics, `apply` still writes what it sent before, then returns `None` and dropping the worker does not panic. `surfcult run` creates one ([run.md](run.md)).
 
@@ -16,12 +16,12 @@ The sync sends only `GET` requests. `StartIndex` and `Limit` (500) page every li
 
 | What | Request |
 |---|---|
-| Items | `GET /Items?Recursive=true&IncludeItemTypes=Movie,Episode&Fields=MediaStreams,Chapters,Path,MediaSources,Tags,Genres&SortBy=SortName` |
+| Items | `GET /Items?Recursive=true&IncludeItemTypes=Movie,Episode,MusicVideo&Fields=MediaStreams,Chapters,Path,MediaSources,Tags,Genres&SortBy=SortName` |
 | Series, for their tags and genres | `GET /Items?Recursive=true&IncludeItemTypes=Series&Fields=Tags,Genres&SortBy=SortName` |
 | Libraries | `GET /Library/MediaFolders?IsHidden=false` |
-| One library's items | `GET /Items?ParentId=<library id>&Recursive=true&IncludeItemTypes=Movie,Episode&SortBy=SortName` |
+| One library's items | `GET /Items?ParentId=<library id>&Recursive=true&IncludeItemTypes=Movie,Episode,MusicVideo&SortBy=SortName` |
 | Collections | `GET /Items?Recursive=true&IncludeItemTypes=BoxSet&SortBy=SortName` |
-| One collection's members | `GET /Items?ParentId=<collection id>&IncludeItemTypes=Movie,Episode,Series` |
+| One collection's members | `GET /Items?ParentId=<collection id>&IncludeItemTypes=Movie,Episode,MusicVideo,Series` |
 | How to play one item | `POST /Items/<id>/PlaybackInfo` with a JSON body |
 | Stop a transcode | `DELETE /Videos/ActiveEncodings?DeviceId=surfcult&PlaySessionId=<session>` |
 
@@ -69,7 +69,7 @@ The requests carry no user id, so the key decides what is visible. Give surfcult
 
 ## What is cached
 
-For each kept item: id (the Jellyfin item id), title, kind (`movie` or `episode`), runtime, file path, chapters, video streams (codec, width, height, bit depth), audio streams (codec, channels, language), the names of the libraries it is in, its tags and genres, and the time of the sync. An episode also keeps its series id (`SeriesId`), series name (`SeriesName`), season (`ParentIndexNumber`) and episode number (`IndexNumber`).
+For each kept item: id (the Jellyfin item id), title, kind (`movie`, `episode` or `music_video`), runtime, file path, chapters, video streams (codec, width, height, bit depth), audio streams (codec, channels, language), the names of the libraries it is in, its tags and genres, and the time of the sync. An episode also keeps its series id (`SeriesId`), series name (`SeriesName`), season (`ParentIndexNumber`) and episode number (`IndexNumber`). A music video also keeps its artists (`Artists`, in Jellyfin's order, empty names dropped) and its album (`Album`); a movie or episode keeps neither.
 
 - Jellyfin counts time in ticks of 100 ns. Runtime and chapter starts are stored in milliseconds, ticks divided by 10,000.
 - Items come back in the order Jellyfin listed them (sorted by name). Chapters and streams keep their order.
@@ -77,6 +77,7 @@ For each kept item: id (the Jellyfin item id), title, kind (`movie` or `episode`
 - An episode carries its series' tags and genres after its own, without repeats, because Jellyfin usually sets them on the series. Empty names are dropped.
 - Libraries are Jellyfin's media folders. An item gets the name of each library whose recursive listing includes it. The library list needs a key that may read `/Library/MediaFolders`.
 - Collections are Jellyfin `BoxSet` items. Each keeps its members in Jellyfin's order. A movie or episode member is kept by its item id, and a series member by its series id when at least one of its episodes is cached. Other members (an item that was skipped, a series with no cached episode) are left out.
+- Music videos are Jellyfin `MusicVideo` items, such as those in a library of type `musicvideos`. Each is its own kind, `MediaKind::MusicVideo`, so code that treats movies and episodes differently can tell it apart. It is played like a movie: the same device profile, playback request and stream resolver. The banner, the guide screen, `surfcult now` and the read API title it `Artist – Title`, several artists joined with commas, or just the title when it has no artists (`MediaItem::display_title`).
 - A database from before migration 0004 has no libraries, tags, genres or series until the next sync replaces the cache.
 - Playback URLs are not cached; `playback` asks Jellyfin each time.
 
@@ -99,8 +100,8 @@ Whether Jellyfin keeps an item's id when Tdarr replaces its file is not verified
 
 | Source | Pool |
 |---|---|
-| `jellyfin_collection` | The first collection with that name, members in collection order. A series member becomes its episodes in episode order; movies and episodes stay as they are. An empty collection gives an empty pool. |
-| `jellyfin_library`, `jellyfin_tag`, `jellyfin_genre` | Every item in that library or with that tag or genre, in cache order (Jellyfin's sort by name), except that one series' episodes are gathered, in episode order, where its first matching episode was. |
+| `jellyfin_collection` | The first collection with that name, members in collection order. A series member becomes its episodes in episode order; movies, episodes and music videos stay as they are. An empty collection gives an empty pool. |
+| `jellyfin_library`, `jellyfin_tag`, `jellyfin_genre` | Every item in that library or with that tag or genre, in cache order (Jellyfin's sort by name), except that one series' episodes are gathered, in episode order, where its first matching episode was. A library of music videos (`jellyfin_library = "Music Videos"`) gives its music videos; a genre or tag also matches music videos that carry it. |
 | `jellyfin_series` | The episodes of the first series in cache order with that name, in episode order. |
 
 Episode order is season, then episode number. Season 0 (Jellyfin's specials) comes first, a missing number sorts after the numbered ones, and ties keep cache order. An item reached twice, such as an episode a collection lists both directly and through its series, is kept once at its first place.
@@ -119,6 +120,6 @@ Unknown fields never matter. Apart from an item's `Id`, every field may be missi
 
 ## Tests
 
-No test needs a Jellyfin server. The fixtures in `tests/fixtures/jellyfin/` are real Jellyfin 12.4.0 responses with fake names, paths and ids. The `Tags`, `Genres` and `SeriesId` fields in `items-page.json`, the series member of Fixture Collection B, and the files `series-page.json`, `media-folders.json` and `library-children-by-parent-id.json` were written by hand in the same shape; they were not recorded from a server. Tests give the client a fake transport (the `JellyfinHttp` trait: `get`, `post_json` and `delete`) that serves them. The two `playback-info-*.json` fixtures are made up in the shape of Jellyfin's `PlaybackInfoResponse`, and the transcode one puts a key in `TranscodingUrl` as Jellyfin does. For playback tests the fake applies the device profile the client sent to the item's streams and answers with the direct-play or the transcode fixture, rewritten to name the requested item; a census test checks that profile against every case in ADR 0001 decision 3 and against `needs_transcode`. A few tests start a listener on `127.0.0.1` to check the real `ureq` transport (header sent, POST body, DELETE, 401, redirect not followed, closed port); they do not leave the machine.
+No test needs a Jellyfin server. The fixtures in `tests/fixtures/jellyfin/` are real Jellyfin 12.4.0 responses with fake names, paths and ids. The `Tags`, `Genres` and `SeriesId` fields in `items-page.json`, the series member of Fixture Collection B, and the files `series-page.json`, `media-folders.json` and `library-children-by-parent-id.json` were written by hand in the same shape; they were not recorded from a server. So was `music-videos-page.json`, two `MusicVideo` items (one with two artists and an album, one with neither) that the music video tests add to the items page, with a `Music Videos` library holding them. Tests give the client a fake transport (the `JellyfinHttp` trait: `get`, `post_json` and `delete`) that serves them. The two `playback-info-*.json` fixtures are made up in the shape of Jellyfin's `PlaybackInfoResponse`, and the transcode one puts a key in `TranscodingUrl` as Jellyfin does. For playback tests the fake applies the device profile the client sent to the item's streams and answers with the direct-play or the transcode fixture, rewritten to name the requested item; a census test checks that profile against every case in ADR 0001 decision 3 and against `needs_transcode`. A few tests start a listener on `127.0.0.1` to check the real `ureq` transport (header sent, POST body, DELETE, 401, redirect not followed, closed port); they do not leave the machine.
 
 Not covered by tests: whether the URLs play in MPV on the owner's network. That needs a manual check on the Pi.

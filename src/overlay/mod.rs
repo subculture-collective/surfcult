@@ -107,16 +107,12 @@ fn title(cell: &Cell, media: &impl MediaSource) -> String {
     program_title(&cell.media_id, media)
 }
 
-/// The item's title, with its series' name first for an episode. A program
-/// the library does not have is `UNKNOWN PROGRAM`.
+/// The item's [`display_title`](crate::library::MediaItem::display_title):
+/// its series' name first for an episode, its artists first for a music
+/// video. A program the library does not have is `UNKNOWN PROGRAM`.
 pub fn program_title(media_id: &MediaId, media: &impl MediaSource) -> String {
     match media.resolve(media_id) {
-        Ok(item) => match item.series {
-            Some(series) if !series.series_name.is_empty() => {
-                format!("{}: {}", series.series_name, item.title)
-            }
-            _ => item.title,
-        },
+        Ok(item) => item.display_title(),
         Err(_) => "UNKNOWN PROGRAM".into(),
     }
 }
