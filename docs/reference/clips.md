@@ -4,6 +4,8 @@ Clips are short local video files that fill breaks, cover a tune-in, pad gaps an
 
 The code is in `src/clips/`. It reads clips and their lengths. It does not choose or rotate them; the schedule generator and the tuner do that.
 
+SCTV's own stingers, bumps, break slates and sign-off are made by `tools/clips/make_clips.py`; see [its README](../../tools/clips/README.md).
+
 ## Where clips live
 
 Each `[[interstitial_pool]]` in `channels.toml` names a directory:
