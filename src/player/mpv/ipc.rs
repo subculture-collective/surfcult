@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::Stream;
 use super::banner::BANNER_LAYER;
-use crate::player::{PlayerEvent, VideoArea};
+use super::{Stream, VISUALIZER};
+use crate::player::{Picture, PlayerEvent, VideoArea};
 
 /// Why a command did not work.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,6 +77,9 @@ pub(super) struct Session {
     shaders: Vec<String>,
     /// Whether the channel banner is up.
     banner: bool,
+    /// How programs appended from now on play: as videos, or as songs with
+    /// this picture.
+    picture: Option<Picture>,
 }
 
 impl Session {
@@ -99,7 +102,15 @@ impl Session {
             standby_shaders: Vec::new(),
             shaders: Vec::new(),
             banner: false,
+            picture: None,
         })
+    }
+
+    /// Plays programs appended from now on as songs with `picture`, or as
+    /// videos with `None`. Sends nothing: the picture is an option of each
+    /// program's playlist entry.
+    pub(super) fn set_picture(&mut self, picture: Option<Picture>) {
+        self.picture = picture;
     }
 
     /// Sets the shader files for everything on screen (`global`) and for the
@@ -263,7 +274,7 @@ impl Session {
         let fields = header_fields(&stream.headers).map_err(IpcError::Rejected)?;
         self.leave_standby()?;
         self.command(json!(["set_property", "http-header-fields", fields]))?;
-        let (options, entry) = program_entry(stream, start_ms);
+        let (options, entry) = program_entry(stream, start_ms, self.picture);
         let id = self.loadfile(&stream.url, "append", options)?;
         self.entries.insert(id, entry);
         Ok(())
@@ -276,7 +287,7 @@ impl Session {
         self.hide_banner()?;
         self.leave_standby()?;
         self.command(json!(["set_property", "http-header-fields", fields]))?;
-        let (options, entry) = program_entry(stream, start_ms);
+        let (options, entry) = program_entry(stream, start_ms, self.picture);
         let id = self.loadfile(&stream.url, "replace", options)?;
         self.entries.clear();
         self.entries.insert(id, entry);
@@ -582,13 +593,21 @@ impl Session {
 }
 
 /// The `loadfile` options and the playlist entry of a program that plays
-/// `stream` from media position `start_ms`.
-fn program_entry(stream: &Stream, start_ms: u64) -> (Value, Entry) {
+/// `stream` from media position `start_ms`, as a song with `picture` or as a
+/// video.
+fn program_entry(stream: &Stream, start_ms: u64, picture: Option<Picture>) -> (Value, Entry) {
     let start = start_ms.saturating_sub(stream.stream_offset_ms);
     // `sid` off: a program never shows the subtitle track MPV would pick
     // from the file (the device profile offers every subtitle format only
     // so that Jellyfin does not transcode for them).
-    let options = json!({ "start": seconds(start), "sid": "no" });
+    let mut options = json!({ "start": seconds(start), "sid": "no" });
+    match picture {
+        None => {}
+        // A song's cover art would show as its video track; the caller
+        // draws the cover card instead.
+        Some(Picture::Cover) => options["vid"] = json!("no"),
+        Some(Picture::Visualizer) => options["lavfi-complex"] = json!(VISUALIZER),
+    }
     let entry = Entry::Program {
         stream_offset_ms: stream.stream_offset_ms,
         start_ms,

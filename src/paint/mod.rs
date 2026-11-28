@@ -11,7 +11,9 @@
 //! viewer's chosen [`Crt`] level before showing it. It only ever touches the
 //! interface, never the video.
 //!
-//! [`banner`] draws the channel banner and [`guide`] the program guide. [`mark`] is the surfcult mark as a path, and [`watermark`] draws the
+//! [`banner`] draws the channel banner and [`guide`] the program guide.
+//! [`now_playing`] draws a music channel's picture: the cover card, or the
+//! line over the visualizer. [`mark`] is the surfcult mark as a path, and [`watermark`] draws the
 //! SCTV station bug from it. [`fade`] scales a finished overlay to an
 //! opacity.
 //!
@@ -24,10 +26,11 @@ mod font;
 pub mod guide;
 pub mod mark;
 pub mod menu;
+pub mod now_playing;
 pub mod palette;
 pub mod watermark;
 
-pub use canvas::{Canvas, Rgba, Shadow};
+pub use canvas::{Canvas, Image, Rgba, Shadow};
 pub use crt::Crt;
 pub use font::Font;
 

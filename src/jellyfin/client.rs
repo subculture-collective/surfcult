@@ -177,6 +177,21 @@ impl JellyfinClient {
             .map_err(|error| self.http_error(error))
     }
 
+    /// The primary image of the item `id` as a PNG at most `side` pixels
+    /// wide and tall: for a song's album id, the album cover. Jellyfin
+    /// converts and scales it.
+    pub fn primary_image(&self, id: &MediaId, side: u32) -> Result<Vec<u8>, JellyfinError> {
+        self.http
+            .get_bytes(
+                &format!(
+                    "/Items/{}/Images/Primary?format=Png&maxWidth={side}&maxHeight={side}",
+                    encode(id.as_str())
+                ),
+                &self.key.authorization_header(),
+            )
+            .map_err(|error| self.http_error(error))
+    }
+
     fn http_error(&self, error: HttpError) -> JellyfinError {
         match error {
             HttpError::Unreachable(reason) => {

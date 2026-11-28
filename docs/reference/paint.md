@@ -1,6 +1,6 @@
 # Drawing the interface
 
-The code is in `src/paint/`. It draws the TV's interface in the Cable Grid design ([cable-grid.md](../design/cable-grid.md)) into bitmaps the player shows as overlays, and runs the CRT pass on them. The SCTV watermark, the channel banner, the program guide and the Picture menu draw with it.
+The code is in `src/paint/`. It draws the TV's interface in the Cable Grid design ([cable-grid.md](../design/cable-grid.md)) into bitmaps the player shows as overlays, and runs the CRT pass on them. The SCTV watermark, the channel banner, the program guide, the Picture menu and a music channel's cover card draw with it.
 
 ## Canvas
 
@@ -14,6 +14,7 @@ The code is in `src/paint/`. It draws the TV's interface in the Cable Grid desig
 | `outline` | An outline inside a rectangle, for the yellow focus box. |
 | `fill_path` | A `tiny_skia::Path` with a transform, for the mark. |
 | `text` | One line of text with an optional hard `Shadow`, returning its width. |
+| `image` | A decoded `Image` (`Image::decode_png`) scaled with bilinear filtering to fill a rectangle, for album covers. |
 
 `to_overlay(x, y)` returns the canvas as a `player::Overlay` at that screen position: premultiplied blue, green, red and alpha, as MPV's `overlay-add` takes it.
 
@@ -71,6 +72,13 @@ The grid runs from 96 px to 1824 px across, inside the area a TV may cut off. Ti
 
 `paint::menu::draw(&view)` draws a `MenuView` as a full-screen, opaque overlay, before the CRT pass: the violet field; the mark in yellow beside an ochre heading band with a slanted end (the title at 48 px); a bevelled list panel with a 76 px row per setting, its name on the left and its value on the right at 44 px, the focused row in the focus colour and yellow; a line under the list describing the focused setting; and the keys in VCR OSD Mono under a rule at the bottom.
 
+## The music picture
+
+`paint::now_playing` draws a music channel's picture for one song, a `NowPlaying` (title, the artists joined with commas, and the album when there is one).
+
+- `card(song, cover)` is the cover card: a full-screen 1920x1080 overlay, opaque everywhere, so nothing of the player shows through. The violet field gradient fills it. The cover sits centred in a 440 px box from y 96, in a bevelled `cell` frame, scaled to fit and keeping its shape; without a cover the frame holds the mark in yellow. Under it, an ochre band 1120 px wide with slanted ends carries the artists in Archivo Narrow at 38 px in ochre ink. Under that comes the title at 72 px in white and the album at 38 px in yellow, both centred with the hard 3 px shadow. Text that does not fit is cut with an ellipsis. Everything stays above y 800, clear of the channel banner, which starts at y 818.
+- `line(song)` is the now-playing line over the visualizer: an ochre band across the top of the screen inside the 5% margin (from 96, 54, 1728 by 64 px, its right end slanted), with `Artists – Title · Album` in ochre ink at 38 px, and a 16 px transparent margin for the CRT pass.
+
 ## The mark
 
 `paint::mark::shapes()` is the Guide Wave with SC as its middle row, as one path on the 64-unit grid of `assets/brand/mark.svg`. The shapes run from (`mark::LEFT`, `mark::TOP`) = (9, 11) and are `mark::WIDTH` by `mark::HEIGHT` = 47 by 42 units.
@@ -90,4 +98,4 @@ Both are white with a black shadow at 50% alpha, 3 px right and down. The bug's 
 
 ## Tests
 
-`src/paint/tests.rs` checks the fonts, text placement and shadows, bevels, gradients, the overlay's byte order, and the pass: Off, transparency, the scanline rows and their phase, Heavy against Light, glow reach, the colour fringe and premultiplied output; the mark's bounds, the watermark's size, position and clear margin, fading, the banner's place and a long title cut with an ellipsis. With `SURFCULT_PAINT_PREVIEW=<dir>`, `cargo test --lib paint::tests::preview` also writes a sample drawing as `paint-flat.png`, `paint-heavy.png` and `paint-light.png` to look at, and `paint::tests::preview_watermark` writes both watermark forms over a sample picture with the pass at Heavy and Off, `paint::tests::preview_banner` writes the banner, `paint::tests::preview_guide` writes the guide over a picture in the video's quarter, and `paint::tests::preview_menu` writes the menu.
+`src/paint/tests.rs` checks the fonts, text placement and shadows, bevels, gradients, the overlay's byte order, and the pass: Off, transparency, the scanline rows and their phase, Heavy against Light, glow reach, the colour fringe and premultiplied output; the mark's bounds, the watermark's size, position and clear margin, fading, the banner's place and a long title cut with an ellipsis. With `SURFCULT_PAINT_PREVIEW=<dir>`, `cargo test --lib paint::tests::preview` also writes a sample drawing as `paint-flat.png`, `paint-heavy.png` and `paint-light.png` to look at, and `paint::tests::preview_watermark` writes both watermark forms over a sample picture with the pass at Heavy and Off, `paint::tests::preview_banner` writes the banner, `paint::tests::preview_guide` writes the guide over a picture in the video's quarter, `paint::tests::preview_menu` writes the menu, and `paint::tests::preview_now_playing` writes the cover card with a sample cover at Heavy, the card without a cover and with a title cut short, and the now-playing line. The tests also check the card's size, opacity, the cover's place and shape, the mark without one, the band, the clear area under it and the line's place.

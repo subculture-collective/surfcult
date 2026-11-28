@@ -12,7 +12,7 @@ A sync that fails for any reason (server down, 401, a body that is not JSON, a f
 
 ## Endpoints used
 
-The sync sends only `GET` requests. `StartIndex` and `Limit` (500) page every list.
+The sync sends only `GET` requests. The cover card's image request is a `GET` too, sent by `surfcult run` while a cover channel plays ([run.md](run.md#music-channels)). `StartIndex` and `Limit` (500) page every list.
 
 | What | Request |
 |---|---|
@@ -24,6 +24,7 @@ The sync sends only `GET` requests. `StartIndex` and `Limit` (500) page every li
 | Collections | `GET /Items?Recursive=true&IncludeItemTypes=BoxSet&SortBy=SortName` |
 | One collection's members | `GET /Items?ParentId=<collection id>&IncludeItemTypes=Movie,Episode,MusicVideo,Series` |
 | How to play one item | `POST /Items/<id>/PlaybackInfo` with a JSON body |
+| An album cover, for the cover card | `GET /Items/<album id>/Images/Primary?format=Png&maxWidth=440&maxHeight=440` (`JellyfinClient::primary_image`; the body is read as bytes with `JellyfinHttp::get_bytes`) |
 | Stop a transcode | `DELETE /Videos/ActiveEncodings?DeviceId=surfcult&PlaySessionId=<session>` |
 
 Paging follows `TotalRecordCount`. If a list ends before its count, the sync fails rather than caching a partial library. An item that appears on two pages is cached once.

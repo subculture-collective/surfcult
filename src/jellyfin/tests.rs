@@ -1378,6 +1378,30 @@ fn a_song_gets_an_audio_direct_play_url() {
 }
 
 #[test]
+fn an_album_cover_is_asked_for_as_a_scaled_png() {
+    let http = FakeHttp::new(|_| Ok("png bytes".into()));
+
+    let bytes = client(&http)
+        .primary_image(&MediaId::new("a1b0 0000"), 440)
+        .unwrap();
+
+    assert_eq!(bytes, b"png bytes");
+    let calls = http.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].method, "GET");
+    assert_eq!(
+        calls[0].path,
+        "/Items/a1b0%200000/Images/Primary?format=Png&maxWidth=440&maxHeight=440"
+    );
+    assert_eq!(calls[0].authorization, key().authorization_header());
+    let missing = FakeHttp::new(|_| Err(HttpError::Status(404)));
+    assert_eq!(
+        client(&missing).primary_image(&MediaId::new("x"), 440),
+        Err(JellyfinError::Status(404))
+    );
+}
+
+#[test]
 fn an_item_outside_the_profile_gets_a_transcode_url() {
     let http = fake_jellyfin();
     let client = client(&http);

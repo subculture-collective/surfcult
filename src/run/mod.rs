@@ -48,6 +48,7 @@
 
 pub mod app;
 mod clock;
+mod covers;
 mod driver;
 mod guide;
 mod menu;
@@ -58,20 +59,21 @@ mod tests;
 mod watermark;
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use guide::{Guide, clock_with_seconds};
 use menu::{CRT_SETTING, Menu, crt_name, next_crt};
 use watermark::Watermark;
 
 use crate::clips::{Clip, ClipLibrary};
-use crate::config::{Channel, Config, Source};
+use crate::config::{Channel, Config, Picture, Source};
 use crate::input::{Input, Key};
 use crate::jellyfin::{JellyfinError, SyncReport};
-use crate::library::{LibraryChanges, MediaItem, resolve_pool};
+use crate::library::{LibraryChanges, MediaId, MediaItem, MediaSource, resolve_pool};
 use crate::overlay::{self, DEFAULT_BANNER_MS};
+use crate::paint::now_playing::NowPlaying;
 use crate::paint::watermark::Form;
-use crate::paint::{self, Crt};
+use crate::paint::{self, Crt, Image};
 use crate::player::{Overlay, Player, PlayerEvent, Slate, VideoArea};
 use crate::schedule::{self, Extended};
 use crate::server::AdminCommand;
@@ -79,6 +81,7 @@ use crate::store::Store;
 use crate::tuner::{State, Timing, Tuner};
 
 pub use clock::{CLOCK_ENV, trusted as clock_trusted};
+pub use covers::{COVER_SIDE, Covers, JellyfinCovers};
 use driver::{Context, Driver, ProgramStartContext};
 pub use now::{day_lines, now_lines};
 pub use streams::{JellyfinResolver, Streams, Transcodes, jellyfin as jellyfin_streams};
@@ -107,6 +110,11 @@ pub struct Settings {
     pub watermark: bool,
 }
 
+/// The overlay layer a music channel's picture is drawn in: the cover card,
+/// or the now-playing line over the visualizer. It is under every other.
+pub const PICTURE_LAYER: u8 = 0;
+/// At most this many covers are kept; past it the kept ones are dropped.
+const KEPT_COVERS: usize = 16;
 /// The overlay layer the SCTV watermark is drawn in.
 pub const WATERMARK_LAYER: u8 = 8;
 /// The overlay layer the program guide is drawn in.
@@ -130,6 +138,16 @@ impl Default for Settings {
             watermark: true,
         }
     }
+}
+
+/// What the picture layer shows.
+struct PictureShown {
+    media: MediaId,
+    picture: Picture,
+    /// The id the cover was asked for, on a cover card.
+    cover: Option<MediaId>,
+    /// Whether the card was drawn before its cover arrived.
+    waiting: bool,
 }
 
 /// What schedule upkeep remembers between runs.
@@ -179,6 +197,16 @@ pub struct Tv<P, I> {
     /// Each form drawn at full opacity with the CRT pass, made on first use.
     watermark_bitmaps: HashMap<Form, Overlay>,
     upkeep: Upkeep,
+    /// The picture the player was last told to play programs with.
+    picture: Option<Picture>,
+    /// What the picture layer shows now.
+    picture_shown: Option<PictureShown>,
+    /// Where covers come from; none in tests unless a test gives one.
+    covers: Option<Box<dyn Covers>>,
+    /// Covers that arrived, by the id they were asked for.
+    cover_images: HashMap<MediaId, Option<Image>>,
+    /// Covers asked for that have not arrived.
+    covers_asked: HashSet<MediaId>,
     /// The clock slate is up until the clock is trusted.
     waiting_for_clock: bool,
     quit: bool,
@@ -231,9 +259,20 @@ impl<P: Player, I: Input> Tv<P, I> {
             watermark_shown: None,
             watermark_bitmaps: HashMap::new(),
             upkeep: Upkeep::default(),
+            picture: None,
+            picture_shown: None,
+            covers: None,
+            cover_images: HashMap::new(),
+            covers_asked: HashSet::new(),
             waiting_for_clock: false,
             quit: false,
         }
+    }
+
+    /// Takes album covers for the cover card from `covers`. Without them
+    /// the card shows the surfcult mark in place of a cover.
+    pub fn set_covers(&mut self, covers: Box<dyn Covers>) {
+        self.covers = Some(covers);
     }
 
     /// Shows the stand-by card, fills the schedules and tunes the lowest
@@ -293,6 +332,7 @@ impl<P: Player, I: Input> Tv<P, I> {
         self.banner(now_ms, store);
         self.draw_guide(now_ms, store);
         self.draw_menu();
+        self.show_picture(store);
         self.show_watermark(now_ms);
         if now_ms >= self.upkeep.due_ms {
             self.keep_schedules(now_ms, store);
@@ -518,6 +558,13 @@ impl<P: Player, I: Input> Tv<P, I> {
         self.close_guide();
         self.close_menu();
         self.channel = Some(channel);
+        let picture = self.channel_config(channel).and_then(|c| c.picture);
+        if picture != self.picture {
+            if let Err(e) = self.tuner.player_mut().set_picture(picture) {
+                eprintln!("surfcult: cannot set the picture for channel {channel}: {e}");
+            }
+            self.picture = picture;
+        }
         self.tuner.tune(channel, now_ms);
     }
 
@@ -911,6 +958,93 @@ impl<P: Player, I: Input> Tv<P, I> {
         // Recorded even after an error, so a broken player is not asked
         // again on every step.
         self.watermark_shown = want;
+    }
+
+    /// On a music channel, shows the picture of the song on screen in its
+    /// layer: the cover card, redrawn when the cover arrives, or the
+    /// now-playing line over the visualizer. Clears it for anything else on
+    /// screen, and while the guide or the menu is open.
+    fn show_picture(&mut self, store: &Store) {
+        if let Some(covers) = self.covers.as_mut() {
+            for (id, image) in covers.take() {
+                self.covers_asked.remove(&id);
+                if self.cover_images.len() >= KEPT_COVERS {
+                    self.cover_images.clear();
+                }
+                self.cover_images.insert(id, image);
+            }
+        }
+        let picture = self
+            .channel
+            .and_then(|n| self.channel_config(n))
+            .and_then(|c| c.picture);
+        let want = match picture {
+            Some(picture) if self.guide.is_none() && self.menu.is_none() => {
+                self.driver.program().map(|media| (picture, media.clone()))
+            }
+            _ => None,
+        };
+        let Some((picture, media)) = want else {
+            if self.picture_shown.take().is_some()
+                && let Err(e) = self.tuner.player_mut().clear_overlay(PICTURE_LAYER)
+            {
+                eprintln!("surfcult: cannot clear the music picture: {e}");
+            }
+            return;
+        };
+        let current = self
+            .picture_shown
+            .as_ref()
+            .filter(|shown| shown.media == media && shown.picture == picture);
+        if let Some(shown) = current {
+            let arrived = shown
+                .cover
+                .as_ref()
+                .is_some_and(|id| self.cover_images.contains_key(id));
+            if !shown.waiting || !arrived {
+                return;
+            }
+        }
+        let Ok(item) = store.resolve(&media) else {
+            return;
+        };
+        let song = NowPlaying {
+            artists: item.artists.join(", "),
+            title: item.title,
+            album: item.album,
+        };
+        let (mut overlay, cover, waiting) = match picture {
+            Picture::Cover => {
+                let id = item.album_id.unwrap_or(item.id);
+                let image = self.cover_images.get(&id).cloned();
+                let waiting = image.is_none() && self.covers.is_some();
+                if waiting
+                    && self.covers_asked.insert(id.clone())
+                    && let Some(covers) = self.covers.as_mut()
+                {
+                    covers.request(&id);
+                }
+                let card = paint::now_playing::card(&song, image.flatten().as_ref());
+                (card, Some(id), waiting)
+            }
+            Picture::Visualizer => (paint::now_playing::line(&song), None, false),
+        };
+        paint::crt::apply(&mut overlay, self.settings.crt);
+        if let Err(e) = self
+            .tuner
+            .player_mut()
+            .show_overlay(PICTURE_LAYER, &overlay)
+        {
+            eprintln!("surfcult: cannot show the music picture: {e}");
+        }
+        // Recorded even after an error, so a broken player is not asked
+        // again on every step.
+        self.picture_shown = Some(PictureShown {
+            media,
+            picture,
+            cover,
+            waiting,
+        });
     }
 
     fn channel_config(&self, number: u32) -> Option<&Channel> {

@@ -43,6 +43,14 @@
 //! [`Player::show_slate`] shows the same card with the slate's text in
 //! place of `standby_text`.
 //!
+//! # Songs
+//!
+//! [`Player::set_picture`] makes the programs appended after it songs: each
+//! gets `vid=no` ([`Picture::Cover`]: the caller draws the cover card) or
+//! [`VISUALIZER`] as its `lavfi-complex` ([`Picture::Visualizer`]) as an
+//! option of its own playlist entry, so clips and later videos are not
+//! affected.
+//!
 //! # Display filters
 //!
 //! [`MpvConfig::filters`] are on everything on screen and
@@ -103,7 +111,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::{
-    DEFAULT_GLITCH_EVERY, DEFAULT_STANDBY_FILTERS, Filter, Overlay, Player, PlayerError,
+    DEFAULT_GLITCH_EVERY, DEFAULT_STANDBY_FILTERS, Filter, Overlay, Picture, Player, PlayerError,
     PlayerEvent, Slate, VideoArea, standby_filters,
 };
 use crate::config::Display;
@@ -113,6 +121,16 @@ use crate::paint::{self, Crt};
 use banner::BANNER_LAYER;
 use glitch::{Flicker, Glitch, Step};
 use ipc::{IpcError, Session};
+
+/// The `lavfi-complex` graph a song plays through with
+/// [`Picture::Visualizer`]: the sound goes on to the audio output, and a copy
+/// becomes a constant-Q spectrum (FFmpeg's `showcqt`, bars over a scrolling
+/// sonogram) at 640x360 and 30 frames a second, which MPV scales to the
+/// screen. One transform per frame (`count=1`) and no axis text keep it
+/// cheap: on Kvant it took 0.11 s of one core for 30 s of a song, against
+/// 0.5 to 1.6 s for `showwaves` and `showspectrum` at the same size.
+pub const VISUALIZER: &str =
+    "[aid1]asplit[ao][a];[a]showcqt=s=640x360:fps=30:count=1:axis=0,format=yuv420p[vo]";
 
 /// MPV's output flags for the Pi 4B on its TV (ADR 0001, decision 2).
 ///
@@ -380,6 +398,8 @@ pub struct MpvPlayer<R> {
     /// The place and full size of the bitmap each overlay layer shows, for
     /// scrolling it.
     overlays: HashMap<u8, (i32, i32, u32, u32)>,
+    /// How programs play, from [`Player::set_picture`]; kept across restarts.
+    picture: Option<Picture>,
 }
 
 impl<R> MpvPlayer<R> {
@@ -460,6 +480,7 @@ impl<R: StreamResolver> MpvPlayer<R> {
             global_shaders,
             standby_shaders,
             glitch,
+            picture: None,
         };
         player.launch()?;
         Ok(player)
@@ -516,6 +537,7 @@ impl<R: StreamResolver> MpvPlayer<R> {
         if let Some(glitch) = self.glitch.as_mut() {
             glitch.disarm();
         }
+        session.set_picture(self.picture);
         self.child = Some(child);
         self.session = Some(session);
         self.last_ping = Instant::now();
@@ -778,6 +800,14 @@ impl<R: StreamResolver> Player for MpvPlayer<R> {
 
     fn set_video_area(&mut self, area: VideoArea) -> Result<(), PlayerError> {
         self.with_session(|s| s.set_video_area(area))
+    }
+
+    fn set_picture(&mut self, picture: Option<Picture>) -> Result<(), PlayerError> {
+        self.picture = picture;
+        if let Some(session) = self.session.as_mut() {
+            session.set_picture(picture);
+        }
+        Ok(())
     }
 
     fn poll_event(&mut self) -> Option<PlayerEvent> {
