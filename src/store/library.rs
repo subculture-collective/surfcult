@@ -88,12 +88,9 @@ impl Store {
         &self,
         query: &ItemQuery<'_>,
     ) -> Result<Vec<LibraryEntry>, StoreError> {
-        let kind = match query.plays {
-            Plays::Videos => "i.kind <> 'song'",
-            Plays::Songs => "i.kind = 'song'",
-        };
+        let kind = kind_filter(query.plays, "i");
         let Some(label) = query.label else {
-            return self.library_items_where(kind, &[]);
+            return self.library_items_where(&kind, &[]);
         };
         let (label_kind, name) = match label {
             Label::Library(name) => ("library", name),
@@ -109,8 +106,30 @@ impl Store {
         )
     }
 
+    /// The episodes, in sync order, of the first cached series in sync order
+    /// named `name` among the items a channel playing `plays` may schedule.
+    /// Empty when no such series is cached. Migration 0009 indexes the
+    /// series name and id, so this reads only that series' rows.
+    pub fn library_series_episodes(
+        &self,
+        plays: Plays,
+        name: &str,
+    ) -> Result<Vec<LibraryEntry>, StoreError> {
+        self.library_items_where(
+            &format!(
+                "{} AND i.series_id = (SELECT f.series_id FROM library_items f \
+                 WHERE f.series_name = ?1 AND {} ORDER BY f.position LIMIT 1)",
+                kind_filter(plays, "i"),
+                kind_filter(plays, "f"),
+            ),
+            &[&name],
+        )
+    }
+
     /// The cached items whose `library_items` row (as `i`) meets `filter`, a
-    /// SQL condition with its `parameters`, in sync order.
+    /// SQL condition with its `parameters`, in sync order. Their chapters,
+    /// streams and labels are looked up by the matching item ids, so a query
+    /// that matches a few items reads only their rows.
     fn library_items_where(
         &self,
         filter: &str,
@@ -144,7 +163,7 @@ impl Store {
             .conn
             .prepare_cached(&format!(
                 "SELECT c.item_id, c.start_ms, c.name FROM library_chapters c
-                 JOIN library_items i ON i.id = c.item_id WHERE {filter}
+                 WHERE c.item_id IN (SELECT i.id FROM library_items i WHERE {filter})
                  ORDER BY c.item_id, c.position"
             ))
             .map_err(StoreError::database(action))?;
@@ -169,8 +188,9 @@ impl Store {
             .prepare_cached(&format!(
                 "SELECT s.item_id, s.kind, s.codec, s.width, s.height, s.bit_depth, s.channels,
                         s.language
-                 FROM library_streams s JOIN library_items i ON i.id = s.item_id
-                 WHERE {filter} ORDER BY s.item_id, s.kind, s.position"
+                 FROM library_streams s
+                 WHERE s.item_id IN (SELECT i.id FROM library_items i WHERE {filter})
+                 ORDER BY s.item_id, s.kind, s.position"
             ))
             .map_err(StoreError::database(action))?;
         let rows = streams
@@ -193,7 +213,7 @@ impl Store {
             .conn
             .prepare_cached(&format!(
                 "SELECT l.item_id, l.kind, l.name FROM library_item_labels l
-                 JOIN library_items i ON i.id = l.item_id WHERE {filter}
+                 WHERE l.item_id IN (SELECT i.id FROM library_items i WHERE {filter})
                  ORDER BY l.item_id, l.kind, l.position"
             ))
             .map_err(StoreError::database(action))?;
@@ -360,6 +380,34 @@ impl Store {
             .map(drop)
             .map_err(StoreError::database("recording the sync time"))
     }
+
+    /// The fingerprint [recorded](Self::record_library_fingerprint) for the
+    /// cached library, or `None` if none was recorded since the cache was
+    /// last replaced.
+    pub fn library_fingerprint(&self) -> Result<Option<u64>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT (SELECT fingerprint FROM library_sync WHERE id = 1)",
+                [],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            // Stored as the i64 with the same bits.
+            .map(|fingerprint| fingerprint.map(|f| f as u64))
+            .map_err(StoreError::database("reading the library fingerprint"))
+    }
+
+    /// Records `fingerprint` as that of the library the cache holds, so a
+    /// sync after a restart can tell the library has not changed. Does
+    /// nothing before the first sync. [`Self::replace_library`] forgets it.
+    pub fn record_library_fingerprint(&mut self, fingerprint: u64) -> Result<(), StoreError> {
+        self.conn
+            .execute(
+                "UPDATE library_sync SET fingerprint = ?1 WHERE id = 1",
+                [fingerprint as i64],
+            )
+            .map(drop)
+            .map_err(StoreError::database("recording the library fingerprint"))
+    }
 }
 
 /// The library as the cache holds it. Items and collections come back in the
@@ -383,6 +431,13 @@ impl MediaSource for Store {
 
     fn query_items(&self, query: &ItemQuery<'_>) -> Result<Vec<MediaItem>, SourceError> {
         let entries = self.library_items_matching(query).map_err(unavailable)?;
+        Ok(entries.into_iter().map(|entry| entry.item).collect())
+    }
+
+    fn series_episodes(&self, plays: Plays, name: &str) -> Result<Vec<MediaItem>, SourceError> {
+        let entries = self
+            .library_series_episodes(plays, name)
+            .map_err(unavailable)?;
         Ok(entries.into_iter().map(|entry| entry.item).collect())
     }
 }
@@ -471,6 +526,15 @@ fn reconcile_with_cache(
         })
         .collect();
     Ok(reconcile(&old, &new))
+}
+
+/// The SQL condition on the `library_items` row aliased `alias` that keeps
+/// the items a channel playing `plays` may schedule.
+fn kind_filter(plays: Plays, alias: &str) -> String {
+    match plays {
+        Plays::Videos => format!("{alias}.kind <> 'song'"),
+        Plays::Songs => format!("{alias}.kind = 'song'"),
+    }
 }
 
 fn kind_name(kind: MediaKind) -> &'static str {
@@ -595,7 +659,7 @@ fn insert_entry(
 fn record_sync(tx: &Transaction<'_>, synced_at_ms: i64) -> Result<(), StoreError> {
     tx.execute(
         "INSERT INTO library_sync (id, synced_at_ms) VALUES (1, ?1)
-         ON CONFLICT (id) DO UPDATE SET synced_at_ms = excluded.synced_at_ms",
+         ON CONFLICT (id) DO UPDATE SET synced_at_ms = excluded.synced_at_ms, fingerprint = NULL",
         [synced_at_ms],
     )
     .map(drop)
@@ -1156,5 +1220,83 @@ mod tests {
             SourceError::NotFound(MediaId::new("nope"))
         );
         assert_eq!(store.list_collections().unwrap(), collections);
+    }
+
+    /// About how many SQLite instructions `read` runs on `store`.
+    fn work(store: &mut Store, read: impl FnOnce(&Store)) -> u64 {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        const EVERY: i32 = 100;
+        let calls = Arc::new(AtomicU64::new(0));
+        let counter = calls.clone();
+        store
+            .conn
+            .progress_handler(
+                EVERY,
+                Some(move || {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    false
+                }),
+            )
+            .unwrap();
+        read(store);
+        store
+            .conn
+            .progress_handler(0, None::<fn() -> bool>)
+            .unwrap();
+        calls.load(Ordering::Relaxed) * EVERY as u64
+    }
+
+    #[test]
+    fn a_video_source_does_not_read_the_songs() {
+        // Startup resolves every source of every channel. A 32,000-song cache
+        // once made each series source read every cached row, and the TV
+        // took minutes to tune on a Raspberry Pi.
+        use crate::config::Source;
+        use crate::library::resolve_pool;
+        let mut videos = Vec::new();
+        for series in ["a", "b"] {
+            for n in 0..50 {
+                videos.push(labelled_episode(&format!("{series}{n}"), series));
+            }
+        }
+        for n in 0..20 {
+            let mut movie = entry(&format!("m{n}"), MediaKind::Movie);
+            movie.item.tags = vec!["Retro".into()];
+            videos.push(movie);
+        }
+        let songs: Vec<LibraryEntry> = (0..32_000)
+            .map(|n| song(&format!("s{n}"), "Rock"))
+            .collect();
+        let mut few = Store::open_in_memory().unwrap();
+        few.replace_library(&videos, &[], 1).unwrap();
+        let mut many = Store::open_in_memory().unwrap();
+        let all: Vec<LibraryEntry> = videos.iter().chain(&songs).cloned().collect();
+        many.replace_library(&all, &[], 1).unwrap();
+
+        for source in [
+            Source::JellyfinSeries("Series b".into()),
+            Source::JellyfinTag("Retro".into()),
+            Source::JellyfinGenre("Animation".into()),
+            Source::JellyfinLibrary("TV".into()),
+        ] {
+            let fake = all
+                .iter()
+                .fold(crate::library::FakeMediaSource::new(), |fake, entry| {
+                    fake.with_item(entry.item.clone())
+                });
+            let expected = resolve_pool(1, Plays::Videos, &source, &fake).unwrap();
+            let resolve = |store: &Store| {
+                assert_eq!(
+                    resolve_pool(1, Plays::Videos, &source, store).unwrap(),
+                    expected
+                );
+            };
+            let (without, with) = (work(&mut few, resolve), work(&mut many, resolve));
+            assert!(
+                with <= without * 2,
+                "{source:?}: {with} instructions with 32,000 songs, {without} without"
+            );
+        }
     }
 }

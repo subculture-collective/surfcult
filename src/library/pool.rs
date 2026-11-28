@@ -133,20 +133,7 @@ fn pool_for(
         Source::JellyfinTag(name) => matching(media, labelled(Label::Tag(name)))?,
         Source::JellyfinGenre(name) => matching(media, labelled(Label::Genre(name)))?,
         Source::JellyfinSeries(name) => {
-            let items = media.query_items(&all)?;
-            let Some(series) = items.iter().find_map(|item| {
-                item.series
-                    .as_ref()
-                    .filter(|series| &series.series_name == name)
-                    .map(|series| series.series_id.clone())
-            }) else {
-                return Ok(None);
-            };
-            gather_series(
-                items
-                    .into_iter()
-                    .filter(|item| series_of(item) == Some(&series)),
-            )
+            gather_series(media.series_episodes(plays, name)?.into_iter())
         }
     };
     Ok((!pool.is_empty()).then_some(pool))

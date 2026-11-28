@@ -1968,6 +1968,37 @@ fn an_unchanged_library_is_not_written_again_but_its_sync_time_moves() {
 }
 
 #[test]
+fn a_restarted_worker_does_not_write_the_library_it_wrote_before() {
+    // A restart used to rewrite the whole cache on the first sync, and the
+    // TV then resolved every channel again before it answered a key.
+    let mut store = Store::open_in_memory().unwrap();
+    let first = SyncWorker::spawn(client(&FakeHttp::fixtures(500)), HOUR).unwrap();
+    assert!(apply_soon(&first, &mut store).unwrap().written);
+    drop(first);
+
+    let restarted = SyncWorker::spawn(client(&FakeHttp::fixtures(500)), HOUR).unwrap();
+    let again = apply_soon(&restarted, &mut store).unwrap();
+
+    assert!(!again.written);
+    assert_eq!(store.library_synced_at_ms().unwrap(), Some(SYNCED_AT));
+}
+
+#[test]
+fn a_worker_writes_a_cache_replaced_since_the_last_recorded_sync() {
+    let mut store = Store::open_in_memory().unwrap();
+    let first = SyncWorker::spawn(client(&FakeHttp::fixtures(500)), HOUR).unwrap();
+    apply_soon(&first, &mut store).unwrap();
+    drop(first);
+    // Something else replaces the cache while no worker runs.
+    store.replace_library(&[], &[], 5).unwrap();
+
+    let restarted = SyncWorker::spawn(client(&FakeHttp::fixtures(500)), HOUR).unwrap();
+
+    assert!(apply_soon(&restarted, &mut store).unwrap().written);
+    assert_eq!(store.list_items().unwrap().len(), 4);
+}
+
+#[test]
 fn a_failed_fetch_is_reported_by_apply_and_leaves_the_cache_untouched() {
     let mut store = Store::open_in_memory().unwrap();
     sync(&client(&FakeHttp::fixtures(500)), &mut store, SYNCED_AT - 1).unwrap();
