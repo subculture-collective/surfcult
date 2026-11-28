@@ -117,6 +117,15 @@ pub fn program_title(media_id: &MediaId, media: &impl MediaSource) -> String {
     }
 }
 
+/// What a guide cell shows: a music block's title, or the program's
+/// [`program_title`].
+pub fn cell_title(cell: &Cell, media: &impl MediaSource) -> String {
+    match &cell.title {
+        Some(title) if !cell.songs.is_empty() => title.clone(),
+        _ => program_title(&cell.media_id, media),
+    }
+}
+
 fn span(cell: &Cell, timezone: Tz) -> String {
     format!(
         "{}–{}",

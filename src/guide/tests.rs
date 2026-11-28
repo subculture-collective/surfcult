@@ -256,3 +256,294 @@ fn build_gives_one_row_per_channel_in_order() {
     assert!(rows[1].cells.is_empty());
     assert_eq!(spans(&rows[2].cells), vec![("a", 0, 34), ("b", 35, 55)]);
 }
+
+// Music channels: songs grouped into hour blocks.
+
+use crate::config::{Channel, Mode, Picture, Plan, Tz};
+use chrono::TimeZone;
+
+/// A song by `artists`, `minutes` long.
+fn song(id: &str, artists: &[&str], minutes: i64) -> MediaItem {
+    let mut item = MediaItem::new(id, id, MediaKind::Song, (minutes * MINUTE) as u64);
+    item.artists = artists.iter().map(|a| a.to_string()).collect();
+    item.genres = artists
+        .first()
+        .map(|a| format!("{a} genre"))
+        .into_iter()
+        .collect();
+    item
+}
+
+fn songs() -> FakeMediaSource {
+    FakeMediaSource::new()
+        .with_item(song("santana", &["Santana"], 5))
+        .with_item(song("who", &["The Who"], 5))
+        .with_item(song("cream", &["Cream"], 5))
+        .with_item(song("doors", &["The Doors"], 5))
+        .with_item(song("duet", &["Santana", "Cream"], 5))
+        .with_item(song("nobody", &[], 5))
+}
+
+/// A whole song from `start` to `end` milliseconds.
+fn play(media: &str, start: i64, end: i64) -> Event {
+    Event {
+        start_ms: start,
+        end_ms: end,
+        media_id: MediaId::new(media),
+        media_offset_ms: 0,
+        media_duration_ms: (end - start) as u64,
+        kind: EventKind::Program,
+    }
+}
+
+fn bump(start: i64, end: i64) -> Event {
+    Event {
+        kind: EventKind::Ident,
+        ..play("bump", start, end)
+    }
+}
+
+/// `count` songs from `start`, each `length` long with a `gap` bump after
+/// it, cycling through `ids`.
+fn music(ids: &[&str], start: i64, count: usize, length: i64, gap: i64) -> Vec<Event> {
+    let mut events = Vec::new();
+    let mut at = start;
+    for i in 0..count {
+        events.push(play(ids[i % ids.len()], at, at + length));
+        at += length;
+        if gap > 0 {
+            events.push(bump(at, at + gap));
+            at += gap;
+        }
+    }
+    events
+}
+
+fn local(tz: Tz, y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
+    tz.with_ymd_and_hms(y, mo, d, h, mi, 0)
+        .earliest()
+        .unwrap()
+        .timestamp_millis()
+}
+
+fn utc(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> i64 {
+    local(Tz::UTC, y, mo, d, h, mi)
+}
+
+fn everything() -> Window {
+    Window {
+        from_ms: i64::MIN,
+        to_ms: i64::MAX,
+    }
+}
+
+/// Each block as (start, end, song count).
+fn block_spans(cells: &[Cell]) -> Vec<(i64, i64, usize)> {
+    cells
+        .iter()
+        .map(|c| (c.start_ms, c.end_ms, c.songs.len()))
+        .collect()
+}
+
+fn channel(number: u32, picture: Option<Picture>) -> Channel {
+    Channel {
+        number,
+        name: "Rock".into(),
+        plan: Plan::Fixed {
+            sources: Vec::new(),
+            mode: Mode::Shuffle,
+        },
+        grid: None,
+        breaks: None,
+        between: None,
+        filler: None,
+        sign_off: None,
+        picture,
+    }
+}
+
+#[test]
+fn blocks_start_on_the_local_hour() {
+    // Kolkata is UTC+5:30, so its hours start on UTC half hours.
+    let kolkata: Tz = "Asia/Kolkata".parse().unwrap();
+    let at = local(kolkata, 2026, 11, 28, 13, 15);
+    assert_eq!(
+        block_start(at, kolkata),
+        local(kolkata, 2026, 11, 28, 13, 0)
+    );
+    assert_eq!(block_start(at, Tz::UTC), utc(2026, 11, 28, 7, 0));
+}
+
+#[test]
+fn blocks_follow_the_clock_across_daylight_saving_changes() {
+    let chicago: Tz = "America/Chicago".parse().unwrap();
+    // 2026-11-01: 01:00 CDT is 06:00 UTC, and 01:00 CST an hour later.
+    // The repeated hour is two blocks.
+    let events = music(&["who"], utc(2026, 11, 1, 5, 30), 6, 30 * MINUTE, 0);
+    let cells = blocks(&events, &songs(), "Rock", chicago, everything());
+    let starts: Vec<i64> = cells.iter().map(|c| c.start_ms).collect();
+    assert_eq!(
+        starts,
+        vec![
+            utc(2026, 11, 1, 5, 30),
+            utc(2026, 11, 1, 6, 0),
+            utc(2026, 11, 1, 7, 0),
+            utc(2026, 11, 1, 8, 0),
+        ]
+    );
+    // 2026-03-08: 02:00 CST is skipped; 03:00 CDT is 08:00 UTC.
+    assert_eq!(
+        block_start(utc(2026, 3, 8, 8, 30), chicago),
+        utc(2026, 3, 8, 8, 0)
+    );
+    assert_eq!(
+        block_start(utc(2026, 3, 8, 7, 59), chicago),
+        utc(2026, 3, 8, 7, 0)
+    );
+}
+
+#[test]
+fn a_song_belongs_to_the_hour_it_starts_in() {
+    let hour = utc(2026, 11, 28, 13, 0);
+    let events = vec![
+        play("santana", hour, hour + 29 * MINUTE),
+        play("who", hour + 29 * MINUTE, hour + 59 * MINUTE),
+        // Starts at 13:59 and ends at 14:04: still the 13:00 block.
+        play("cream", hour + 59 * MINUTE, hour + 64 * MINUTE),
+        play("doors", hour + 64 * MINUTE, hour + 69 * MINUTE),
+    ];
+    let cells = blocks(&events, &songs(), "Rock", Tz::UTC, everything());
+    assert_eq!(
+        block_spans(&cells),
+        vec![
+            (hour, hour + 64 * MINUTE, 3),
+            (hour + 64 * MINUTE, hour + 69 * MINUTE, 1)
+        ]
+    );
+}
+
+#[test]
+fn bumps_between_songs_are_part_of_the_block_and_blocks_abut() {
+    let hour = utc(2026, 11, 28, 13, 0);
+    // Four-minute songs with a one-minute bump: twelve songs an hour.
+    let events = music(&["santana", "who"], hour, 30, 4 * MINUTE, MINUTE);
+    let cells = blocks(&events, &songs(), "Rock", Tz::UTC, everything());
+    assert_eq!(
+        block_spans(&cells),
+        vec![
+            (hour, hour + 60 * MINUTE, 12),
+            (hour + 60 * MINUTE, hour + 120 * MINUTE, 12),
+            // The last block ends with its last song, not the bump after it.
+            (hour + 120 * MINUTE, hour + 149 * MINUTE, 6),
+        ]
+    );
+    let row = Row { channel: 33, cells };
+    // During a bump the block is still on.
+    assert!(row.current(hour + 4 * MINUTE + 30_000).is_some());
+}
+
+#[test]
+fn dead_air_or_a_sign_off_ends_a_block() {
+    let hour = utc(2026, 11, 28, 22, 0);
+    let events = vec![
+        play("santana", hour, hour + 20 * MINUTE),
+        // The sign-off clip, then off the air until 22:30.
+        bump(hour + 20 * MINUTE, hour + 21 * MINUTE),
+        play("who", hour + 30 * MINUTE, hour + 50 * MINUTE),
+    ];
+    let cells = blocks(&events, &songs(), "Rock", Tz::UTC, everything());
+    assert_eq!(
+        block_spans(&cells),
+        vec![
+            (hour, hour + 20 * MINUTE, 1),
+            (hour + 30 * MINUTE, hour + 50 * MINUTE, 1)
+        ]
+    );
+    assert_eq!(cells[0].title.as_deref(), Some("Santana"));
+    assert_eq!(cells[1].title.as_deref(), Some("The Who"));
+}
+
+#[test]
+fn the_title_names_the_three_artists_with_the_most_airtime() {
+    let hour = utc(2026, 11, 28, 13, 0);
+    let ids = ["who", "cream", "who", "doors", "cream", "cream"];
+    let events = music(&ids, hour, 6, 5 * MINUTE, 0);
+    let cells = blocks(&events, &songs(), "Rock", Tz::UTC, everything());
+    assert_eq!(
+        cells[0].title.as_deref(),
+        Some("Cream · The Who · The Doors")
+    );
+    assert_eq!(
+        cells[0].description.as_deref(),
+        Some(
+            "The Who – who\nCream – cream\nThe Who – who\nThe Doors – doors\nCream – cream\nCream – cream"
+        )
+    );
+    assert_eq!(
+        cells[0].genres,
+        vec!["The Who genre", "Cream genre", "The Doors genre"]
+    );
+    assert_eq!(cells[0].media_id.as_str(), "who");
+
+    // Ties go to the artist heard first: The Who 10 minutes, then Santana,
+    // Cream (both from the duet) and The Doors at 5.
+    let events = music(&["who", "duet", "who", "doors"], hour, 4, 5 * MINUTE, 0);
+    let cells = blocks(&events, &songs(), "Rock", Tz::UTC, everything());
+    assert_eq!(cells[0].title.as_deref(), Some("The Who · Santana · Cream"));
+
+    // No known artists: the channel's name.
+    let events = music(&["nobody", "gone"], hour, 2, 5 * MINUTE, 0);
+    let cells = blocks(&events, &songs(), "Rock", Tz::UTC, everything());
+    assert_eq!(cells[0].title.as_deref(), Some("Rock"));
+}
+
+#[test]
+fn listings_reads_whole_blocks_across_the_window_edges() {
+    let hour = utc(2026, 11, 28, 13, 0);
+    let mut store = Store::open_in_memory().unwrap();
+    // From 12:58: a song that crosses into 13:00, then 4-minute songs with
+    // 1-minute bumps.
+    let mut events = vec![play("doors", hour - 2 * MINUTE, hour + 3 * MINUTE)];
+    events.extend(music(
+        &["santana", "who"],
+        hour + 3 * MINUTE,
+        40,
+        4 * MINUTE,
+        MINUTE,
+    ));
+    store.write_events(33, &events).unwrap();
+    let music_channel = channel(33, Some(Picture::Cover));
+    // A window from 13:30 to 14:00 sees only the 13:00 block.
+    let window = Window {
+        from_ms: hour + 30 * MINUTE,
+        to_ms: hour + 60 * MINUTE,
+    };
+    let rows = listings(&store, &songs(), &[&music_channel], Tz::UTC, window).unwrap();
+    let cells = &rows[0].cells;
+    // The 13:00 block starts with the song at 13:03 and runs to the first
+    // song starting after 14:00, at 14:03.
+    assert_eq!(
+        block_spans(cells),
+        vec![(hour + 3 * MINUTE, hour + 63 * MINUTE, 12)]
+    );
+    // A window from 13:01 also sees the 12:00 block's song running to 13:03.
+    let window = Window {
+        from_ms: hour + MINUTE,
+        to_ms: hour + 2 * MINUTE,
+    };
+    let rows = listings(&store, &songs(), &[&music_channel], Tz::UTC, window).unwrap();
+    assert_eq!(
+        block_spans(&rows[0].cells),
+        vec![(hour - 2 * MINUTE, hour + 3 * MINUTE, 1)]
+    );
+    assert_eq!(rows[0].cells[0].title.as_deref(), Some("The Doors"));
+}
+
+#[test]
+fn listings_leaves_video_channels_as_build_gives_them() {
+    let store = stored(&schedule());
+    let video = channel(3, None);
+    let rows = listings(&store, &media(), &[&video], Tz::UTC, window(0, 180)).unwrap();
+    assert_eq!(rows, build(&store, &media(), &[3], window(0, 180)).unwrap());
+    assert!(rows[0].cells.iter().all(|cell| cell.songs.is_empty()));
+}

@@ -61,6 +61,7 @@ The words surfcult's code and documentation use, and the code item each one name
 ## Guide
 
 - **Guide cell**: one program in the program guide, `guide::Cell`, with its start, end, title and an empty description (the media model has none). A program cut by breaks is one cell from its first segment's start to its last segment's end; breaks, filler and idents are not cells.
+- **Music block**: a music channel's songs in one local hour, shown as one guide cell, `guide::blocks` through `guide::listings`. It runs from its first song's start to its last song's end, is titled by the hour's three artists with the most airtime and lists its songs in `Cell::songs`. Only the guide screens, `GET /guide` and XMLTV use blocks; the schedule keeps one event per song.
 - **Guide window**: the stretch of time the guide shows, `guide::Window`, by default now through three hours (`guide::DEFAULT_SPAN_MS`). Cells that overlap it are kept whole, not clipped.
 - **Progress**: how far through the current cell a moment is, `guide::Cell::progress`, counting breaks inside the program as program time.
 
