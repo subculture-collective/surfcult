@@ -44,9 +44,11 @@ struct RawItem {
     parent_index_number: Option<i64>,
     /// The episode number within the season.
     index_number: Option<i64>,
-    /// A music video's artists.
+    /// A music video's or song's artists.
     artists: Option<Vec<String>>,
     album: Option<String>,
+    /// A song's album, whose primary image is the cover.
+    album_id: Option<String>,
 }
 
 /// A series as listed by `/Items`, with the tags and genres its episodes
@@ -92,6 +94,8 @@ struct RawChapter {
 pub(super) struct RawCollection {
     pub id: String,
     pub name: Option<String>,
+    /// A library's type, such as `movies` or `music`.
+    pub collection_type: Option<String>,
 }
 
 /// An item that only has an id, as when listing a collection's or a
@@ -105,8 +109,8 @@ pub(super) struct RawChild {
 /// What became of one item in a page.
 pub(super) enum Parsed {
     Playable(Box<LibraryEntry>),
-    /// Not playable: no video stream (Jellyfin lists missing episodes), no
-    /// runtime, or not a movie, episode or music video.
+    /// Not playable: a video without a video stream (Jellyfin lists missing
+    /// episodes), no runtime, or not a movie, episode, music video or song.
     Skipped,
     /// The JSON did not have the shape of an item.
     Invalid,
@@ -120,6 +124,7 @@ pub(super) fn parse_item(value: Value) -> Parsed {
         Some("Movie") => MediaKind::Movie,
         Some("Episode") => MediaKind::Episode,
         Some("MusicVideo") => MediaKind::MusicVideo,
+        Some("Audio") => MediaKind::Song,
         _ => return Parsed::Skipped,
     };
     let Some(runtime_ms) = raw
@@ -148,7 +153,10 @@ pub(super) fn parse_item(value: Value) -> Parsed {
             _ => {}
         }
     }
-    if video.is_empty() {
+    // A song's cover art can come as a video stream; the song has no picture.
+    if kind == MediaKind::Song {
+        video.clear();
+    } else if video.is_empty() {
         return Parsed::Skipped;
     }
 
@@ -180,8 +188,12 @@ pub(super) fn parse_item(value: Value) -> Parsed {
         _ => None,
     };
     let (artists, album) = match kind {
-        MediaKind::MusicVideo => (names(raw.artists), non_empty(raw.album)),
+        MediaKind::MusicVideo | MediaKind::Song => (names(raw.artists), non_empty(raw.album)),
         MediaKind::Movie | MediaKind::Episode => (Vec::new(), None),
+    };
+    let album_id = match kind {
+        MediaKind::Song => non_empty(raw.album_id).map(MediaId::new),
+        _ => None,
     };
 
     Parsed::Playable(Box::new(LibraryEntry {
@@ -194,6 +206,7 @@ pub(super) fn parse_item(value: Value) -> Parsed {
             series,
             artists,
             album,
+            album_id,
             ..MediaItem::new(raw.id, title, kind, runtime_ms)
         },
         path,

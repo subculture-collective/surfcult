@@ -15,9 +15,14 @@ pub struct SyncReport {
     /// How the cached items changed since the cache this sync replaced:
     /// renamed (a new id for the same file path), resized and vanished items.
     pub changes: LibraryChanges,
+    /// Whether the cache was replaced. `false` when
+    /// [`SyncWorker::apply`](super::SyncWorker::apply) found the library just
+    /// as it last wrote it and left the cache alone; [`sync`] always writes.
+    pub written: bool,
 }
 
-/// Fetches every movie and episode and every collection from Jellyfin and
+/// Fetches every movie, episode, music video and song and every collection
+/// from Jellyfin and
 /// replaces the library cache in `store` with them in one transaction, marked
 /// as synced at `synced_at_ms` (Unix epoch milliseconds).
 ///
@@ -50,5 +55,18 @@ pub(super) fn write_fetched(
         collections: fetched.collections.len(),
         skipped: fetched.skipped,
         changes,
+        written: true,
     })
+}
+
+/// What [`SyncWorker::apply`](super::SyncWorker::apply) reports for a
+/// snapshot it did not write because it matched the cache.
+pub(super) fn unchanged(fetched: &FetchedLibrary) -> SyncReport {
+    SyncReport {
+        items: fetched.entries.len(),
+        collections: fetched.collections.len(),
+        skipped: fetched.skipped,
+        changes: LibraryChanges::default(),
+        written: false,
+    }
 }

@@ -15,8 +15,8 @@ use crate::input::KeyMap;
 use super::duration::{parse_duration, parse_minute_of_day};
 use super::{
     Between, Block, Breaks, Channel, ClipKind, Config, DEFAULT_TUNE_IN_POOL, Day, Display, Filter,
-    Interlude, InterstitialPool, Lineup, Mode, Plan, PoolUse, Problem, Rotation, SignOff, Source,
-    Tz, WeightedPool, WeightedSource,
+    Interlude, InterstitialPool, Lineup, Mode, Picture, Plan, PoolUse, Problem, Rotation, SignOff,
+    Source, Tz, WeightedPool, WeightedSource,
 };
 
 #[derive(Deserialize)]
@@ -57,6 +57,7 @@ struct RawChannel {
     #[serde(default)]
     block: Vec<RawBlock>,
     sign_off: Option<RawSignOff>,
+    picture: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -496,6 +497,19 @@ impl RawChannel {
             .as_ref()
             .and_then(|raw| check_sign_off(raw, i, pools, problems));
 
+        let picture = match self.picture.as_deref() {
+            None => None,
+            Some("cover") => Some(Picture::Cover),
+            Some("visualizer") => Some(Picture::Visualizer),
+            Some(other) => {
+                problems.add(
+                    at("picture"),
+                    format!("unknown picture {other:?}; use cover or visualizer"),
+                );
+                None
+            }
+        };
+
         if problems.0.len() > before {
             return None;
         }
@@ -508,6 +522,7 @@ impl RawChannel {
             between,
             filler: self.filler.clone(),
             sign_off,
+            picture,
         })
     }
 

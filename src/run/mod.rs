@@ -57,6 +57,7 @@ mod streams;
 mod tests;
 mod watermark;
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 
 use guide::{Guide, clock_with_seconds};
@@ -143,6 +144,11 @@ struct Upkeep {
     /// The last problem logged for each channel, so it is logged once.
     problems: HashMap<u32, String>,
     clock_logged: bool,
+    /// Each channel's program pools, resolved once and kept until a sync
+    /// writes a new library or the channel's settings change. A music
+    /// channel's genres can hold thousands of songs each, and resolving them
+    /// at every upkeep would hold up the loop for seconds on the Pi.
+    pools: HashMap<u32, Pools>,
 }
 
 /// The TV. See the module documentation.
@@ -337,9 +343,15 @@ impl<P: Player, I: Input> Tv<P, I> {
         match result {
             Ok(report) => {
                 eprintln!(
-                    "surfcult: library synced: {} items, {} collections, {} skipped",
-                    report.items, report.collections, report.skipped
+                    "surfcult: library synced: {} items, {} collections, {} skipped{}",
+                    report.items,
+                    report.collections,
+                    report.skipped,
+                    if report.written { "" } else { ", unchanged" }
                 );
+                if report.written {
+                    self.upkeep.pools.clear();
+                }
                 let changes = report.changes;
                 if !changes.is_empty() {
                     eprintln!(
@@ -412,6 +424,7 @@ impl<P: Player, I: Input> Tv<P, I> {
                     channel.number
                 );
                 self.upkeep.reconfigured.insert(channel.number);
+                self.upkeep.pools.remove(&channel.number);
             }
         }
         self.config.channels = config.channels;
@@ -925,24 +938,27 @@ impl<P: Player, I: Input> Tv<P, I> {
         let pools_now = self.clips.pools();
         for channel in &self.config.channels {
             let n = channel.number;
-            let pools = match resolve_pools(channel, store) {
-                Ok(pools) => pools,
-                Err(why) => {
-                    if self.upkeep.problems.get(&n) != Some(&why) {
-                        eprintln!("surfcult: {why}; its schedule is not extended");
-                        self.upkeep.problems.insert(n, why);
+            let pools = match self.upkeep.pools.entry(n) {
+                Entry::Occupied(cached) => &*cached.into_mut(),
+                Entry::Vacant(slot) => match resolve_pools(channel, store) {
+                    Ok(pools) => &*slot.insert(pools),
+                    Err(why) => {
+                        if self.upkeep.problems.get(&n) != Some(&why) {
+                            eprintln!("surfcult: {why}; its schedule is not extended");
+                            self.upkeep.problems.insert(n, why);
+                        }
+                        continue;
                     }
-                    continue;
-                }
+                },
             };
             let tz = self.config.timezone;
             let reconfigured = self.upkeep.reconfigured.contains(&n);
             let result = if reconfigured {
-                schedule::regenerate(store, channel, &pools, pools_now, tz, now_ms, true)
+                schedule::regenerate(store, channel, pools, pools_now, tz, now_ms, true)
             } else if changes.is_empty() {
-                schedule::extend(store, channel, &pools, pools_now, tz, now_ms, true)
+                schedule::extend(store, channel, pools, pools_now, tz, now_ms, true)
             } else {
-                schedule::reschedule(store, channel, &pools, pools_now, tz, now_ms, &changes)
+                schedule::reschedule(store, channel, pools, pools_now, tz, now_ms, &changes)
             };
             match result {
                 Ok(Extended::Generated { .. } | Extended::UpToDate { .. }) => {
@@ -978,7 +994,7 @@ fn resolve_pools(channel: &Channel, store: &Store) -> Result<Pools, String> {
     let mut pools = Vec::new();
     let mut problems = Vec::new();
     for source in channel.plan.sources() {
-        match resolve_pool(channel.number, source, store) {
+        match resolve_pool(channel.number, channel.plays(), source, store) {
             Ok(items) => pools.push((source.clone(), items)),
             Err(e) => problems.push(e.to_string()),
         }

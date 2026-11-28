@@ -47,6 +47,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "music_videos",
         sql: include_str!("../../migrations/0007_music_videos.sql"),
     },
+    Migration {
+        version: 8,
+        name: "songs",
+        sql: include_str!("../../migrations/0008_songs.sql"),
+    },
 ];
 
 /// Applies the migrations the database has not seen yet. Each one runs in its

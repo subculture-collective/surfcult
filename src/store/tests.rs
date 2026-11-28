@@ -764,7 +764,7 @@ fn migration_7_keeps_the_cached_library_and_adds_music_videos() {
             .conn
             .execute(
                 "INSERT INTO library_items (id, position, title, kind, runtime_ms, synced_at_ms)
-                 VALUES ('x', 1, 'X', 'song', 1, 1)",
+                 VALUES ('x', 1, 'X', 'podcast', 1, 1)",
                 [],
             )
             .is_err()
@@ -800,6 +800,66 @@ fn migration_7_keeps_the_cached_library_and_adds_music_videos() {
         )
         .unwrap();
     assert_eq!(labels, 0);
+}
+
+#[test]
+fn migration_8_keeps_the_sync_time_and_adds_songs() {
+    use crate::library::{MediaItem, MediaKind};
+
+    // Databases a version-7 build left behind, one with a cached item and
+    // one with none.
+    let v7 = |items: &str| {
+        let db = TempDb::new();
+        let conn = Connection::open(db.path()).unwrap();
+        conn.execute_batch(&format!(
+            "{}{}{}{}{}{}{}{}{items}",
+            "CREATE TABLE schema_migrations (
+                version       INTEGER PRIMARY KEY,
+                name          TEXT    NOT NULL,
+                applied_at_ms INTEGER NOT NULL
+            );
+            INSERT INTO schema_migrations VALUES
+                 (1, 'schedule', 1), (2, 'library_cache', 2), (3, 'drop_cursors', 3),
+                 (4, 'library_sources', 4), (5, 'substitutions', 5),
+                 (6, 'viewer_settings', 6), (7, 'music_videos', 7);",
+            include_str!("../../migrations/0001_schedule.sql"),
+            include_str!("../../migrations/0002_library_cache.sql"),
+            include_str!("../../migrations/0003_drop_cursors.sql"),
+            include_str!("../../migrations/0004_library_sources.sql"),
+            include_str!("../../migrations/0005_substitutions.sql"),
+            include_str!("../../migrations/0006_viewer_settings.sql"),
+            include_str!("../../migrations/0007_music_videos.sql"),
+        ))
+        .unwrap();
+        db
+    };
+    let empty = v7("");
+    assert_eq!(
+        Store::open(empty.path())
+            .unwrap()
+            .library_synced_at_ms()
+            .unwrap(),
+        None
+    );
+    let cached = v7(
+        "INSERT INTO library_items (id, position, title, kind, runtime_ms, synced_at_ms)
+         VALUES ('a', 0, 'A', 'movie', 1000, 7), ('b', 1, 'B', 'movie', 1000, 9);",
+    );
+    let mut store = Store::open(cached.path()).unwrap();
+    assert_eq!(store.library_synced_at_ms().unwrap(), Some(9));
+    assert_eq!(store.library_items().unwrap().len(), 2);
+
+    let song = LibraryEntry {
+        item: MediaItem {
+            album_id: Some(MediaId::new("album")),
+            ..MediaItem::new("s", "Song", MediaKind::Song, 200_000)
+        },
+        path: None,
+    };
+    store
+        .replace_library(std::slice::from_ref(&song), &[], 10)
+        .unwrap();
+    assert_eq!(store.library_items().unwrap(), [song]);
 }
 
 #[test]
@@ -843,7 +903,7 @@ fn playback_history_round_trips_newest_first_per_channel() {
 #[test]
 fn a_collection_pool_resolves_from_the_library_cache() {
     use crate::config::Source;
-    use crate::library::{Collection, MediaItem, MediaKind, resolve_pool};
+    use crate::library::{Collection, MediaItem, MediaKind, Plays, resolve_pool};
 
     let mut store = Store::open_in_memory().unwrap();
     let entries: Vec<_> = ["a", "b", "c"]
@@ -859,7 +919,13 @@ fn a_collection_pool_resolves_from_the_library_cache() {
     };
     store.replace_library(&entries, &[cartoons], 1).unwrap();
 
-    let pool = resolve_pool(3, &Source::JellyfinCollection("Cartoons".into()), &store).unwrap();
+    let pool = resolve_pool(
+        3,
+        Plays::Videos,
+        &Source::JellyfinCollection("Cartoons".into()),
+        &store,
+    )
+    .unwrap();
 
     assert_eq!(pool, vec![entries[2].item.clone(), entries[0].item.clone()]);
 }

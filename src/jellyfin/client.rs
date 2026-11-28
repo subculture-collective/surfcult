@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 
 use serde_json::Value;
@@ -7,15 +8,25 @@ use serde_json::Value;
 use super::config::{ApiKey, JellyfinConfig};
 use super::http::{HttpError, JellyfinHttp, UreqHttp};
 use super::wire::{self, Parsed};
-use crate::library::{Collection, MediaId};
+use crate::library::{Collection, MediaId, MediaKind};
 use crate::store::{LibraryEntry, StoreError};
 
 /// Items asked for per request.
 const PAGE_SIZE: usize = 500;
 
-/// The Jellyfin item types the sync caches, as `IncludeItemTypes` lists them.
-/// `wire::parse_item` maps each one to a `MediaKind`.
+/// The Jellyfin video types the sync caches, as `IncludeItemTypes` lists them.
+/// `wire::parse_item` maps each one to a `MediaKind`. Songs (`Audio`) are
+/// fetched apart, from each music library ([`JellyfinClient::add_songs`]).
 const PLAYABLE_TYPES: &str = "Movie,Episode,MusicVideo";
+
+/// The library type (`CollectionType`) whose songs the sync caches.
+const MUSIC_LIBRARY: &str = "music";
+
+/// What a song request asks for. Artists, album and album id come without
+/// asking; images and user data are left out to keep 32,000 songs small.
+const SONG_QUERY: &str = "Recursive=true&IncludeItemTypes=Audio\
+     &Fields=Path,Genres,MediaStreams&EnableImages=false&EnableUserData=false\
+     &SortBy=AlbumArtist,Album,ParentIndexNumber,IndexNumber,SortName";
 
 /// Why talking to Jellyfin, or caching what it said, failed. None of these
 /// carry the API key.
@@ -72,6 +83,17 @@ pub(super) struct FetchedLibrary {
     /// Items listed but not kept: placeholders, items without a runtime, and
     /// items whose JSON had the wrong shape.
     pub skipped: usize,
+}
+
+impl FetchedLibrary {
+    /// A hash of the items and collections, to tell whether two fetches
+    /// found the same library without keeping both.
+    pub fn fingerprint(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.entries.hash(&mut hasher);
+        self.collections.hash(&mut hasher);
+        hasher.finish()
+    }
 }
 
 /// A read-only Jellyfin client. It holds the API key and sends it only in the
@@ -174,25 +196,39 @@ impl JellyfinClient {
     /// Reads every page of `{path}?{query}` and returns the raw items.
     fn get_list(&self, path: &str, query: &str) -> Result<Vec<Value>, JellyfinError> {
         let mut items = Vec::new();
+        self.for_each_page(path, query, |page| items.extend(page))?;
+        Ok(items)
+    }
+
+    /// Reads every page of `{path}?{query}` and hands each page's raw items
+    /// to `each` before reading the next, so only one page is held as JSON.
+    fn for_each_page(
+        &self,
+        path: &str,
+        query: &str,
+        mut each: impl FnMut(Vec<Value>),
+    ) -> Result<(), JellyfinError> {
+        let mut total = 0;
         loop {
-            let start = items.len();
+            let start = total;
             let body = self.get(&format!(
                 "{path}?{query}&StartIndex={start}&Limit={PAGE_SIZE}"
             ))?;
             let page: wire::Page = serde_json::from_str(&body).map_err(|source| {
                 JellyfinError::BadResponse(self.key.scrub(&source.to_string()))
             })?;
+            drop(body);
             let got = page.items.len();
-            items.extend(page.items);
-            let total = items.len();
+            total += got;
+            each(page.items);
             match page.total_record_count {
-                Some(expected) if (total as u64) >= expected => return Ok(items),
+                Some(expected) if (total as u64) >= expected => return Ok(()),
                 Some(expected) if got == 0 => {
                     return Err(JellyfinError::BadResponse(format!(
                         "the list ended at {total} items but Jellyfin counted {expected}"
                     )));
                 }
-                None if got < PAGE_SIZE => return Ok(items),
+                None if got < PAGE_SIZE => return Ok(()),
                 _ => {}
             }
         }
@@ -204,7 +240,8 @@ impl JellyfinClient {
     }
 
     /// Fetches the playable movies, episodes and music videos with their
-    /// series, artists, tags, genres and libraries, and the collections.
+    /// series, artists, tags, genres and libraries, the songs of every music
+    /// library, and the collections.
     pub(super) fn fetch_library(&self) -> Result<FetchedLibrary, JellyfinError> {
         let mut skipped = 0;
         let mut entries: Vec<LibraryEntry> = Vec::new();
@@ -225,7 +262,10 @@ impl JellyfinClient {
         }
 
         self.add_series_labels(&mut entries)?;
-        self.add_libraries(&mut entries)?;
+        let music = self.add_libraries(&mut entries)?;
+        for (id, name) in &music {
+            self.add_songs(id, name, &mut entries, &mut skipped)?;
+        }
         let collections = self.fetch_collections(&entries)?;
         Ok(FetchedLibrary {
             entries,
@@ -263,9 +303,15 @@ impl JellyfinClient {
         Ok(())
     }
 
-    /// Fetches each library (Jellyfin's media folders) and the playable items
-    /// in it, and adds the library's name to those items.
-    fn add_libraries(&self, entries: &mut [LibraryEntry]) -> Result<(), JellyfinError> {
+    /// Fetches each library (Jellyfin's media folders) and the playable
+    /// videos in it, and adds the library's name to those items. Returns the
+    /// id and name of each music library, whose songs [`Self::add_songs`]
+    /// fetches.
+    fn add_libraries(
+        &self,
+        entries: &mut [LibraryEntry],
+    ) -> Result<Vec<(String, String)>, JellyfinError> {
+        let mut music = Vec::new();
         let index: HashMap<String, usize> = entries
             .iter()
             .enumerate()
@@ -276,6 +322,9 @@ impl JellyfinClient {
                 continue;
             };
             let name = raw.name.unwrap_or_else(|| raw.id.clone());
+            if raw.collection_type.as_deref() == Some(MUSIC_LIBRARY) {
+                music.push((raw.id.clone(), name.clone()));
+            }
             let children = self.get_items(&format!(
                 "ParentId={}&Recursive=true&IncludeItemTypes={PLAYABLE_TYPES}&SortBy=SortName",
                 encode(&raw.id)
@@ -289,7 +338,52 @@ impl JellyfinClient {
                 }
             }
         }
-        Ok(())
+        Ok(music)
+    }
+
+    /// Fetches the songs of the music library `id`, named `name`, page by
+    /// page, and appends them to `entries` with the library's name. A song
+    /// already listed, by an earlier page or another music library, gets
+    /// the name added instead.
+    fn add_songs(
+        &self,
+        id: &str,
+        name: &str,
+        entries: &mut Vec<LibraryEntry>,
+        skipped: &mut usize,
+    ) -> Result<(), JellyfinError> {
+        let mut index: HashMap<String, usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.item.kind == MediaKind::Song)
+            .map(|(i, entry)| (normalize_id(entry.item.id.as_str()), i))
+            .collect();
+        let library = [name.to_string()];
+        self.for_each_page(
+            "/Items",
+            &format!("ParentId={}&{SONG_QUERY}", encode(id)),
+            |page| {
+                for value in page {
+                    let Parsed::Playable(entry) = wire::parse_item(value) else {
+                        *skipped += 1;
+                        continue;
+                    };
+                    let mut entry = *entry;
+                    if entry.item.kind != MediaKind::Song {
+                        *skipped += 1;
+                        continue;
+                    }
+                    let key = normalize_id(entry.item.id.as_str());
+                    if let Some(&i) = index.get(&key) {
+                        extend_unique(&mut entries[i].item.libraries, &library);
+                        continue;
+                    }
+                    entry.item.libraries = library.to_vec();
+                    index.insert(key, entries.len());
+                    entries.push(entry);
+                }
+            },
+        )
     }
 
     /// Fetches each `BoxSet` and its children. A child that is a cached item

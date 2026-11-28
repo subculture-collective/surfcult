@@ -94,6 +94,24 @@ sources = [
 ]
 mode = "weighted"
 
+# A music channel. `picture` makes a channel play songs from Jellyfin's music
+# libraries, and nothing but songs: its sources match songs only, and a
+# channel without `picture` never plays a song, even through a genre songs
+# share. Weighted genres make a radio format. `breaks` and `between` work as
+# on any channel; songs are short, so `between` suits them better than breaks.
+# picture: cover | visualizer
+[[channel]]
+number = 6
+name = "PUNK"
+picture = "cover"
+sources = [
+  { jellyfin_genre = "Punk", weight = 3 },
+  { jellyfin_genre = "Pop Punk", weight = 2 },
+  { jellyfin_genre = "Ska" },
+]
+mode = "weighted"
+between = { pool = "bumps" }
+
 # Display filters (optional). The defaults are shown.
 #   filters          on everything on screen: programs, clips, static and the
 #                    stand-by card

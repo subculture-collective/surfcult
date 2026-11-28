@@ -1,13 +1,16 @@
+use std::cell::Cell;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
 use std::thread;
 use std::time::Duration;
 
 use super::client::{FetchedLibrary, JellyfinClient, JellyfinError};
-use super::sync::{SyncReport, write_fetched};
+use super::sync::{SyncReport, unchanged, write_fetched};
 use crate::store::Store;
 
-/// One fetch's outcome, sent from the worker thread to the store's owner.
-type Fetched = Result<FetchedLibrary, JellyfinError>;
+/// One fetch's outcome, sent from the worker thread to the store's owner,
+/// with its [fingerprint](FetchedLibrary::fingerprint), worked out on the
+/// worker thread.
+type Fetched = Result<(FetchedLibrary, u64), JellyfinError>;
 
 /// Fetches the Jellyfin library on a background thread, so the thread that
 /// owns the [`Store`] never waits on the network. The owner calls
@@ -22,6 +25,8 @@ type Fetched = Result<FetchedLibrary, JellyfinError>;
 /// if the process exits first, the fetch is simply abandoned.
 pub struct SyncWorker {
     results: Receiver<Fetched>,
+    /// The fingerprint of the snapshot [`apply`](Self::apply) last wrote.
+    written: Cell<Option<u64>>,
     /// Dropped with the worker to stop the thread; the thread waits on the
     /// other end.
     _stop: Sender<()>,
@@ -37,7 +42,11 @@ impl SyncWorker {
             .name("jellyfin-sync".to_string())
             .spawn(move || {
                 loop {
-                    if results_tx.send(client.fetch_library()).is_err() {
+                    let fetched = client.fetch_library().map(|library| {
+                        let fingerprint = library.fingerprint();
+                        (library, fingerprint)
+                    });
+                    if results_tx.send(fetched).is_err() {
                         return;
                     }
                     match stop_rx.recv_timeout(every) {
@@ -48,6 +57,7 @@ impl SyncWorker {
             })?;
         Ok(Self {
             results,
+            written: Cell::new(None),
             _stop: stop,
         })
     }
@@ -58,7 +68,11 @@ impl SyncWorker {
     ///
     /// Every pending result is taken. Each snapshot is a whole library, so
     /// only the newest successful one is written; older ones are discarded
-    /// unwritten. What comes back depends on the newest pending result:
+    /// unwritten. A snapshot that matches the one this worker last wrote is
+    /// not written again: the cache already holds it, and writing tens of
+    /// thousands of songs costs seconds on a Raspberry Pi. Only the sync time
+    /// moves ([`Store::mark_library_synced`]), and the report says
+    /// `written: false`. What comes back depends on the newest pending result:
     ///
     /// - `None` when nothing is pending. Nothing is written.
     /// - `Some(Ok(report))` when the newest result is a snapshot: the report of
@@ -90,7 +104,15 @@ impl SyncWorker {
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
             }
         }
-        let written = newest_snapshot.map(|snapshot| write_fetched(store, &snapshot, synced_at_ms));
+        let written = newest_snapshot.map(|(snapshot, fingerprint)| {
+            if self.written.get() == Some(fingerprint) {
+                store.mark_library_synced(synced_at_ms)?;
+                return Ok(unchanged(&snapshot));
+            }
+            let report = write_fetched(store, &snapshot, synced_at_ms)?;
+            self.written.set(Some(fingerprint));
+            Ok(report)
+        });
         match (written, newest_error) {
             (Some(Err(write_error)), _) => Some(Err(write_error)),
             (_, Some(fetch_error)) => Some(Err(fetch_error)),

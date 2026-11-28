@@ -38,8 +38,10 @@ const KEY_PARAMS: [&str; 2] = ["api_key", "ApiKey"];
 /// How the player gets an item's picture and sound.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Playback {
-    /// The file as stored, `/Videos/{id}/stream?static=true&mediaSourceId=...`.
-    /// The stream starts at the beginning, so the player seeks to `seek_ms`.
+    /// The file as stored, `/Videos/{id}/stream?static=true&mediaSourceId=...`,
+    /// or `/Audio/{id}/stream?...` for a source without a video stream (a
+    /// song). The stream starts at the beginning, so the player seeks to
+    /// `seek_ms`.
     Direct {
         path_and_query: String,
         seek_ms: u64,
@@ -104,6 +106,25 @@ struct RawMediaSource {
     id: Option<String>,
     supports_direct_play: Option<bool>,
     transcoding_url: Option<String>,
+    media_streams: Option<Vec<RawMediaStream>>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct RawMediaStream {
+    #[serde(rename = "Type")]
+    kind: Option<String>,
+}
+
+impl RawMediaSource {
+    /// Whether the source has a picture of its own. A song's cover art is an
+    /// `EmbeddedImage` stream, not a `Video` one.
+    fn has_video(&self) -> bool {
+        self.media_streams
+            .iter()
+            .flatten()
+            .any(|stream| stream.kind.as_deref() == Some("Video"))
+    }
 }
 
 impl JellyfinClient {
@@ -144,10 +165,15 @@ impl JellyfinClient {
         };
 
         if source.supports_direct_play == Some(true) {
+            let kind = if source.has_video() {
+                "Videos"
+            } else {
+                "Audio"
+            };
             let source_id = source.id.unwrap_or_else(|| id.as_str().to_string());
             return Ok(Playback::Direct {
                 path_and_query: format!(
-                    "/Videos/{}/stream?static=true&mediaSourceId={}",
+                    "/{kind}/{}/stream?static=true&mediaSourceId={}",
                     encode(id.as_str()),
                     encode(&source_id)
                 ),
@@ -201,8 +227,9 @@ impl JellyfinClient {
 /// The `DeviceProfile` sent with every playback-info request, built from
 /// [`crate::library::profile`] so the ADR's rules are written down once.
 ///
-/// The direct-play entry names no container: any container plays directly,
-/// as in `needs_transcode`. Each direct video codec gets a codec profile that
+/// The direct-play entries name no container: any container plays directly,
+/// as in `needs_transcode`. The `Audio` entry lets a song play directly; there
+/// is no audio transcode, so a song in another codec cannot play. Each direct video codec gets a codec profile that
 /// caps its bit depth and height and allows only SDR. The conditions are not
 /// required, so a stream whose bit depth Jellyfin does not know still plays
 /// directly, the same way `needs_transcode` reads a missing bit depth as 8.
@@ -237,6 +264,9 @@ pub(super) fn device_profile() -> Value {
         "DirectPlayProfiles": [{
             "Type": "Video",
             "VideoCodec": video_codecs.join(","),
+            "AudioCodec": DIRECT_AUDIO.join(","),
+        }, {
+            "Type": "Audio",
             "AudioCodec": DIRECT_AUDIO.join(","),
         }],
         "TranscodingProfiles": [{

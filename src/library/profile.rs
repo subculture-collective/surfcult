@@ -28,10 +28,11 @@
 //!   Jellyfin does not, so Jellyfin transcodes them.
 //! - A missing bit depth is read as 8 bit, because almost all H.264 is 8 bit.
 //!   The profile sent to Jellyfin reads it the same way.
-//! - An item with no video stream is treated as a transcode, since nothing
+//! - A video with no video stream is treated as a transcode, since nothing
 //!   shows that it plays directly. An item with no audio stream is fine.
+//! - A song has no picture, so only its audio counts.
 
-use super::model::{AudioStream, MediaItem, VideoStream};
+use super::model::{AudioStream, MediaItem, MediaKind, VideoStream};
 
 /// A video codec the Pi decodes in hardware.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,7 +97,8 @@ pub const TRANSCODE: TranscodeTarget = TranscodeTarget {
 
 /// Whether Jellyfin must transcode `item` before the Pi can play it.
 pub fn needs_transcode(item: &MediaItem) -> bool {
-    let video_ok = item.video.first().is_some_and(video_plays_directly);
+    let video_ok =
+        item.kind == MediaKind::Song || item.video.first().is_some_and(video_plays_directly);
     let audio_ok = item.audio.first().is_none_or(audio_plays_directly);
     !(video_ok && audio_ok)
 }
@@ -122,7 +124,6 @@ pub fn audio_plays_directly(audio: &AudioStream) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::library::MediaKind;
 
     fn video(codec: &str, height: u32, bit_depth: Option<u8>) -> VideoStream {
         VideoStream {
@@ -236,5 +237,16 @@ mod tests {
         item.video.push(video("av1", 1080, Some(8)));
         item.audio.push(audio("pcm_s16le"));
         assert!(!needs_transcode(&item));
+    }
+
+    #[test]
+    fn a_song_counts_only_its_audio() {
+        let song = |codec: &str| MediaItem {
+            kind: MediaKind::Song,
+            ..item(None, Some(audio(codec)))
+        };
+        assert!(!needs_transcode(&song("flac")));
+        assert!(!needs_transcode(&song("mp3")));
+        assert!(needs_transcode(&song("alac")));
     }
 }

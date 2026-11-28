@@ -56,7 +56,7 @@ Every configured channel's programs overlapping `[from, to)`, with titles: the g
  ]}]}
 ```
 
-`title` is `Series: Episode` for an episode, `Artist – Title` for a music video with artists, the title for anything else, or `UNKNOWN PROGRAM` when the item has left the library. A cell's start and end are the program's own, not clipped to the window.
+`title` is `Series: Episode` for an episode, `Artist – Title` for a music video or song with artists, the title for anything else, or `UNKNOWN PROGRAM` when the item has left the library. A cell's start and end are the program's own, not clipped to the window.
 
 ### `GET /xmltv.xml`
 
@@ -79,7 +79,7 @@ The guide as XMLTV (`application/xml`), for external guide clients. It lists eve
  "channels": [{"number": 3, "scheduled_until_ms": 605800000}]}
 ```
 
-`library_synced_at_ms` is `null` while the library cache is empty. `scheduled_until_ms` is when the channel's last stored event ends, `null` if it has none; a value close to `now_ms` means the schedule is running out. If the database cannot be read, or its schema version is not the one this build expects (for example before the writer has run a new build's migrations), the answer is `503`.
+`library_synced_at_ms` is when the last sync finished, including one that found the library unchanged and did not rewrite the cache; it is `null` before the first sync. `scheduled_until_ms` is when the channel's last stored event ends, `null` if it has none; a value close to `now_ms` means the schedule is running out. If the database cannot be read, or its schema version is not the one this build expects (for example before the writer has run a new build's migrations), the answer is `503`.
 
 ## Controlling the TV
 

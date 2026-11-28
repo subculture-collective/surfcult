@@ -909,6 +909,7 @@ fn a_program_that_fails_twice_on_screen_is_replaced_by_filler() {
             collections: 1,
             skipped: 0,
             changes: LibraryChanges::default(),
+            written: true,
         }),
     );
     rig.step(T + MIN + 7_020);
@@ -992,6 +993,7 @@ fn a_sync_that_changes_a_scheduled_runtime_regenerates_after_the_freeze() {
         collections: 1,
         skipped: 0,
         changes,
+        written: true,
     };
     rig.tv.synced(T + MIN, &mut rig.store, Ok(report));
 

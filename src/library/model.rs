@@ -20,21 +20,41 @@ impl fmt::Display for MediaId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MediaKind {
     Movie,
     Episode,
     MusicVideo,
+    /// A song: audio with no picture of its own. Only a channel with a
+    /// `picture` plays songs ([`Plays::Songs`]).
+    Song,
+}
+
+impl MediaKind {
+    /// Whether a channel that plays `plays` may schedule an item of this kind.
+    pub fn played_by(self, plays: Plays) -> bool {
+        (self == Self::Song) == (plays == Plays::Songs)
+    }
+}
+
+/// What a channel plays: videos (movies, episodes and music videos) or
+/// songs. A channel with a `picture` plays songs and nothing else; every
+/// other channel plays videos and never a song, whatever its sources match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Plays {
+    #[default]
+    Videos,
+    Songs,
 }
 
 /// A chapter mark, used to pick commercial-break cut points.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Chapter {
     pub start_ms: u64,
     pub name: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct VideoStream {
     pub codec: String,
     pub width: u32,
@@ -42,7 +62,7 @@ pub struct VideoStream {
     pub bit_depth: Option<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AudioStream {
     pub codec: String,
     pub channels: u8,
@@ -50,7 +70,7 @@ pub struct AudioStream {
 }
 
 /// Where an episode sits in its series.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SeriesEpisode {
     /// The series' id in the source (a Jellyfin series id, for Jellyfin).
     pub series_id: MediaId,
@@ -61,7 +81,7 @@ pub struct SeriesEpisode {
     pub number: Option<u32>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MediaItem {
     pub id: MediaId,
     pub title: String,
@@ -79,10 +99,14 @@ pub struct MediaItem {
     /// The episode's series, or `None` for a movie or for an episode the
     /// source does not place in a series.
     pub series: Option<SeriesEpisode>,
-    /// The music video's artists, in the source's order. Empty for other kinds.
+    /// The music video's or song's artists, in the source's order. Empty for
+    /// other kinds.
     pub artists: Vec<String>,
-    /// The music video's album, when the source names one.
+    /// The music video's or song's album, when the source names one.
     pub album: Option<String>,
+    /// The song's album id in the source, whose primary image is the cover.
+    /// `None` for other kinds and for a song the source puts on no album.
+    pub album_id: Option<MediaId>,
 }
 
 impl MediaItem {
@@ -108,6 +132,7 @@ impl MediaItem {
             series: None,
             artists: Vec::new(),
             album: None,
+            album_id: None,
         }
     }
 
@@ -132,7 +157,7 @@ impl MediaItem {
 /// A named group of items, such as a Jellyfin collection. Members are listed
 /// in the source's order. A member is an item id or a series id; a series
 /// stands for all of its episodes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Collection {
     pub name: String,
     pub members: Vec<MediaId>,
