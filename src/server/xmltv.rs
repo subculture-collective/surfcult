@@ -2,9 +2,10 @@
 //! next [`HORIZON_MS`], as XMLTV.
 //!
 //! Programs are the guide's cells, not raw segments, so a program cut by
-//! breaks is one `<programme>`. The config has no logo field, so channels
-//! carry no `<icon>`, and the media model has no description yet, so there
-//! is no `<desc>`.
+//! breaks is one `<programme>` and a music channel's hour is one, with its
+//! songs in `<desc>`. The config has no logo field, so channels carry no
+//! `<icon>`, and the media model has no description yet, so a video program
+//! has no `<desc>`.
 
 use axum::extract::State;
 use axum::http::{StatusCode, header};
@@ -21,9 +22,10 @@ pub(super) async fn guide(State(state): State<AppState>) -> Result<Response, Api
         from_ms,
         to_ms: from_ms.saturating_add(HORIZON_MS),
     };
-    let numbers: Vec<u32> = state.config().channels.iter().map(|c| c.number).collect();
+    let config = state.config();
     let rows = read_store(&state, move |store| {
-        guide::build(store, store, &numbers, window)
+        let all: Vec<_> = config.channels.iter().collect();
+        guide::listings(store, store, &all, config.timezone, window)
     })
     .await
     .map_err(|message| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, message))?;

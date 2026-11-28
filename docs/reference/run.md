@@ -176,6 +176,7 @@ The guide key opens the program guide on the channel being watched ([paint.md](p
 
 - `channel_up` and `channel_down` move the focus up and down the channel rows, stopping at the first and last channel. They do not change channel. Four rows are on screen and they follow the focus.
 - `left` and `right` move the grid half an hour earlier or later, from the current half hour up to 24 hours ahead (`run::guide::MAX_LATER`). The focused cell is then the program on at the grid's first slot, and the body and rows are drawn again.
+- A music channel's row shows hour blocks titled by their main artists ([guide.md](guide.md#music-channels)). On the block on now, the info panel names the song playing (`Artist – Title`, or the next song during a bump); on a later block it names the block's artists and adds its times to the day, as `Saturday 14:01–15:04`. The banner still names the song on now.
 - `info` (OK) tunes the focused channel and closes the guide; on the channel being watched it only closes it.
 - `guide` and `back` close it without tuning.
 - A digit closes it and starts a channel number as usual.

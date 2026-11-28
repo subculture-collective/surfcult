@@ -14,16 +14,34 @@
 //!
 //! Times are Unix epoch milliseconds. Cells are half-open intervals
 //! `[start_ms, end_ms)`, like events.
+//!
+//! A music channel schedules one program event per song, too short to read
+//! in a guide cell. [`listings`], which the TV guide, the web admin and
+//! XMLTV read, groups a music channel's songs into blocks of
+//! [`MUSIC_BLOCK_MS`] aligned to the clock in the config time zone ([`blocks`]);
+//! video channels get the same cells as [`build`]. The schedule itself, the
+//! banner and `surfcult now` keep one event and one cell per song.
 
 #[cfg(test)]
 mod tests;
 
-use crate::library::{MediaId, MediaSource};
+use chrono::{TimeZone, Timelike};
+
+use crate::config::{Channel, Tz};
+use crate::library::{MediaId, MediaSource, Plays};
+use crate::overlay::program_title;
 use crate::store::{Store, StoreError};
 use crate::timeline::{Event, EventKind};
 
 /// How far ahead of now the guide shows by default: three hours.
 pub const DEFAULT_SPAN_MS: i64 = 3 * 60 * 60 * 1000;
+
+/// How long a music channel's guide block is: an hour, aligned to the
+/// local clock. It must divide a day.
+pub const MUSIC_BLOCK_MS: i64 = 60 * 60 * 1000;
+
+/// The most artists a block's title names.
+pub const BLOCK_ARTISTS: usize = 3;
 
 /// The stretch of time the guide shows, `[from_ms, to_ms)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,10 +73,15 @@ pub struct Cell {
     /// The item's title, or `None` when the media source cannot resolve the
     /// item (it left the library, or the source is unavailable).
     pub title: Option<String>,
-    /// Always `None`: the media model has no description yet.
+    /// `None` for a program: the media model has no description yet. A
+    /// music block lists its songs, one display title a line.
     pub description: Option<String>,
-    /// The item's genres; empty when the item cannot be resolved.
+    /// The item's genres; empty when the item cannot be resolved. A music
+    /// block has its songs' genres, each once.
     pub genres: Vec<String>,
+    /// A music block's songs, in time order; empty for a program. A block's
+    /// `media_id` is its first song's.
+    pub songs: Vec<Cell>,
 }
 
 impl Cell {
@@ -112,6 +135,7 @@ pub fn cells(events: &[Event], media: &impl MediaSource, window: Window) -> Vec<
                 media_id: span.media_id,
                 start_ms: span.start_ms,
                 end_ms: span.end_ms,
+                songs: Vec::new(),
             }
         })
         .collect()
@@ -140,6 +164,200 @@ pub fn build(
             })
         })
         .collect()
+}
+
+/// One [`Row`] per channel, in the order given, for `window`, as the guide
+/// screens show them: a video channel's cells as [`build`] gives them, and a
+/// music channel's songs grouped into blocks ([`blocks`]) aligned to the
+/// clock in `timezone`.
+pub fn listings(
+    store: &Store,
+    media: &impl MediaSource,
+    channels: &[&Channel],
+    timezone: Tz,
+    window: Window,
+) -> Result<Vec<Row>, StoreError> {
+    channels
+        .iter()
+        .map(|channel| {
+            let events = match channel.plays() {
+                Plays::Videos => {
+                    return Ok(build(store, media, &[channel.number], window)?.remove(0));
+                }
+                Plays::Songs => read_block_events(store, channel.number, timezone, window)?,
+            };
+            Ok(Row {
+                channel: channel.number,
+                cells: blocks(&events, media, &channel.name, timezone, window),
+            })
+        })
+        .collect()
+}
+
+/// The start of the [`MUSIC_BLOCK_MS`] block `at_ms` is in, on the local
+/// clock in `timezone`. Each local hour is its own block, so the hour a
+/// clock change repeats is two blocks and the hour it skips is none.
+pub fn block_start(at_ms: i64, timezone: Tz) -> i64 {
+    let Some(local) = timezone.timestamp_millis_opt(at_ms).single() else {
+        return at_ms - at_ms.rem_euclid(MUSIC_BLOCK_MS);
+    };
+    let into_day = i64::from(local.num_seconds_from_midnight()) * 1000
+        + i64::from(local.nanosecond() / 1_000_000);
+    at_ms - into_day.rem_euclid(MUSIC_BLOCK_MS)
+}
+
+/// A music channel's guide cells: its songs grouped into blocks that
+/// overlap `window`.
+///
+/// A song belongs to the block it starts in ([`block_start`]). A block runs
+/// from its first song's start to its last song's end. Breaks, filler and
+/// idents between songs are part of the block, and the ones between two
+/// blocks belong to the earlier one, so back-to-back blocks abut. A hole in
+/// the events (dead air, or the time off the air after a sign-off) ends the
+/// block at the last song before it; songs after the hole in the same hour
+/// start a new block.
+///
+/// A block's title names the [`BLOCK_ARTISTS`] artists with the most airtime
+/// in it, ties going to the one heard first, as `Santana · The Who · Cream`.
+/// The row already names the channel, so the title leaves it out unless no
+/// song's artists are known; then it is `channel_name`. Like [`cells`],
+/// `events` must be sorted and must hold every song of a block that crosses
+/// a window edge.
+pub fn blocks(
+    events: &[Event],
+    media: &impl MediaSource,
+    channel_name: &str,
+    timezone: Tz,
+    window: Window,
+) -> Vec<Cell> {
+    // Each block's song events and its end.
+    let mut groups: Vec<(Vec<&Event>, i64)> = Vec::new();
+    // The block the last song is in, while no hole has come since it.
+    let mut open: Option<i64> = None;
+    let mut last_end: Option<i64> = None;
+    for event in events {
+        if last_end != Some(event.start_ms) {
+            open = None;
+        }
+        last_end = Some(event.end_ms);
+        if event.kind != EventKind::Program {
+            continue;
+        }
+        let block = block_start(event.start_ms, timezone);
+        match groups.last_mut() {
+            Some((songs, end)) if open == Some(block) => {
+                songs.push(event);
+                *end = event.end_ms;
+            }
+            last => {
+                // A block followed by the next with no hole runs up to it.
+                if open.is_some()
+                    && let Some((_, end)) = last
+                {
+                    *end = event.start_ms;
+                }
+                groups.push((vec![event], event.end_ms));
+            }
+        }
+        open = Some(block);
+    }
+    groups
+        .into_iter()
+        .filter(|(songs, end)| *end > window.from_ms && songs[0].start_ms < window.to_ms)
+        .map(|(group, end)| block(&group, end, media, channel_name))
+        .collect()
+}
+
+/// One block's cell from its song events.
+fn block(events: &[&Event], end_ms: i64, media: &impl MediaSource, channel_name: &str) -> Cell {
+    let owned: Vec<Event> = events.iter().map(|&e| e.clone()).collect();
+    let everything = Window {
+        from_ms: i64::MIN,
+        to_ms: i64::MAX,
+    };
+    let songs = cells(&owned, media, everything);
+    // Each artist's airtime, in the order they are first heard.
+    let mut airtime: Vec<(String, i64)> = Vec::new();
+    let mut genres: Vec<String> = Vec::new();
+    for song in &songs {
+        let Ok(item) = media.resolve(&song.media_id) else {
+            continue;
+        };
+        for artist in &item.artists {
+            let length = song.end_ms - song.start_ms;
+            match airtime.iter_mut().find(|(name, _)| name == artist) {
+                Some((_, time)) => *time += length,
+                None => airtime.push((artist.clone(), length)),
+            }
+        }
+        for genre in &song.genres {
+            if !genres.contains(genre) {
+                genres.push(genre.clone());
+            }
+        }
+    }
+    // A stable sort keeps first-heard order among equal airtimes.
+    airtime.sort_by_key(|(_, time)| std::cmp::Reverse(*time));
+    let title = if airtime.is_empty() {
+        channel_name.to_string()
+    } else {
+        airtime
+            .iter()
+            .take(BLOCK_ARTISTS)
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    let description = songs
+        .iter()
+        .map(|song| program_title(&song.media_id, media))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Cell {
+        media_id: events[0].media_id.clone(),
+        start_ms: events[0].start_ms,
+        end_ms,
+        title: Some(title),
+        description: Some(description),
+        genres,
+        songs,
+    }
+}
+
+/// A music channel's events for `window`: every event from the start of the
+/// block the window starts in (or an earlier one, when a song crosses into
+/// it) to the end of the block the window ends in, then on through breaks,
+/// filler and idents to the next song, so the last block ends where the
+/// next one starts whatever the window.
+fn read_block_events(
+    store: &Store,
+    channel: u32,
+    timezone: Tz,
+    window: Window,
+) -> Result<Vec<Event>, StoreError> {
+    let mut from = block_start(window.from_ms, timezone);
+    let to = block_start(window.to_ms.saturating_sub(1), timezone).saturating_add(MUSIC_BLOCK_MS);
+    let mut events = store.events_between(channel, from, to)?;
+    while let Some(first) = events.first()
+        && first.start_ms < from
+    {
+        from = block_start(first.start_ms, timezone);
+        events = store.events_between(channel, from, to)?;
+    }
+    // Read on until the first song of the next block, or a hole.
+    while let Some(last) = events.last()
+        && !(last.kind == EventKind::Program && last.start_ms >= to)
+    {
+        let end = last.end_ms;
+        match store
+            .events_between(channel, end, end.saturating_add(1))?
+            .pop()
+        {
+            Some(event) if event.start_ms == end => events.push(event),
+            _ => break,
+        }
+    }
+    Ok(events)
 }
 
 /// The window's events plus the neighbouring events of any program that

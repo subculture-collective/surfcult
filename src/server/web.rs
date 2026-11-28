@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use super::{ApiError, AppState, read_store};
 use crate::guide::{self, Window};
 use crate::library::{MediaKind, MediaSource};
-use crate::overlay::program_title;
+use crate::overlay::cell_title;
 
 /// The guide window when a request gives no `to`: three hours.
 pub const DEFAULT_GUIDE_MS: i64 = 3 * 60 * 60 * 1000;
@@ -90,15 +90,16 @@ pub(super) struct GuideChannel {
 pub(super) struct GuideCellBody {
     pub(super) start_ms: i64,
     pub(super) end_ms: i64,
-    /// `Series: Episode` for an episode, or `UNKNOWN PROGRAM`.
+    /// `Series: Episode` for an episode, the main artists of a music
+    /// channel's hour, or `UNKNOWN PROGRAM`.
     pub(super) title: String,
     pub(super) movie: bool,
     pub(super) genres: Vec<String>,
 }
 
 /// Every channel's programs overlapping `[from, to)`, with titles: the
-/// guide's cells, so a program cut by breaks is one cell and breaks are left
-/// out. `from` defaults to now and `to` to three hours after it; the window
+/// guide's cells, so a program cut by breaks is one cell, breaks are left
+/// out and a music channel's songs are hour blocks. `from` defaults to now and `to` to three hours after it; the window
 /// may be at most a day.
 pub(super) async fn guide(
     State(state): State<AppState>,
@@ -120,16 +121,16 @@ pub(super) async fn guide(
             "`to` must be after `from`, and at most a day after it",
         ));
     }
-    let channels: Vec<(u32, String)> = state
-        .config()
+    let config = state.config();
+    let channels: Vec<(u32, String)> = config
         .channels
         .iter()
         .map(|c| (c.number, c.name.clone()))
         .collect();
-    let numbers: Vec<u32> = channels.iter().map(|(n, _)| *n).collect();
     let window = Window { from_ms, to_ms };
     let rows = read_store(&state, move |store| {
-        let rows = guide::build(store, store, &numbers, window)?;
+        let all: Vec<_> = config.channels.iter().collect();
+        let rows = guide::listings(store, store, &all, config.timezone, window)?;
         Ok(rows
             .into_iter()
             .map(|row| {
@@ -139,7 +140,7 @@ pub(super) async fn guide(
                     .map(|cell| GuideCellBody {
                         start_ms: cell.start_ms,
                         end_ms: cell.end_ms,
-                        title: program_title(&cell.media_id, store),
+                        title: cell_title(cell, store),
                         movie: store
                             .resolve(&cell.media_id)
                             .is_ok_and(|item| item.kind == MediaKind::Movie),

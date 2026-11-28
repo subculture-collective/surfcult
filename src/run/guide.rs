@@ -4,7 +4,9 @@
 //! The guide covers the current half hour and the two after it. The focus is
 //! on a channel; its program on now (or its first program in the window) is
 //! the focused cell, and the info panel describes it. The rows on screen
-//! follow the focus.
+//! follow the focus. A music channel's cells are hour blocks
+//! ([`guide::listings`]); on the block on now the info panel names the song
+//! playing, and on a later one the block's artists and its times.
 //!
 //! After [`IDLE_MS`] without a key, the rows scroll upward on their own, 4
 //! pixel rows every [`SCROLL_EVERY_MS`], and loop. The next key stops the
@@ -17,7 +19,7 @@ use chrono::{Datelike, TimeZone, Timelike};
 use crate::config::{Channel, Tz};
 use crate::guide::{self, Window};
 use crate::library::{MediaKind, MediaSource};
-use crate::overlay::{clock, program_title};
+use crate::overlay::{cell_title, clock, program_title};
 use crate::paint::guide::{GuideCell, GuideRow, GuideView, PITCH, ROWS};
 use crate::store::Store;
 
@@ -166,10 +168,11 @@ impl Guide {
             .chain(channels.iter().take(repeat))
             .copied()
             .collect();
-        let numbers: Vec<u32> = channels.iter().map(|c| c.number).collect();
-        let built = guide::build(store, store, &numbers, window).unwrap_or_default();
+        let built = guide::listings(store, store, channels, timezone, window).unwrap_or_default();
         let focus_number = channels.get(self.focus).map(|c| c.number);
         let mut info_title = String::new();
+        // A later music block's times, for the info panel.
+        let mut info_times = None;
         let mut rows = Vec::new();
         for channel in &on_screen {
             let cells = built
@@ -187,10 +190,23 @@ impl Guide {
                 .iter()
                 .enumerate()
                 .map(|(i, cell)| {
-                    let title = program_title(&cell.media_id, store);
+                    let title = cell_title(cell, store);
                     let focused = focused_index == Some(i);
                     if focused {
                         info_title = title.clone();
+                        let on_now = cell.start_ms <= now_ms && now_ms < cell.end_ms;
+                        // On a music block on now, the song on now, or the
+                        // next one during a bump; on a later one, its times.
+                        let song = cell.songs.iter().find(|s| now_ms < s.end_ms);
+                        if on_now && let Some(song) = song {
+                            info_title = program_title(&song.media_id, store);
+                        } else if !on_now && !cell.songs.is_empty() {
+                            info_times = Some(format!(
+                                "{}–{}",
+                                clock(cell.start_ms, timezone),
+                                clock(cell.end_ms, timezone)
+                            ));
+                        }
                     }
                     GuideCell {
                         title,
@@ -226,7 +242,10 @@ impl Guide {
             info: [
                 focused.map(|c| c.name.clone()).unwrap_or_default(),
                 info_title,
-                day.to_string(),
+                match info_times {
+                    Some(times) => format!("{day} {times}"),
+                    None => day.to_string(),
+                },
                 focused
                     .map(|c| format!("Channel {}", c.number))
                     .unwrap_or_default(),
@@ -388,5 +407,71 @@ mod tests {
         assert!(!g.shift(true), "not past a day ahead");
         assert!(g.shift(false));
         assert_eq!(g.from(now), (10 + MAX_LATER - 1) * SLOT_MS);
+    }
+
+    #[test]
+    fn the_info_panel_names_the_song_on_now_and_a_later_music_block_s_times() {
+        use crate::config::{Mode, Picture, Plan};
+        use crate::library::{MediaId, MediaItem};
+        use crate::store::LibraryEntry;
+        use crate::timeline::{Event, EventKind};
+
+        const MINUTE: i64 = 60_000;
+        // 2026-11-28 13:00 UTC.
+        let hour = 1_795_870_800_000;
+        assert_eq!(hour % (60 * MINUTE), 0);
+        let mut store = Store::open_in_memory().unwrap();
+        let mut events = Vec::new();
+        let mut entries = Vec::new();
+        for (i, artist) in ["The Clash", "Blondie"].iter().enumerate() {
+            let mut item =
+                MediaItem::new(format!("s{i}"), "Song", MediaKind::Song, 5 * MINUTE as u64);
+            item.artists = vec![artist.to_string()];
+            entries.push(LibraryEntry { item, path: None });
+        }
+        // Five-minute songs, The Clash then Blondie, for three hours.
+        for n in 0..36 {
+            events.push(Event {
+                start_ms: hour + n * 5 * MINUTE,
+                end_ms: hour + (n + 1) * 5 * MINUTE,
+                media_id: MediaId::new(format!("s{}", n % 2)),
+                media_offset_ms: 0,
+                media_duration_ms: 5 * MINUTE as u64,
+                kind: EventKind::Program,
+            });
+        }
+        store.write_events(34, &events).unwrap();
+        store.replace_library(&entries, &[], 0).unwrap();
+        let channel = Channel {
+            number: 34,
+            name: "PUNK".into(),
+            plan: Plan::Fixed {
+                sources: Vec::new(),
+                mode: Mode::Shuffle,
+            },
+            grid: None,
+            breaks: None,
+            between: None,
+            filler: None,
+            sign_off: None,
+            picture: Some(Picture::Cover),
+        };
+        let now = hour + 7 * MINUTE;
+        let mut g = Guide::new(0, 1, now);
+        let view = g.view(&[&channel], &store, now, Tz::UTC);
+        assert_eq!(view.info[1], "“Blondie – Song”");
+        assert_eq!(view.info[2], "Saturday");
+        let titles: Vec<&str> = view.rows[0]
+            .cells
+            .iter()
+            .map(|c| c.title.as_str())
+            .collect();
+        assert_eq!(titles, vec!["The Clash · Blondie"; 2]);
+        // Two half hours later the grid starts at 14:00, in a later block.
+        g.shift(true);
+        g.shift(true);
+        let view = g.view(&[&channel], &store, now, Tz::UTC);
+        assert_eq!(view.info[1], "“The Clash · Blondie”");
+        assert_eq!(view.info[2], "Saturday 14:00–15:00");
     }
 }

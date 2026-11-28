@@ -47,7 +47,7 @@ An event that started before `from` but is still on at `from` is included, so th
 
 ### `GET /guide?from=&to=`
 
-Every configured channel's programs overlapping `[from, to)`, with titles: the guide's cells, as the TV's guide shows them, so a program cut by breaks is one cell and breaks, filler and idents are left out. `from` defaults to now and `to` to three hours after `from`; the window must be non-empty and at most a day, or the answer is `400`. `timezone` is the TV's, from `channels.toml`, so a client can show the times the TV shows.
+Every configured channel's programs overlapping `[from, to)`, with titles: the guide's cells, as the TV's guide shows them, so a program cut by breaks is one cell, breaks, filler and idents are left out, and a music channel's songs are hour blocks ([guide.md](guide.md#music-channels)). `from` defaults to now and `to` to three hours after `from`; the window must be non-empty and at most a day, or the answer is `400`. `timezone` is the TV's, from `channels.toml`, so a client can show the times the TV shows.
 
 ```json
 {"from_ms": 1000000, "to_ms": 11800000, "now_ms": 1000000, "timezone": "America/Chicago",
@@ -56,11 +56,11 @@ Every configured channel's programs overlapping `[from, to)`, with titles: the g
  ]}]}
 ```
 
-`title` is `Series: Episode` for an episode, `Artist – Title` for a music video or song with artists, the title for anything else, or `UNKNOWN PROGRAM` when the item has left the library. A cell's start and end are the program's own, not clipped to the window.
+`title` is `Series: Episode` for an episode, `Artist – Title` for a music video or song with artists, the block's main artists for a music channel's block (`Santana · The Who · Cream`), the title for anything else, or `UNKNOWN PROGRAM` when the item has left the library. A cell's start and end are the program's own, not clipped to the window.
 
 ### `GET /xmltv.xml`
 
-The guide as XMLTV (`application/xml`), for external guide clients. It lists every channel in `channels.toml` and the programs from now to the seven-day horizon (`from` is the request time). Programs are the guide's cells, not raw segments: a program cut by breaks is one `<programme>`, and breaks, filler and idents are left out. Times are `YYYYMMDDHHMMSS +0000`. Channel ids are `<number>.surfcult`.
+The guide as XMLTV (`application/xml`), for external guide clients. It lists every channel in `channels.toml` and the programs from now to the seven-day horizon (`from` is the request time). Programs are the guide's cells, not raw segments: a program cut by breaks is one `<programme>`, breaks, filler and idents are left out, and a music channel's hour block is one `<programme>` titled by its main artists, with a `<desc>` listing its songs, one a line. Times are `YYYYMMDDHHMMSS +0000`. Channel ids are `<number>.surfcult`.
 
 ```xml
 <channel id="3.surfcult"><display-name>SATURDAY CARTOONS</display-name></channel>
