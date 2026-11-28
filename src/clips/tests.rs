@@ -63,6 +63,7 @@ fn pool(name: &str, dir: &Path) -> InterstitialPool {
         name: name.to_string(),
         path: dir.to_path_buf(),
         rotation: Default::default(),
+        kind: crate::config::ClipKind::Filler,
         repeat_after: None,
     }
 }

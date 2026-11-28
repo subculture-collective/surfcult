@@ -18,6 +18,25 @@ path = "/var/lib/surfcult/clips/ads-90s"
 
 Put the clip files directly in that directory. The scan does not look in subdirectories. Clips in a pool are sorted by file name, so the order is the same on every scan.
 
+## Pool kinds
+
+A pool's optional `kind` says what its clips are, and so how the schedule writes them:
+
+| `kind` | Event kind | Watermark |
+|---|---|---|
+| `commercial`, `trailer` | `break` | under form shown |
+| `bump`, `stinger`, `ident` | `ident` | not shown |
+| `filler` | `filler` | under form shown |
+
+```toml
+[[interstitial_pool]]
+name = "bumps"
+path = "/var/lib/surfcult/clips/bumps"
+kind = "bump"
+```
+
+Without `kind`, a pool a channel's `breaks` draws from (`breaks.pool` or `breaks.pools`) is `commercial` and any other pool is `filler`, so files written before `kind` existed keep their meaning. The kind applies where `breaks` and `between` draw the pool's clips (`pool`, `pools`, `open`, `close`). A pool used as `breaks.pad`, `filler` or `sign_off` keeps the role's kind there: pads are `ident` from the pad pool and `filler` from the filler pool, and the sign-off clip is `ident`. The web admin lists each pool with its kind. How breaks and `between` use the pools is in [Schedule generator](schedule.md#breaks).
+
 ## What ffprobe is for
 
 surfcult asks `ffprobe` for each file's length, because the schedule generator fills a break with whole clips and needs exact durations. `ffprobe` is part of FFmpeg and must be on `PATH` on the Pi (`apt install ffmpeg`). It runs as `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 -i <path>`, with the path as one argument and no shell. Each file gets 10 seconds; a file that takes longer is skipped.

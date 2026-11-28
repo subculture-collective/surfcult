@@ -3,7 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::blocks::Span;
-use super::breaks::{BreakPlan, Piece, Rotation, cut_points, fill_gap, usable};
+use super::breaks::{
+    BetweenPlan, BreakPlan, Interlude, Piece, Rotations, cut_points, fill_gap, usable,
+};
 use super::rng::{self, SplitMix64};
 use super::sign_off::Night;
 use super::{Generated, MAX_EVENTS, Note, ScheduleError};
@@ -13,12 +15,14 @@ use crate::library::{MediaId, MediaItem};
 use crate::timeline::{Event, EventKind};
 
 /// Who the schedule is for, how it is ordered and where its breaks go.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Params<'a> {
     pub channel: u32,
     pub mode: Mode,
     /// `None` schedules each program whole, with no breaks.
     pub breaks: Option<BreakPlan<'a>>,
+    /// What plays between two programs; `None` is nothing.
+    pub between: Option<BetweenPlan<'a>>,
     /// Programs start on multiples of this, in epoch time, and the gap before
     /// each is filled. `None` runs programs back to back.
     pub grid_ms: Option<u64>,
@@ -60,6 +64,8 @@ impl<'a> Lane<'a> {
 pub(crate) struct Layout<'a> {
     pub channel: u32,
     pub breaks: Option<BreakPlan<'a>>,
+    /// As [`Params::between`].
+    pub between: Option<BetweenPlan<'a>>,
     /// As [`Params::grid_ms`].
     pub grid_ms: Option<u64>,
     /// One lane per block, in config order, then the default's lane if there
@@ -89,17 +95,19 @@ pub(crate) struct Resume {
     /// items cooling down; a blocks channel's lanes each look for their own
     /// items.
     pub recent: Vec<MediaId>,
-    /// The start time and media id of the last break clip scheduled before
-    /// this run. The break pool's rotation continues after it unless the next
-    /// break starts more than [`ROTATION_MEMORY_MS`](super::ROTATION_MEMORY_MS) later.
-    pub last_break: Option<(i64, MediaId)>,
-    /// The start times and media ids of the break clips scheduled before
-    /// this run, newest first, back to [`BreakPlan::memory_ms`]: what the
-    /// break pool's `repeat_after` counts from.
+    /// The start times and media ids of the clips (every event that is not a
+    /// program) scheduled before this run, newest first, back to
+    /// [`memory_ms`](super::breaks::memory_ms): each break and `between`
+    /// pool's rotation continues after the newest of its clips, unless the
+    /// next draw starts more than
+    /// [`ROTATION_MEMORY_MS`](super::ROTATION_MEMORY_MS) later, and its
+    /// `repeat_after` counts from them.
     pub aired: Vec<(i64, MediaId)>,
     /// The end time and kind of the channel's last event before this run.
-    /// Only a run with nights off the air reads it, to tell a run that starts
-    /// in the gap before a sign-off from one that starts after a program.
+    /// A run with nights off the air reads it, to tell a run that starts in
+    /// the gap before a sign-off from one that starts after a program, and a
+    /// run with `between`, to place one before its first program when the
+    /// last event is a program that ends where the run starts.
     pub last_event: Option<(i64, EventKind)>,
 }
 
@@ -121,15 +129,18 @@ pub(crate) fn generate(
 ) -> Result<Generated, ScheduleError> {
     let layout = Layout {
         channel: params.channel,
-        breaks: params.breaks,
+        breaks: params.breaks.clone(),
+        between: params.between.clone(),
         grid_ms: params.grid_ms,
         lanes: vec![Lane {
             mode: params.mode,
             sources: sources.to_vec(),
         }],
         default: None,
+        // All time, so a run that starts after a program places `between`
+        // before its first program as an unbroken run does.
         spans: vec![Span {
-            start_ms,
+            start_ms: i64::MIN,
             end_ms: i64::MAX,
             block: Some(0),
         }],
@@ -196,20 +207,45 @@ fn run(
         .collect();
     let stretches = stretches(&layout.spans, &span_lanes, &layout.nights);
     let filler = usable(layout.filler);
-    let idents = layout.breaks.as_ref().map(|plan| usable(plan.idents));
+    // A break is padded from its pad pool, else from its filler pool; a
+    // `between` with a length the same, else from the channel's filler.
+    let idents = layout
+        .breaks
+        .as_ref()
+        .map_or_else(Vec::new, |plan| usable(plan.idents));
+    let break_filler = layout
+        .breaks
+        .as_ref()
+        .map_or_else(Vec::new, |plan| usable(plan.filler));
 
-    let mut rotation = layout.breaks.as_ref().map(|plan| {
-        (
-            plan.every_ms,
-            Rotation::new(
-                plan,
-                layout.channel,
-                resume.last_break.as_ref(),
-                &resume.aired,
-            ),
-        )
-    });
-    let mut last_break = resume.last_break.clone();
+    // One rotation per pool the breaks and `between` draw from.
+    let mut clips = Rotations::new(
+        layout.channel,
+        layout
+            .breaks
+            .iter()
+            .map(|plan| &plan.fill)
+            .chain(layout.between.as_ref().map(|plan| &plan.fill))
+            .flat_map(Interlude::uses)
+            .copied(),
+        &resume.aired,
+    );
+    let breaks = layout
+        .breaks
+        .as_ref()
+        .map(|plan| (plan.every_ms, plan.length_ms, clips.drawn(&plan.fill)));
+    let between = layout
+        .between
+        .as_ref()
+        .map(|plan| (plan.length_ms, clips.drawn(&plan.fill)));
+    // Whether the event before `at_ms` is a program that ends there: then
+    // `between` plays before the next one.
+    let follows_program = |out: &Out| match out.events.last() {
+        Some(event) => event.kind == EventKind::Program && event.end_ms == out.at_ms,
+        None => resume
+            .last_event
+            .is_some_and(|(end_ms, kind)| kind == EventKind::Program && end_ms == out.at_ms),
+    };
     let mut short_breaks = 0;
     let mut dead_air_ms: u64 = 0;
     let mut signed_off_without_clip = false;
@@ -233,6 +269,7 @@ fn run(
                 Some((id, ms)) => {
                     let into = out.at_ms.abs_diff(span.start_ms);
                     if into < *ms {
+                        clips.record(id, out.at_ms);
                         out.push_until(span.end_ms, id, into, ms - into, *ms, EventKind::Ident)?;
                     }
                 }
@@ -246,7 +283,14 @@ fn run(
                 dead_air_ms += out.at_ms.abs_diff(limit);
                 out.at_ms = span.end_ms;
             } else {
-                fill_with_filler(&mut out, &filler, span.start_ms, span.end_ms, limit)?;
+                fill_with_filler(
+                    &mut out,
+                    &mut clips,
+                    &filler,
+                    span.start_ms,
+                    span.end_ms,
+                    limit,
+                )?;
             }
             continue;
         };
@@ -286,21 +330,37 @@ fn run(
             let saved = hard_stop.then(|| {
                 (
                     pickers[lane].clone(),
-                    rotation.clone(),
-                    last_break.clone(),
+                    clips.clone(),
                     short_breaks,
                     out.events.len(),
                     out.at_ms,
                 )
             });
+            // Between two programs of the stretch. Before a sign-off it is
+            // taken back with the program after it.
+            if let Some((length_ms, drawn)) = &between
+                && out.at_ms > span.start_ms
+                && follows_program(&out)
+            {
+                let (pieces, short) =
+                    clips.interlude(drawn, out.at_ms, *length_ms, &idents, &filler);
+                short_breaks += usize::from(short);
+                if push_pieces(&mut out, pieces, cut_at)? {
+                    clips.forget_from(cut_at);
+                }
+                if !hard_stop && out.at_ms >= limit {
+                    break;
+                }
+            }
             // On a grid the time to the next grid line is filled first, cut at
             // the end of the stretch.
             if let Some(grid) = layout.grid_ms.filter(|grid| *grid > 0) {
                 let gap = grid_gap(out.at_ms, grid);
                 if gap > 0 {
                     let pieces = fill_gap(
-                        rotation.as_mut().map(|(_, rotation)| rotation),
-                        idents.as_deref().unwrap_or(&[]),
+                        &mut clips,
+                        breaks.as_ref().map(|(_, _, drawn)| drawn),
+                        &idents,
                         &filler,
                         out.at_ms,
                         gap,
@@ -312,9 +372,8 @@ fn run(
                             .saturating_add(i64::try_from(gap).unwrap_or(i64::MAX))
                             .min(span.end_ms);
                     } else {
-                        let dropped = push_pieces(&mut out, pieces, span.end_ms, &mut last_break)?;
-                        if dropped && let Some((_, rotation)) = rotation.as_mut() {
-                            rotation.continue_after(last_break.as_ref(), span.end_ms);
+                        if push_pieces(&mut out, pieces, span.end_ms)? {
+                            clips.forget_from(span.end_ms);
                         }
                     }
                     if out.at_ms >= limit {
@@ -327,7 +386,7 @@ fn run(
             let runtime = item.runtime_ms;
             let mut dropped_break = false;
             let mut segment_from = 0;
-            if let Some((every_ms, rotation)) = rotation.as_mut() {
+            if let Some((every_ms, length_ms, drawn)) = &breaks {
                 for cut in cut_points(item, *every_ms) {
                     // A break that would start at or after the end of the
                     // block never plays, so it is not filled and not counted
@@ -339,7 +398,8 @@ fn run(
                     else {
                         break;
                     };
-                    let (pieces, short) = rotation.fill(starts_at);
+                    let (pieces, short) =
+                        clips.interlude(drawn, starts_at, Some(*length_ms), &idents, &break_filler);
                     short_breaks += usize::from(short);
                     // A break with nothing to show is left out and the program
                     // runs on.
@@ -354,7 +414,7 @@ fn run(
                         runtime,
                         EventKind::Program,
                     )?;
-                    dropped_break |= push_pieces(&mut out, pieces, cut_at, &mut last_break)?;
+                    dropped_break |= push_pieces(&mut out, pieces, cut_at)?;
                     segment_from = cut;
                 }
             }
@@ -366,13 +426,12 @@ fn run(
                 runtime,
                 EventKind::Program,
             )?;
-            if let Some((picker, saved_rotation, saved_break, saved_short, len, at_ms)) = saved
+            if let Some((picker, saved_clips, saved_short, len, at_ms)) = saved
                 && (out.at_ms > span.end_ms || probe_for.is_some())
             {
                 let overran = out.at_ms > span.end_ms;
                 pickers[lane] = picker;
-                rotation = saved_rotation;
-                last_break = saved_break;
+                clips = saved_clips;
                 short_breaks = saved_short;
                 out.events.truncate(len);
                 out.at_ms = probe_for.take().unwrap_or(at_ms);
@@ -383,10 +442,10 @@ fn run(
                 continue;
             }
             // Break clips cut off by the end of a block never play, so the
-            // rotation continues after the last one that does and the repeat
-            // limit forgets them.
-            if dropped_break && let Some((_, rotation)) = rotation.as_mut() {
-                rotation.continue_after(last_break.as_ref(), cut_at);
+            // rotations continue after the last one that does and the repeat
+            // limits forget them.
+            if dropped_break {
+                clips.forget_from(cut_at);
             }
             for picker in pickers.iter_mut().flatten() {
                 picker.record(&item.id);
@@ -401,7 +460,14 @@ fn run(
                 dead_air_ms += out.at_ms.abs_diff(limit);
                 out.at_ms = span.end_ms;
             } else {
-                fill_with_filler(&mut out, &filler, span.end_ms, span.end_ms, limit)?;
+                fill_with_filler(
+                    &mut out,
+                    &mut clips,
+                    &filler,
+                    span.end_ms,
+                    span.end_ms,
+                    limit,
+                )?;
             }
         }
     }
@@ -435,19 +501,12 @@ fn grid_gap(at_ms: i64, grid_ms: u64) -> u64 {
     }
 }
 
-/// Pushes a break's or gap's pieces, cut at `cut_at`, and records each break
-/// clip that plays in `last_break`. Returns whether a break clip was cut off
-/// entirely.
-fn push_pieces(
-    out: &mut Out,
-    pieces: Vec<Piece>,
-    cut_at: i64,
-    last_break: &mut Option<(i64, MediaId)>,
-) -> Result<bool, ScheduleError> {
+/// Pushes a break's, gap's or `between`'s pieces, cut at `cut_at`. Returns
+/// whether a piece was cut off entirely; the caller then forgets its airing.
+fn push_pieces(out: &mut Out, pieces: Vec<Piece>, cut_at: i64) -> Result<bool, ScheduleError> {
     let mut dropped = false;
     for piece in pieces {
-        let piece_at = out.at_ms;
-        let placed = out.push_until(
+        dropped |= !out.push_until(
             cut_at,
             &piece.media_id,
             0,
@@ -455,13 +514,6 @@ fn push_pieces(
             piece.media_duration_ms,
             piece.kind,
         )?;
-        if piece.kind == EventKind::Break {
-            if placed {
-                *last_break = Some((piece_at, piece.media_id));
-            } else {
-                dropped = true;
-            }
-        }
     }
     Ok(dropped)
 }
@@ -472,6 +524,7 @@ fn push_pieces(
 /// run resumes does not change what plays. `clips` is not empty.
 fn fill_with_filler(
     out: &mut Out,
+    rotations: &mut Rotations<'_>,
     clips: &[(MediaId, u64)],
     anchor_ms: i64,
     cut_at: i64,
@@ -490,6 +543,7 @@ fn fill_with_filler(
     }
     while out.at_ms < limit {
         let (id, ms) = &clips[i];
+        rotations.record(id, out.at_ms);
         out.push_until(cut_at, id, offset, ms - offset, *ms, EventKind::Filler)?;
         offset = 0;
         i = (i + 1) % clips.len();

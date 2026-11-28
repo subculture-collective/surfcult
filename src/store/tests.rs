@@ -481,38 +481,46 @@ fn reading_the_last_program_uses_the_index() {
 }
 
 #[test]
-fn breaks_between_are_the_breaks_in_the_window_newest_first() {
+fn clips_between_are_the_clips_in_the_window_newest_first() {
     let mut store = Store::open_in_memory().unwrap();
     store.write_events(3, &schedule()).unwrap();
     store
-        .write_events(3, &[event(40_000, 41_000, "ad2", EventKind::Break)])
+        .write_events(
+            3,
+            &[
+                event(40_000, 41_000, "ad2", EventKind::Break),
+                event(41_000, 42_000, "bump", EventKind::Ident),
+            ],
+        )
         .unwrap();
     let ad = (10_000, MediaId::new("ad"));
+    let filler = (30_000, MediaId::new("b"));
     let ad2 = (40_000, MediaId::new("ad2"));
+    let bump = (41_000, MediaId::new("bump"));
 
     assert_eq!(
-        store.breaks_between(3, 0, i64::MAX).unwrap(),
-        [ad2.clone(), ad.clone()]
+        store.clips_between(3, 0, i64::MAX).unwrap(),
+        [bump.clone(), ad2.clone(), filler.clone(), ad.clone()]
     );
-    // The upper bound is exclusive; programs and filler are skipped.
+    // The upper bound is exclusive; programs are skipped.
     assert_eq!(
-        store.breaks_between(3, 0, 40_000).unwrap(),
-        std::slice::from_ref(&ad)
+        store.clips_between(3, 0, 40_000).unwrap(),
+        [filler.clone(), ad.clone()]
     );
-    assert!(store.breaks_between(3, 0, 10_000).unwrap().is_empty());
-    assert!(store.breaks_between(4, 0, i64::MAX).unwrap().is_empty());
+    assert!(store.clips_between(3, 0, 10_000).unwrap().is_empty());
+    assert!(store.clips_between(4, 0, i64::MAX).unwrap().is_empty());
     // The lower bound is inclusive, and the walk stops there.
-    assert_eq!(store.breaks_between(3, 10_000, 40_000).unwrap(), [ad]);
-    assert!(store.breaks_between(3, 10_001, 40_000).unwrap().is_empty());
-    assert_eq!(store.breaks_between(3, 10_001, i64::MAX).unwrap(), [ad2]);
+    assert_eq!(store.clips_between(3, 10_000, 30_000).unwrap(), [ad]);
+    assert!(store.clips_between(3, 10_001, 30_000).unwrap().is_empty());
+    assert_eq!(store.clips_between(3, 40_001, i64::MAX).unwrap(), [bump]);
 }
 
 #[test]
-fn reading_recent_breaks_uses_the_index() {
+fn reading_recent_clips_uses_the_index() {
     let store = Store::open_in_memory().unwrap();
     let plan: Vec<String> = store
         .conn
-        .prepare(&format!("EXPLAIN QUERY PLAN {BREAKS_BETWEEN}"))
+        .prepare(&format!("EXPLAIN QUERY PLAN {CLIPS_BETWEEN}"))
         .unwrap()
         .query_map(params![3, 0, 10], |row| row.get::<_, String>(3))
         .unwrap()
