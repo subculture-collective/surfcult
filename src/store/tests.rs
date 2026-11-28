@@ -1076,3 +1076,41 @@ fn a_viewer_setting_is_absent_until_chosen_and_the_last_choice_wins() {
     assert_eq!(store.viewer_setting("crt").unwrap().as_deref(), Some("off"));
     assert_eq!(store.viewer_setting("other").unwrap(), None);
 }
+
+#[test]
+fn clip_probes_are_stored_replaced_and_removed() {
+    use crate::clips::{ProbeChanges, ProbeRecord, Stamp};
+    let mut store = Store::open_in_memory().unwrap();
+    let record = |name: &str, size: u64, probed: Result<Duration, String>| ProbeRecord {
+        path: PathBuf::from(format!("/clips/{name}")),
+        stamp: Stamp {
+            modified_ns: 1_700_000_000_123_456_789,
+            size,
+        },
+        probed,
+    };
+    let a = record("a.mp4", 10, Ok(Duration::from_nanos(90_016_000_123)));
+    let bad = record(
+        "bad.mp4",
+        3,
+        Err("ffprobe cannot read the file (exit 1)".into()),
+    );
+    store
+        .save_clip_probes(&ProbeChanges {
+            saved: vec![a.clone(), bad.clone()],
+            removed: Vec::new(),
+        })
+        .unwrap();
+    let mut stored = store.clip_probes().unwrap();
+    stored.sort_by(|x, y| x.path.cmp(&y.path));
+    assert_eq!(stored, [a.clone(), bad.clone()]);
+
+    let a2 = record("a.mp4", 11, Ok(Duration::from_secs(30)));
+    store
+        .save_clip_probes(&ProbeChanges {
+            saved: vec![a2.clone()],
+            removed: vec![bad.path.clone()],
+        })
+        .unwrap();
+    assert_eq!(store.clip_probes().unwrap(), [a2]);
+}

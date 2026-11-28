@@ -64,9 +64,23 @@ Every path is resolved before it is checked: `..` and symlinks are followed, and
 
 `ClipLibrary::rescan()` reads the directories again, so added and removed files show up. Durations are cached by resolved path, modified time and size. A file that has not changed is not probed again, which keeps a rescan cheap on the Pi. `surfcult run` rescans at every schedule upkeep, once an hour ([run.md](run.md)). A file being copied in under a name that starts with `.`, as `rsync` does, is ignored until it is renamed into place. A file that failed to probe is cached the same way and stays reported until it changes.
 
+## The probe cache
+
+One ffprobe run takes about 0.35 s on the Pi 4B, so probing 2,000 clips takes about 12 minutes. `surfcult run` therefore keeps every probe result in the store's `clip_probes` table ([Storage](storage.md)) and never probes on the loop's thread:
+
+- `ClipLibrary::start(pools, prober, known, workers)` lists the pools and takes each file's duration from `known`, the stored results (`Store::clip_probes`), when the resolved path, modified time and size all match. It does not wait for a probe. A restart with unchanged pools probes nothing.
+- Every other file is queued for `workers` background threads; `run` uses two, so at most two ffprobe processes run at once and the other cores stay with MPV. A queued file is in no pool until its probe finishes. A rescan does not queue a file that is already waiting.
+- `ClipLibrary::collect()` takes the finished results without waiting and adds their files to their pools. `run` calls it every 5 seconds.
+- `ClipLibrary::take_changes()` returns the results to store and the paths whose rows to delete: files that left every pool, and stored rows for files that are gone at startup. `Store::save_clip_probes` writes both in one transaction.
+
+A failed probe is stored like a duration, so a bad file is not probed again on every start. A file whose modified time cannot be read is probed at every rescan and not stored. Dropping the library stops the workers; a probe already running finishes first.
+
+`ClipLibrary::scan` probes every file before it returns, with no store. Tests and the schedule tests use it, so their pools are complete from the start.
+
 ## Using the library
 
 ```rust
+// Probes every file now. `ClipLibrary::start` probes in the background instead.
 let library = ClipLibrary::scan(&config.pools, FfprobeProber::new());
 if let Some(pool) = library.pool("ads-90s") {
     for clip in pool.clips() {

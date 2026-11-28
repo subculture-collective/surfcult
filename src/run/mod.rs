@@ -151,6 +151,9 @@ struct PictureShown {
 }
 
 /// What schedule upkeep remembers between runs.
+/// How often the loop takes finished background clip probes.
+const CLIPS_EVERY_MS: i64 = 5_000;
+
 #[derive(Default)]
 struct Upkeep {
     due_ms: i64,
@@ -207,6 +210,10 @@ pub struct Tv<P, I> {
     cover_images: HashMap<MediaId, Option<Image>>,
     /// Covers asked for that have not arrived.
     covers_asked: HashSet<MediaId>,
+    /// When finished clip probes are next taken from the library.
+    clips_due_ms: i64,
+    /// The clip issues already logged, so each is logged once.
+    clip_issues: HashSet<String>,
     /// The clock slate is up until the clock is trusted.
     waiting_for_clock: bool,
     quit: bool,
@@ -231,15 +238,18 @@ impl<P: Player, I: Input> Tv<P, I> {
             .pool(&config.tune_in_pool)
             .map(|pool| pool.clips().to_vec())
             .unwrap_or_default();
-        if tune_in.is_empty() {
+        if tune_in.is_empty() && clips.pending() == 0 {
             eprintln!(
                 "surfcult: the tune-in pool {:?} has no clips; a channel change goes straight to the program",
                 config.tune_in_pool
             );
         }
+        if clips.pending() > 0 {
+            eprintln!("surfcult: probing {} new clips", clips.pending());
+        }
         let mut numbers: Vec<u32> = config.channels.iter().map(|c| c.number).collect();
         numbers.sort_unstable();
-        Self {
+        let mut tv = Self {
             config,
             numbers,
             tuner: Tuner::new(player, tune_in, settings.timing),
@@ -264,9 +274,13 @@ impl<P: Player, I: Input> Tv<P, I> {
             covers: None,
             cover_images: HashMap::new(),
             covers_asked: HashSet::new(),
+            clips_due_ms: 0,
+            clip_issues: HashSet::new(),
             waiting_for_clock: false,
             quit: false,
-        }
+        };
+        tv.log_clip_issues();
+        tv
     }
 
     /// Takes album covers for the cover card from `covers`. Without them
@@ -280,6 +294,7 @@ impl<P: Player, I: Input> Tv<P, I> {
     /// instead and does the rest once it is.
     pub fn start(&mut self, now_ms: i64, store: &mut Store) {
         self.load_viewer_settings(store);
+        self.save_clip_probes(store);
         if !(self.clock_trusted)() {
             eprintln!(
                 "surfcult: the clock is not synchronized; showing the clock slate until it is"
@@ -334,6 +349,12 @@ impl<P: Player, I: Input> Tv<P, I> {
         self.draw_menu();
         self.show_picture(store);
         self.show_watermark(now_ms);
+        if now_ms >= self.clips_due_ms {
+            self.clips_due_ms = now_ms.saturating_add(CLIPS_EVERY_MS);
+            if self.clips.collect() {
+                self.clips_changed(store);
+            }
+        }
         if now_ms >= self.upkeep.due_ms {
             self.keep_schedules(now_ms, store);
         }
@@ -1070,8 +1091,14 @@ impl<P: Player, I: Input> Tv<P, I> {
         self.upkeep.due_ms = now_ms.saturating_add(self.settings.upkeep_every_ms);
         let changes = std::mem::take(&mut self.upkeep.changes);
         // Clips added to or removed from a pool since the last upkeep count
-        // from here on. Unchanged files are not probed again.
-        self.clips.rescan();
+        // from here on. Unchanged files are not probed again; new and
+        // changed ones are probed in the background and join their pools
+        // when done.
+        let queued = self.clips.rescan();
+        if queued > 0 {
+            eprintln!("surfcult: probing {queued} new clips");
+        }
+        self.clips_changed(store);
         let pools_now = self.clips.pools();
         for channel in &self.config.channels {
             let n = channel.number;
@@ -1113,6 +1140,40 @@ impl<P: Player, I: Input> Tv<P, I> {
             }
         }
         self.driver.invalidate();
+    }
+}
+
+impl<P: Player, I: Input> Tv<P, I> {
+    /// Follows a change to the clip pools: stores the new probe results,
+    /// logs new issues and gives the tuner the tune-in pool's clips.
+    fn clips_changed(&mut self, store: &mut Store) {
+        self.save_clip_probes(store);
+        self.log_clip_issues();
+        let tune_in = self
+            .clips
+            .pool(&self.config.tune_in_pool)
+            .map(|pool| pool.clips().to_vec())
+            .unwrap_or_default();
+        self.tuner.set_tune_in(tune_in);
+    }
+
+    fn save_clip_probes(&mut self, store: &mut Store) {
+        let changes = self.clips.take_changes();
+        if !changes.is_empty()
+            && let Err(e) = store.save_clip_probes(&changes)
+        {
+            eprintln!("surfcult: cannot store clip durations: {e}");
+        }
+    }
+
+    /// Logs each clip issue the first time it appears. An issue that goes
+    /// away and comes back is logged again.
+    fn log_clip_issues(&mut self) {
+        let now: HashSet<String> = self.clips.issues().map(ToString::to_string).collect();
+        for issue in now.difference(&self.clip_issues) {
+            eprintln!("surfcult: clip skipped: {issue}");
+        }
+        self.clip_issues = now;
     }
 }
 

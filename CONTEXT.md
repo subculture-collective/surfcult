@@ -25,6 +25,7 @@ The words surfcult's code and documentation use, and the code item each one name
 
 - **Clip**: a short local video file and its probed duration, `clips::Clip`: an ad, ident, bumper, tune-in clip, filler or slate.
 - **Clip pool**: a named directory of clips on the Pi, `clips::Pool`, scanned by `clips::ClipLibrary`. It is not a program pool.
+- **Probe cache**: each clip file's probed duration or probe failure, kept by resolved path, modified time and size in the store's `clip_probes` table (`clips::ProbeRecord`), so a restart does not probe unchanged files. `ClipLibrary::start` reads it and probes the other files on background threads.
 - **Tune-in clip**: the clip the `tuner` plays between static and the program when the viewer changes channel. It is picked from the tune-in clip pool to cover the program's expected start-up time.
 
 ## Schedule

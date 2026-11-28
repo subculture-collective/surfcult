@@ -299,6 +299,12 @@ impl<P: Player> Tuner<P> {
         }
     }
 
+    /// Replaces the clips tune-ins are picked from, for when the tune-in
+    /// pool changes. A tune-in already playing goes on.
+    pub fn set_tune_in(&mut self, tune_in: Vec<Clip>) {
+        self.tune_in = tune_in;
+    }
+
     pub fn state(&self) -> &State {
         &self.state
     }
