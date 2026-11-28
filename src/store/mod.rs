@@ -137,6 +137,12 @@ impl Store {
         if wal {
             conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))
                 .map_err(StoreError::database(action))?;
+            // In WAL mode NORMAL is still consistent after a crash; it only
+            // skips the fsync at each commit, which costs the run loop tens
+            // of milliseconds on an SD card. A power cut can lose the last
+            // commit, and every table here can be rebuilt or regenerated.
+            conn.pragma_update(None, "synchronous", "NORMAL")
+                .map_err(StoreError::database(action))?;
         }
         migrate::run(&mut conn)?;
         Ok(Self { conn })

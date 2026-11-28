@@ -24,7 +24,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{JellyfinCovers, Settings, Tv, clock_trusted, jellyfin_streams};
 use crate::clips::{ClipLibrary, FfprobeProber};
@@ -124,7 +124,9 @@ pub fn run(config_path: &Path, db_path: &Path) -> Result<(), String> {
     );
     tv.set_covers(Box::new(covers));
     tv.start(now_ms(), &mut store);
+    let mut next_tick = Instant::now();
     while !stop.load(Ordering::Relaxed) && !tv.quit_requested() {
+        next_tick += TICK;
         let now = now_ms();
         if let Some(result) = worker.apply(&mut store, now) {
             tv.synced(now, &mut store, result);
@@ -137,7 +139,15 @@ pub fn run(config_path: &Path, db_path: &Path) -> Result<(), String> {
             channel: tv.channel(),
             crt: tv.crt(),
         };
-        std::thread::sleep(TICK);
+        // Sleep to the next tick, not a whole tick after the step, so a slow
+        // step does not add its own time to the next key press. After a step
+        // longer than a tick the loop starts again at once.
+        let now = Instant::now();
+        if next_tick > now {
+            std::thread::sleep(next_tick - now);
+        } else {
+            next_tick = now;
+        }
     }
     eprintln!("surfcult: stopping");
     tv.shut_down();

@@ -750,17 +750,28 @@ impl<'a> Cooldown<'a> {
     fn pick(&self, rng: &mut SplitMix64) -> &'a MediaItem {
         // Walk back to the `cooldown` most recent distinct items. A program
         // cut into several events appears once in the walk.
-        let mut cooling = HashSet::new();
+        // A flag per item rather than a set: a music pool can hold tens of
+        // thousands of songs and this runs for every one scheduled.
+        let mut cooling = vec![false; self.playable.len()];
+        let mut count = 0;
         for &i in self.played.iter().rev() {
-            if cooling.len() == self.cooldown {
+            if count == self.cooldown {
                 break;
             }
-            cooling.insert(i);
+            if !cooling[i] {
+                cooling[i] = true;
+                count += 1;
+            }
         }
-        let eligible: Vec<usize> = (0..self.playable.len())
-            .filter(|i| !cooling.contains(i))
-            .collect();
-        self.playable[eligible[rng.below(eligible.len())]]
+        // The same draw as indexing a list of the eligible items.
+        let nth = rng.below(self.playable.len() - count);
+        let index = cooling
+            .iter()
+            .enumerate()
+            .filter(|(_, cool)| !**cool)
+            .nth(nth)
+            .map_or(0, |(i, _)| i);
+        self.playable[index]
     }
 
     fn record(&mut self, id: &MediaId) {

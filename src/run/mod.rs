@@ -426,7 +426,11 @@ impl<P: Player, I: Input> Tv<P, I> {
                 pending.renamed.extend(changes.renamed);
                 pending.resized.extend(changes.resized);
                 pending.vanished.extend(changes.vanished);
-                self.keep_schedules(now_ms, store);
+                // An unchanged library leaves the schedules as they were;
+                // the hourly upkeep keeps them filled.
+                if report.written || !pending.is_empty() {
+                    self.keep_schedules(now_ms, store);
+                }
             }
             Err(e) => {
                 eprintln!("surfcult: the library sync failed; keeping the cached library: {e}")

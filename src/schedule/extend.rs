@@ -74,12 +74,11 @@ pub fn extend(
         .ok_or(ScheduleError::TimeOutOfRange)?;
     let n = channel.number;
 
-    // Events that end after `now_ms`; the last of them is where to continue.
-    let last_end = store
-        .events_between(n, now_ms, i64::MAX)?
-        .last()
-        .map(|event| event.end_ms);
-    let from_ms = last_end.map_or(now_ms, |end| end.max(now_ms));
+    // The end of the last stored event is where to continue; one row of the
+    // primary key, not the stored week.
+    let from_ms = store
+        .schedule_end_ms(n)?
+        .map_or(now_ms, |end| end.max(now_ms));
     if from_ms >= horizon_ms {
         return Ok(Extended::UpToDate { until_ms: from_ms });
     }
