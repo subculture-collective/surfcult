@@ -249,7 +249,9 @@ impl Rig {
             "#
         );
         let config = Config::parse(&text).unwrap();
-        let lengths = Lengths(CLIPS.iter().map(|(_, f, ms)| (*f, *ms)).collect());
+        let mut lengths = Lengths(CLIPS.iter().map(|(_, f, ms)| (*f, *ms)).collect());
+        // A clip no pool has at startup, for tests that add it later.
+        lengths.0.insert("late.mp4", 20_000);
         let clips = ClipLibrary::scan(&config.pools, lengths);
         assert_eq!(clips.issues().count(), 0);
 
@@ -1512,6 +1514,36 @@ fn the_web_admin_tunes_known_channels_and_sets_the_crt_filter() {
         rig.store.viewer_setting("crt").unwrap().as_deref(),
         Some("light")
     );
+}
+
+#[test]
+fn upkeep_picks_up_clips_added_to_a_pool_while_running() {
+    let mut rig = Rig::new();
+    rig.start();
+    let names = |rig: &Rig| -> Vec<String> {
+        rig.tv
+            .clips
+            .pool("filler")
+            .unwrap()
+            .clips()
+            .iter()
+            .map(|clip| {
+                clip.path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
+    };
+    assert_eq!(names(&rig), ["filler.mp4"]);
+
+    std::fs::write(rig._dir.path().join("filler/late.mp4"), b"clip").unwrap();
+    rig.step(T + MIN);
+    assert_eq!(names(&rig), ["filler.mp4"], "not before the next upkeep");
+
+    rig.step(T + 60 * MIN);
+    assert_eq!(names(&rig), ["filler.mp4", "late.mp4"]);
 }
 
 #[test]

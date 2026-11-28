@@ -1069,6 +1069,9 @@ impl<P: Player, I: Input> Tv<P, I> {
         self.upkeep.clock_logged = false;
         self.upkeep.due_ms = now_ms.saturating_add(self.settings.upkeep_every_ms);
         let changes = std::mem::take(&mut self.upkeep.changes);
+        // Clips added to or removed from a pool since the last upkeep count
+        // from here on. Unchanged files are not probed again.
+        self.clips.rescan();
         let pools_now = self.clips.pools();
         for channel in &self.config.channels {
             let n = channel.number;

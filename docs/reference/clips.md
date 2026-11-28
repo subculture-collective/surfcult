@@ -62,7 +62,7 @@ Every path is resolved before it is checked: `..` and symlinks are followed, and
 
 ## Rescanning
 
-`ClipLibrary::rescan()` reads the directories again, so added and removed files show up. Durations are cached by resolved path, modified time and size. A file that has not changed is not probed again, which keeps a rescan cheap on the Pi. A file that failed to probe is cached the same way and stays reported until it changes.
+`ClipLibrary::rescan()` reads the directories again, so added and removed files show up. Durations are cached by resolved path, modified time and size. A file that has not changed is not probed again, which keeps a rescan cheap on the Pi. `surfcult run` rescans at every schedule upkeep, once an hour ([run.md](run.md)). A file being copied in under a name that starts with `.`, as `rsync` does, is ignored until it is renamed into place. A file that failed to probe is cached the same way and stays reported until it changes.
 
 ## Using the library
 
