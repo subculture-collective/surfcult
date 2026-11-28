@@ -651,6 +651,150 @@ fn migration_4_keeps_cached_collections_and_adds_source_fields() {
 }
 
 #[test]
+fn migration_7_keeps_the_cached_library_and_adds_music_videos() {
+    use crate::library::{
+        AudioStream, Chapter, Collection, MediaItem, MediaKind, SeriesEpisode, VideoStream,
+    };
+
+    // A database a version-6 build left behind, with an episode that has a
+    // chapter, streams and labels, and a collection that lists it.
+    let db = TempDb::new();
+    {
+        let conn = Connection::open(db.path()).unwrap();
+        conn.execute_batch(concat!(
+            "CREATE TABLE schema_migrations (
+                version       INTEGER PRIMARY KEY,
+                name          TEXT    NOT NULL,
+                applied_at_ms INTEGER NOT NULL
+            );",
+            include_str!("../../migrations/0001_schedule.sql"),
+            include_str!("../../migrations/0002_library_cache.sql"),
+            include_str!("../../migrations/0003_drop_cursors.sql"),
+            include_str!("../../migrations/0004_library_sources.sql"),
+            include_str!("../../migrations/0005_substitutions.sql"),
+            include_str!("../../migrations/0006_viewer_settings.sql"),
+            "INSERT INTO schema_migrations VALUES
+                 (1, 'schedule', 1), (2, 'library_cache', 2), (3, 'drop_cursors', 3),
+                 (4, 'library_sources', 4), (5, 'substitutions', 5),
+                 (6, 'viewer_settings', 6);
+             INSERT INTO library_items
+                 (id, position, title, kind, runtime_ms, path, synced_at_ms,
+                  series_id, series_name, season, episode)
+                 VALUES ('a', 0, 'A', 'episode', 1000, '/a.mkv', 7, 's', 'S', 1, 2);
+             INSERT INTO library_chapters VALUES ('a', 0, 500, 'Two');
+             INSERT INTO library_streams VALUES
+                 ('a', 'video', 0, 'h264', 640, 480, 8, NULL, NULL),
+                 ('a', 'audio', 0, 'aac', NULL, NULL, NULL, 2, 'eng');
+             INSERT INTO library_item_labels VALUES
+                 ('a', 'library', 0, 'TV'), ('a', 'tag', 0, 'Retro'), ('a', 'genre', 0, 'Comedy');
+             INSERT INTO library_collections VALUES (0, 'Cartoons');
+             INSERT INTO library_collection_members VALUES (0, 0, 's');",
+        ))
+        .unwrap();
+    }
+
+    let mut store = Store::open(db.path()).unwrap();
+
+    let episode = LibraryEntry {
+        item: MediaItem {
+            chapters: vec![Chapter {
+                start_ms: 500,
+                name: Some("Two".into()),
+            }],
+            video: vec![VideoStream {
+                codec: "h264".into(),
+                width: 640,
+                height: 480,
+                bit_depth: Some(8),
+            }],
+            audio: vec![AudioStream {
+                codec: "aac".into(),
+                channels: 2,
+                language: Some("eng".into()),
+            }],
+            libraries: vec!["TV".into()],
+            tags: vec!["Retro".into()],
+            genres: vec!["Comedy".into()],
+            series: Some(SeriesEpisode {
+                series_id: MediaId::new("s"),
+                series_name: "S".into(),
+                season: Some(1),
+                number: Some(2),
+            }),
+            ..MediaItem::new("a", "A", MediaKind::Episode, 1000)
+        },
+        path: Some("/a.mkv".into()),
+    };
+    assert_eq!(store.library_items().unwrap(), [episode]);
+    assert_eq!(
+        store.library_collections().unwrap(),
+        [Collection {
+            name: "Cartoons".into(),
+            members: ids(&["s"]),
+        }]
+    );
+    let problems: i64 = store
+        .conn
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(problems, 0);
+    // The rebuilt children point at `library_items`, not at the old name.
+    let stale: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%library_items_new%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale, 0);
+    // A kind the table does not list is refused.
+    assert!(
+        store
+            .conn
+            .execute(
+                "INSERT INTO library_items (id, position, title, kind, runtime_ms, synced_at_ms)
+                 VALUES ('x', 1, 'X', 'song', 1, 1)",
+                [],
+            )
+            .is_err()
+    );
+
+    // A music video can now be cached, and replacing the cache still removes
+    // the old item's chapters, streams and labels through their foreign keys.
+    let video = LibraryEntry {
+        item: MediaItem {
+            artists: vec!["Artist".into()],
+            album: Some("Album".into()),
+            ..MediaItem::new("v", "Song", MediaKind::MusicVideo, 240_000)
+        },
+        path: None,
+    };
+    store
+        .replace_library(std::slice::from_ref(&video), &[], 8)
+        .unwrap();
+    assert_eq!(store.library_items().unwrap(), [video]);
+    for table in ["library_chapters", "library_streams"] {
+        let rows: i64 = store
+            .conn
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "{table}");
+    }
+    let labels: i64 = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM library_item_labels WHERE item_id = 'a'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(labels, 0);
+}
+
+#[test]
 fn playback_history_round_trips_newest_first_per_channel() {
     let db = TempDb::new();
     let mut store = Store::open(db.path()).unwrap();

@@ -152,3 +152,24 @@ fn next_names_the_program_after_the_one_on_and_is_empty_otherwise() {
     // Off the air, nothing is on to follow.
     assert_eq!(banner(&channel(), &store, at(22, 0), Tz::UTC).next, "");
 }
+
+#[test]
+fn a_music_video_is_titled_artist_then_title() {
+    let mut store = Store::open_in_memory().unwrap();
+    let mut video = MediaItem::new("mv", "Song", MediaKind::MusicVideo, 240_000);
+    video.artists = vec!["Artist".into(), "Guest".into()];
+    let mut bare = MediaItem::new("bare", "Instrumental", MediaKind::MusicVideo, 180_000);
+    bare.album = Some("Album".into());
+    let entries: Vec<LibraryEntry> = [video, bare]
+        .into_iter()
+        .map(|item| LibraryEntry { item, path: None })
+        .collect();
+    store.replace_library(&entries, &[], 0).unwrap();
+
+    assert_eq!(
+        program_title(&MediaId::new("mv"), &store),
+        "Artist, Guest – Song"
+    );
+    // Without artists the title stands alone; the album is not shown.
+    assert_eq!(program_title(&MediaId::new("bare"), &store), "Instrumental");
+}

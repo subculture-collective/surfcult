@@ -19,7 +19,7 @@ surfcult schedule --day <channels.toml> <db>
    6  NEWS  nothing scheduled
 ```
 
-A program line has the title (`Series: Episode` for an episode), the local start and end of the whole program, breaks included, and the live position in the media. A break, filler or ident line has the clip's file name, the event's times and the position in the clip. `off the air until` gives the start of the next stored event; `nothing scheduled` means the store has no event for the next seven days. `run` and `now` read the same clock, so `now` run at the moment the TV changes channel shows what the TV should be showing.
+A program line has the title (`Series: Episode` for an episode, `Artist – Title` for a music video), the local start and end of the whole program, breaks included, and the live position in the media. A break, filler or ident line has the clip's file name, the event's times and the position in the clip. `off the air until` gives the start of the next stored event; `nothing scheduled` means the store has no event for the next seven days. `run` and `now` read the same clock, so `now` run at the moment the TV changes channel shows what the TV should be showing.
 
 `schedule --day` is read-only like `now`: it prints the stored schedule, never a new draw, and needs no Jellyfin. Each channel in the config gets its number and name, then one indented line per program that overlaps the next 24 hours, with the program's local start and end (breaks included, as in the guide) and its title, or `nothing scheduled`:
 
@@ -164,7 +164,7 @@ The stream resolver asks Jellyfin how to play each program (`JellyfinClient::pla
 The banner shows when a channel change has settled, on the program or on the stand-by card, when the player restarted and the tuner tuned again, and on OK. It stays up for `SURFCULT_BANNER_SECONDS` (5 s). It says, across the bottom of the screen:
 
 1. the channel number and name;
-2. the program on now (`Series: Episode` for an episode). A break inside the program still names the program. A break, filler or ident between programs shows `NEXT:` and the next program. A gap shows `OFF THE AIR`, and a channel with nothing stored for seven days `NO SCHEDULE`;
+2. the program on now (`Series: Episode` for an episode, `Artist – Title` for a music video). A break inside the program still names the program. A break, filler or ident between programs shows `NEXT:` and the next program. A gap shows `OFF THE AIR`, and a channel with nothing stored for seven days `NO SCHEDULE`;
 3. the program's local start and end (`19:00–19:30`, breaks included), or `BACK AT 06:00` when off the air.
 4. while a program is on, the one after it: `NEXT 19:30` and its title, when it starts within the next three hours.
 

@@ -13,6 +13,10 @@ use crate::store::{LibraryEntry, StoreError};
 /// Items asked for per request.
 const PAGE_SIZE: usize = 500;
 
+/// The Jellyfin item types the sync caches, as `IncludeItemTypes` lists them.
+/// `wire::parse_item` maps each one to a `MediaKind`.
+const PLAYABLE_TYPES: &str = "Movie,Episode,MusicVideo";
+
 /// Why talking to Jellyfin, or caching what it said, failed. None of these
 /// carry the API key.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,16 +203,16 @@ impl JellyfinClient {
         self.get_list("/Items", query)
     }
 
-    /// Fetches the playable movies and episodes with their series, tags,
-    /// genres and libraries, and the collections.
+    /// Fetches the playable movies, episodes and music videos with their
+    /// series, artists, tags, genres and libraries, and the collections.
     pub(super) fn fetch_library(&self) -> Result<FetchedLibrary, JellyfinError> {
         let mut skipped = 0;
         let mut entries: Vec<LibraryEntry> = Vec::new();
         let mut seen = HashSet::new();
-        for value in self.get_items(
-            "Recursive=true&IncludeItemTypes=Movie,Episode\
-             &Fields=MediaStreams,Chapters,Path,MediaSources,Tags,Genres&SortBy=SortName",
-        )? {
+        for value in self.get_items(&format!(
+            "Recursive=true&IncludeItemTypes={PLAYABLE_TYPES}\
+             &Fields=MediaStreams,Chapters,Path,MediaSources,Tags,Genres&SortBy=SortName"
+        ))? {
             match wire::parse_item(value) {
                 Parsed::Playable(entry) => {
                     // Paging by name can repeat an item that shares its name with another.
@@ -259,8 +263,8 @@ impl JellyfinClient {
         Ok(())
     }
 
-    /// Fetches each library (Jellyfin's media folders) and the movies and
-    /// episodes in it, and adds the library's name to those items.
+    /// Fetches each library (Jellyfin's media folders) and the playable items
+    /// in it, and adds the library's name to those items.
     fn add_libraries(&self, entries: &mut [LibraryEntry]) -> Result<(), JellyfinError> {
         let index: HashMap<String, usize> = entries
             .iter()
@@ -273,7 +277,7 @@ impl JellyfinClient {
             };
             let name = raw.name.unwrap_or_else(|| raw.id.clone());
             let children = self.get_items(&format!(
-                "ParentId={}&Recursive=true&IncludeItemTypes=Movie,Episode&SortBy=SortName",
+                "ParentId={}&Recursive=true&IncludeItemTypes={PLAYABLE_TYPES}&SortBy=SortName",
                 encode(&raw.id)
             ))?;
             for child in children {
@@ -312,7 +316,7 @@ impl JellyfinClient {
                 continue;
             };
             let children = self.get_items(&format!(
-                "ParentId={}&IncludeItemTypes=Movie,Episode,Series",
+                "ParentId={}&IncludeItemTypes={PLAYABLE_TYPES},Series",
                 encode(&raw.id)
             ))?;
             let mut members: Vec<MediaId> = Vec::new();

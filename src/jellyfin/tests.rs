@@ -22,6 +22,8 @@ const SERIES: &str = include_str!("../../tests/fixtures/jellyfin/series-page.jso
 const MEDIA_FOLDERS: &str = include_str!("../../tests/fixtures/jellyfin/media-folders.json");
 const LIBRARY_CHILDREN: &str =
     include_str!("../../tests/fixtures/jellyfin/library-children-by-parent-id.json");
+/// Two `MusicVideo` items, written by hand in the shape Jellyfin sends.
+const MUSIC_VIDEOS: &str = include_str!("../../tests/fixtures/jellyfin/music-videos-page.json");
 
 /// A value that stands for the API key. Tests look for it everywhere it must not be.
 const SENTINEL: &str = "SENTINEL-KEY-0123456789abcdef";
@@ -355,7 +357,7 @@ fn a_sync_reads_series_tags_genres_and_libraries() {
 
     let paths = http.paths();
     assert!(paths.iter().any(|p| {
-        p.starts_with("/Items?Recursive=true&IncludeItemTypes=Movie,Episode")
+        p.starts_with("/Items?Recursive=true&IncludeItemTypes=Movie,Episode,MusicVideo")
             && p.contains("Fields=MediaStreams,Chapters,Path,MediaSources,Tags,Genres")
     }));
     assert!(paths.iter().any(|p| {
@@ -446,6 +448,88 @@ fn every_source_kind_resolves_from_a_synced_cache() {
     );
 }
 
+const VIDEO_1: &str = "6d0c1e55-0000-4000-8000-000000000001";
+const VIDEO_2: &str = "6d0c1e55-0000-4000-8000-000000000002";
+const MUSIC_VIDEOS_LIBRARY: &str = "55555555-5555-5555-5555-555555555555";
+
+/// The recorded fixtures plus a `Music Videos` library holding the two
+/// music videos in [`MUSIC_VIDEOS`].
+fn with_music_videos() -> Arc<FakeHttp> {
+    let list = |body: &str| serde_json::from_str::<Value>(body).unwrap()["Items"].clone();
+    let mut items = list(ITEMS).as_array().unwrap().clone();
+    items.extend(list(MUSIC_VIDEOS).as_array().unwrap().iter().cloned());
+    let items = json!({ "Items": items, "TotalRecordCount": items.len() }).to_string();
+    FakeHttp::new(move |path| {
+        if param(path, "ParentId") == Some(MUSIC_VIDEOS_LIBRARY) {
+            let children = [VIDEO_1, VIDEO_2].map(|id| json!({ "Id": id, "Type": "MusicVideo" }));
+            return Ok(page(&children, path, 500));
+        }
+        if path.starts_with("/Library/MediaFolders?") {
+            let mut folders = list(MEDIA_FOLDERS).as_array().unwrap().clone();
+            folders.push(json!({
+                "Name": "Music Videos", "Id": MUSIC_VIDEOS_LIBRARY,
+                "Type": "CollectionFolder", "CollectionType": "musicvideos", "IsFolder": true
+            }));
+            return Ok(page(&folders, path, 500));
+        }
+        serve_fixtures(path, 500, &items)
+    })
+}
+
+#[test]
+fn a_sync_caches_music_videos_with_their_artists_album_and_genres() {
+    let http = with_music_videos();
+    let (client, mut store) = client_and_store(&http);
+
+    let report = sync(&client, &mut store, SYNCED_AT).unwrap();
+
+    assert_eq!((report.items, report.skipped), (6, 1));
+    let video = store.resolve(&MediaId::new(VIDEO_1)).unwrap();
+    assert_eq!(video.kind, MediaKind::MusicVideo);
+    assert_eq!(video.title, "Fixture Song");
+    assert_eq!(video.artists, ["Fixture Artist", "Guest Artist"]);
+    assert_eq!(video.album.as_deref(), Some("Fixture Album"));
+    assert_eq!(video.genres, ["Alternative", "Rock"]);
+    assert_eq!(video.tags, ["Official Video"]);
+    assert_eq!(video.libraries, ["Music Videos"]);
+    assert_eq!(video.runtime_ms, 241_200);
+    assert_eq!(video.series, None);
+    assert_eq!(video.video[0].codec, "h264");
+    assert_eq!(
+        video.display_title(),
+        "Fixture Artist, Guest Artist – Fixture Song"
+    );
+
+    let bare = store.resolve(&MediaId::new(VIDEO_2)).unwrap();
+    assert!(bare.artists.is_empty());
+    assert_eq!(bare.album, None);
+    assert_eq!(bare.display_title(), "Fixture Instrumental");
+
+    // The sync asks for music videos everywhere it asks for movies.
+    let paths = http.paths();
+    for path in paths.iter().filter(|p| p.contains("Movie")) {
+        assert!(path.contains("Movie,Episode,MusicVideo"), "{path}");
+    }
+}
+
+#[test]
+fn music_video_sources_resolve_from_a_synced_cache() {
+    use crate::config::Source;
+    use crate::library::resolve_pool;
+
+    let (client, mut store) = client_and_store(&with_music_videos());
+    sync(&client, &mut store, SYNCED_AT).unwrap();
+    let pool = |source: Source| ids(&resolve_pool(7, &source, &store).unwrap()).join(" ");
+
+    assert_eq!(
+        pool(Source::JellyfinLibrary("Music Videos".into())),
+        [VIDEO_1, VIDEO_2].join(" ")
+    );
+    assert_eq!(pool(Source::JellyfinGenre("Hip-Hop".into())), VIDEO_2);
+    assert_eq!(pool(Source::JellyfinGenre("Rock".into())), VIDEO_1);
+    assert_eq!(pool(Source::JellyfinTag("Official Video".into())), VIDEO_1);
+}
+
 #[test]
 fn resolving_an_unknown_id_is_not_found() {
     let (client, mut store) = client_and_store(&FakeHttp::fixtures(500));
@@ -503,7 +587,7 @@ fn items_are_fetched_page_by_page() {
     let item_requests: Vec<String> = http
         .paths()
         .into_iter()
-        .filter(|path| path.contains("IncludeItemTypes=Movie,Episode&Fields="))
+        .filter(|path| path.contains("IncludeItemTypes=Movie,Episode,MusicVideo&Fields="))
         .collect();
     let starts: Vec<_> = item_requests
         .iter()
@@ -1631,7 +1715,7 @@ fn wait_for_fetches(fetches: &AtomicUsize, n: usize) {
 fn starts_a_fetch(path: &str) -> bool {
     param(path, "Recursive") == Some("true")
         && param(path, "ParentId").is_none()
-        && param(path, "IncludeItemTypes") == Some("Movie,Episode")
+        && param(path, "IncludeItemTypes") == Some("Movie,Episode,MusicVideo")
         && param(path, "StartIndex") == Some("0")
 }
 

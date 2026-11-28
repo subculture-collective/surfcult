@@ -29,7 +29,7 @@ pub struct LibraryEntry {
 
 /// The columns of `library_items` that [`read_entry`] reads, in its order.
 const ITEM_COLUMNS: &str =
-    "id, title, kind, runtime_ms, path, series_id, series_name, season, episode";
+    "id, title, kind, runtime_ms, path, series_id, series_name, season, episode, album";
 
 impl Store {
     /// In one transaction, replaces the whole library cache with `entries` and
@@ -408,6 +408,7 @@ fn kind_name(kind: MediaKind) -> &'static str {
     match kind {
         MediaKind::Movie => "movie",
         MediaKind::Episode => "episode",
+        MediaKind::MusicVideo => "music_video",
     }
 }
 
@@ -423,8 +424,8 @@ fn insert_entry(
     // `validate` has checked that the runtime and chapter starts fit an i64.
     tx.prepare_cached(
         "INSERT INTO library_items (id, position, title, kind, runtime_ms, path, synced_at_ms,
-                                    series_id, series_name, season, episode)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                                    series_id, series_name, season, episode, album)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
     )
     .and_then(|mut s| {
         s.execute(params![
@@ -439,6 +440,7 @@ fn insert_entry(
             series.map(|s| s.series_name.as_str()),
             series.and_then(|s| s.season),
             series.and_then(|s| s.number),
+            item.album,
         ])
     })
     .map_err(StoreError::database(action))?;
@@ -508,6 +510,7 @@ fn insert_entry(
         ("library", &item.libraries),
         ("tag", &item.tags),
         ("genre", &item.genres),
+        ("artist", &item.artists),
     ] {
         for (i, name) in names.iter().enumerate() {
             label
@@ -556,9 +559,11 @@ fn read_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<LibraryEntry, 
     let series_name: Option<String> = row.get(6)?;
     let season: Option<i64> = row.get(7)?;
     let episode: Option<i64> = row.get(8)?;
+    let album: Option<String> = row.get(9)?;
     Ok(
         build_entry(id, title, &kind, runtime_ms, path).and_then(|mut entry| {
             entry.item.series = build_series(series_id, series_name, season, episode)?;
+            entry.item.album = album;
             Ok(entry)
         }),
     )
@@ -574,6 +579,7 @@ fn build_entry(
     let kind = match kind {
         "movie" => MediaKind::Movie,
         "episode" => MediaKind::Episode,
+        "music_video" => MediaKind::MusicVideo,
         other => return Err(StoreError::Corrupt(format!("unknown item kind {other:?}"))),
     };
     let runtime_ms = u64::try_from(runtime_ms)
@@ -614,6 +620,7 @@ fn push_label(item: &mut MediaItem, kind: &str, name: String) -> Result<(), Stor
         "library" => item.libraries.push(name),
         "tag" => item.tags.push(name),
         "genre" => item.genres.push(name),
+        "artist" => item.artists.push(name),
         other => return Err(StoreError::Corrupt(format!("unknown label kind {other:?}"))),
     }
     Ok(())
@@ -755,6 +762,26 @@ mod tests {
         assert_eq!(store.library_items().unwrap(), entries);
         assert_eq!(
             store.library_item(&MediaId::new("a")).unwrap(),
+            Some(entries[0].clone())
+        );
+    }
+
+    #[test]
+    fn a_music_video_round_trips_with_its_artists_and_album() {
+        let mut store = Store::open_in_memory().unwrap();
+        let mut video = entry("v", MediaKind::MusicVideo);
+        video.item.artists = vec!["Artist".into(), "Guest".into()];
+        video.item.album = Some("Album".into());
+        video.item.genres = vec!["Alternative".into()];
+        let mut bare = entry("w", MediaKind::MusicVideo);
+        bare.item.chapters.clear();
+        let entries = vec![video, bare];
+
+        store.replace_library(&entries, &[], 1).unwrap();
+
+        assert_eq!(store.library_items().unwrap(), entries);
+        assert_eq!(
+            store.library_item(&MediaId::new("v")).unwrap(),
             Some(entries[0].clone())
         );
     }

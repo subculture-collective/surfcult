@@ -56,7 +56,7 @@ Every configured channel's programs overlapping `[from, to)`, with titles: the g
  ]}]}
 ```
 
-`title` is `Series: Episode` for an episode, the title for anything else, or `UNKNOWN PROGRAM` when the item has left the library. A cell's start and end are the program's own, not clipped to the window.
+`title` is `Series: Episode` for an episode, `Artist – Title` for a music video with artists, the title for anything else, or `UNKNOWN PROGRAM` when the item has left the library. A cell's start and end are the program's own, not clipped to the window.
 
 ### `GET /xmltv.xml`
 

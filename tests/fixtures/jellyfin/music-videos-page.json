@@ -1,0 +1,76 @@
+{
+ "Items": [
+  {
+   "Name": "Fixture Song",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "6d0c1e55-0000-4000-8000-000000000001",
+   "RunTimeTicks": 2412000000,
+   "Container": "mkv",
+   "Path": "/media/fixtures/MusicVideos/Fixture Artist/Fixture Artist - Fixture Song.mkv",
+   "Type": "MusicVideo",
+   "IsFolder": false,
+   "MediaType": "Video",
+   "LocationType": "FileSystem",
+   "Album": "Fixture Album",
+   "Artists": ["Fixture Artist", "Guest Artist"],
+   "ArtistItems": [
+    { "Name": "Fixture Artist", "Id": "a1a1a1a1-0000-4000-8000-000000000001" },
+    { "Name": "Guest Artist", "Id": "a1a1a1a1-0000-4000-8000-000000000002" }
+   ],
+   "MediaSources": [
+    {
+     "Id": "6d0c1e55-0000-4000-8000-000000000001",
+     "Container": "mkv",
+     "RunTimeTicks": 2412000000,
+     "Path": "/media/fixtures/MusicVideos/Fixture Artist/Fixture Artist - Fixture Song.mkv",
+     "Protocol": "File",
+     "Type": "Default"
+    }
+   ],
+   "MediaStreams": [
+    {
+     "Type": "Video",
+     "Codec": "h264",
+     "IsDefault": true,
+     "Index": 0,
+     "Width": 1440,
+     "Height": 1080,
+     "BitDepth": 8,
+     "Profile": "High",
+     "PixelFormat": "yuv420p"
+    },
+    {
+     "Type": "Audio",
+     "Codec": "aac",
+     "IsDefault": true,
+     "Index": 1,
+     "Channels": 2,
+     "ChannelLayout": "stereo",
+     "SampleRate": 48000
+    }
+   ],
+   "Chapters": [],
+   "Tags": ["Official Video"],
+   "Genres": ["Alternative", "Rock"]
+  },
+  {
+   "Name": "Fixture Instrumental",
+   "ServerId": "00000000000000000000000000000000",
+   "Id": "6d0c1e55-0000-4000-8000-000000000002",
+   "RunTimeTicks": 1800000000,
+   "Path": "/media/fixtures/MusicVideos/Fixture Instrumental.mkv",
+   "Type": "MusicVideo",
+   "IsFolder": false,
+   "MediaType": "Video",
+   "LocationType": "FileSystem",
+   "Artists": [],
+   "MediaStreams": [
+    { "Type": "Video", "Codec": "h264", "Index": 0, "Width": 1920, "Height": 1080, "BitDepth": 8 }
+   ],
+   "Tags": [],
+   "Genres": ["Hip-Hop"]
+  }
+ ],
+ "TotalRecordCount": 2,
+ "StartIndex": 0
+}

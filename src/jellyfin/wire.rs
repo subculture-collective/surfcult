@@ -44,6 +44,9 @@ struct RawItem {
     parent_index_number: Option<i64>,
     /// The episode number within the season.
     index_number: Option<i64>,
+    /// A music video's artists.
+    artists: Option<Vec<String>>,
+    album: Option<String>,
 }
 
 /// A series as listed by `/Items`, with the tags and genres its episodes
@@ -103,7 +106,7 @@ pub(super) struct RawChild {
 pub(super) enum Parsed {
     Playable(Box<LibraryEntry>),
     /// Not playable: no video stream (Jellyfin lists missing episodes), no
-    /// runtime, or not a movie or episode.
+    /// runtime, or not a movie, episode or music video.
     Skipped,
     /// The JSON did not have the shape of an item.
     Invalid,
@@ -116,6 +119,7 @@ pub(super) fn parse_item(value: Value) -> Parsed {
     let kind = match raw.kind.as_deref() {
         Some("Movie") => MediaKind::Movie,
         Some("Episode") => MediaKind::Episode,
+        Some("MusicVideo") => MediaKind::MusicVideo,
         _ => return Parsed::Skipped,
     };
     let Some(runtime_ms) = raw
@@ -175,6 +179,10 @@ pub(super) fn parse_item(value: Value) -> Parsed {
         }),
         _ => None,
     };
+    let (artists, album) = match kind {
+        MediaKind::MusicVideo => (names(raw.artists), non_empty(raw.album)),
+        MediaKind::Movie | MediaKind::Episode => (Vec::new(), None),
+    };
 
     Parsed::Playable(Box::new(LibraryEntry {
         item: MediaItem {
@@ -184,6 +192,8 @@ pub(super) fn parse_item(value: Value) -> Parsed {
             tags: names(raw.tags),
             genres: names(raw.genres),
             series,
+            artists,
+            album,
             ..MediaItem::new(raw.id, title, kind, runtime_ms)
         },
         path,
@@ -194,7 +204,7 @@ fn non_empty(text: Option<String>) -> Option<String> {
     text.filter(|t| !t.is_empty())
 }
 
-/// A list of tag or genre names without empty ones.
+/// A list of tag, genre or artist names without empty ones.
 pub(super) fn names(list: Option<Vec<String>>) -> Vec<String> {
     let mut list = list.unwrap_or_default();
     list.retain(|name| !name.is_empty());
