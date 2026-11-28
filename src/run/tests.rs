@@ -208,7 +208,17 @@ impl Rig {
         Self::build("jellyfin_collection = \"Cartoons\"", true, "")
     }
 
+    /// As [`Rig::new`], with the clips probed on a background thread as
+    /// `surfcult run` does, so no pool has clips at startup.
+    fn probing_in_background() -> Self {
+        Self::build_with("jellyfin_collection = \"Cartoons\"", false, "", true)
+    }
+
     fn build(five_source: &str, watermark: bool, three_extra: &str) -> Self {
+        Self::build_with(five_source, watermark, three_extra, false)
+    }
+
+    fn build_with(five_source: &str, watermark: bool, three_extra: &str, background: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         for (pool, file, _) in CLIPS {
             let pool = dir.path().join(pool);
@@ -252,7 +262,11 @@ impl Rig {
         let mut lengths = Lengths(CLIPS.iter().map(|(_, f, ms)| (*f, *ms)).collect());
         // A clip no pool has at startup, for tests that add it later.
         lengths.0.insert("late.mp4", 20_000);
-        let clips = ClipLibrary::scan(&config.pools, lengths);
+        let clips = if background {
+            ClipLibrary::start(&config.pools, lengths, Vec::new(), 1)
+        } else {
+            ClipLibrary::scan(&config.pools, lengths)
+        };
         assert_eq!(clips.issues().count(), 0);
 
         let mut store = Store::open_in_memory().unwrap();
@@ -1544,6 +1558,32 @@ fn upkeep_picks_up_clips_added_to_a_pool_while_running() {
 
     rig.step(T + 60 * MIN);
     assert_eq!(names(&rig), ["filler.mp4", "late.mp4"]);
+}
+
+#[test]
+fn clips_probed_in_the_background_reach_the_tuner_and_the_store() {
+    let mut rig = Rig::probing_in_background();
+    hour_everywhere(&mut rig);
+    rig.start();
+    assert!(rig.tv.clips.pool("tune").unwrap().clips().is_empty());
+    let mut at = T;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while rig.tv.clips.pending() > 0 || rig.tv.clips.pool("tune").unwrap().clips().is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "probes did not finish"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        at += 5_000;
+        rig.step(at);
+    }
+    assert_eq!(rig.store.clip_probes().unwrap().len(), CLIPS.len());
+
+    rig.take();
+    rig.press(Key::Next, at);
+    let live = rig.go_live(at);
+    let tune_in = Path::new(&rig.clip("tune.mp4")).to_path_buf();
+    assert!(live.contains(&Command::PlayClip(tune_in)), "{live:?}");
 }
 
 #[test]

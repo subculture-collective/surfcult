@@ -4,7 +4,8 @@
 //! Startup order:
 //!
 //! 1. load `channels.toml` and open the store read-write (migrating it);
-//! 2. scan the clip pools with ffprobe;
+//! 2. list the clip pools, taking durations from the store's probe cache
+//!    and probing new or changed files on two background threads;
 //! 3. read the Jellyfin settings from the environment and start the sync
 //!    worker, which fetches the library at once and then every
 //!    `SURFCULT_SYNC_MINUTES` (15);
@@ -49,6 +50,10 @@ pub const AUDIO_DEVICE_ENV: &str = "SURFCULT_AUDIO_DEVICE";
 
 const DEFAULT_SYNC_MINUTES: u64 = 15;
 
+/// How many ffprobe processes run at once. Two leave the Pi's other cores
+/// to MPV.
+const PROBE_WORKERS: usize = 2;
+
 /// How often the loop runs. The stand-by card's glitch needs a poll at
 /// least every 50 ms.
 const TICK: Duration = Duration::from_millis(20);
@@ -63,10 +68,11 @@ pub fn run(config_path: &Path, db_path: &Path) -> Result<(), String> {
     let settings = settings()?;
     let sync_every = sync_every()?;
 
-    let clips = ClipLibrary::scan(&config.pools, FfprobeProber::new());
-    for issue in clips.issues() {
-        eprintln!("surfcult: clip skipped: {issue}");
-    }
+    let known = store.clip_probes().unwrap_or_else(|e| {
+        eprintln!("surfcult: {e}; probing every clip again");
+        Vec::new()
+    });
+    let clips = ClipLibrary::start(&config.pools, FfprobeProber::new(), known, PROBE_WORKERS);
 
     let worker = SyncWorker::spawn(JellyfinClient::new(jellyfin.clone()), sync_every)
         .map_err(|e| format!("cannot start the sync thread: {e}"))?;

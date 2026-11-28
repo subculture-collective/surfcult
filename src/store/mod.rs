@@ -42,6 +42,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
+use crate::clips::{ProbeChanges, ProbeRecord, Stamp};
 use crate::library::MediaId;
 use crate::timeline::{Event, EventKind};
 
@@ -478,6 +479,105 @@ impl Store {
             )
             .map_err(StoreError::database("writing a viewer setting"))?;
         Ok(())
+    }
+}
+
+impl Store {
+    /// Every stored clip probe result. A row whose numbers do not fit is
+    /// left out, so its file is probed again.
+    pub fn clip_probes(&self) -> Result<Vec<ProbeRecord>, StoreError> {
+        let action = "reading the clip probe cache";
+        let mut statement = self
+            .conn
+            .prepare("SELECT path, modified_ns, size, duration_ns, error FROM clip_probes")
+            .map_err(StoreError::database(action))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(StoreError::database(action))?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (path, modified_ns, size, duration_ns, error) =
+                row.map_err(StoreError::database(action))?;
+            let Ok(size) = u64::try_from(size) else {
+                continue;
+            };
+            let probed = match (duration_ns.map(u64::try_from), error) {
+                (Some(Ok(ns)), _) => Ok(Duration::from_nanos(ns)),
+                (None, Some(why)) => Err(why),
+                _ => continue,
+            };
+            records.push(ProbeRecord {
+                path: path.into(),
+                stamp: Stamp { modified_ns, size },
+                probed,
+            });
+        }
+        Ok(records)
+    }
+
+    /// Writes new and changed clip probe results and deletes the removed
+    /// ones, in one transaction. A path that is not UTF-8 is not stored.
+    pub fn save_clip_probes(&mut self, changes: &ProbeChanges) -> Result<(), StoreError> {
+        let action = "writing the clip probe cache";
+        let tx = self
+            .conn
+            .transaction()
+            .map_err(StoreError::database(action))?;
+        {
+            let mut remove = tx
+                .prepare_cached("DELETE FROM clip_probes WHERE path = ?1")
+                .map_err(StoreError::database(action))?;
+            for path in &changes.removed {
+                if let Some(path) = path.to_str() {
+                    remove
+                        .execute([path])
+                        .map_err(StoreError::database(action))?;
+                }
+            }
+            let mut upsert = tx
+                .prepare_cached(
+                    "INSERT INTO clip_probes (path, modified_ns, size, duration_ns, error)
+                     VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT (path) DO UPDATE SET
+                         modified_ns = excluded.modified_ns,
+                         size = excluded.size,
+                         duration_ns = excluded.duration_ns,
+                         error = excluded.error",
+                )
+                .map_err(StoreError::database(action))?;
+            for record in &changes.saved {
+                let (Some(path), Ok(size)) =
+                    (record.path.to_str(), i64::try_from(record.stamp.size))
+                else {
+                    continue;
+                };
+                let (duration_ns, error) = match &record.probed {
+                    Ok(duration) => match i64::try_from(duration.as_nanos()) {
+                        Ok(ns) => (Some(ns), None),
+                        Err(_) => continue,
+                    },
+                    Err(why) => (None, Some(why.as_str())),
+                };
+                upsert
+                    .execute(params![
+                        path,
+                        record.stamp.modified_ns,
+                        size,
+                        duration_ns,
+                        error
+                    ])
+                    .map_err(StoreError::database(action))?;
+            }
+        }
+        tx.commit().map_err(StoreError::database(action))
     }
 }
 

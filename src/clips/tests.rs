@@ -583,3 +583,200 @@ fn ffprobe_prober_runs_the_program_without_a_shell_and_enforces_its_timeout() {
         Err(ProbeError::Spawn(_))
     ));
 }
+
+/// Answers like [`FakeProber`] after sleeping, like ffprobe on the Pi.
+struct SlowProber {
+    inner: Arc<FakeProber>,
+    delay: Duration,
+}
+
+impl Prober for SlowProber {
+    fn duration(&self, path: &Path) -> Result<Duration, ProbeError> {
+        std::thread::sleep(self.delay);
+        self.inner.duration(path)
+    }
+}
+
+/// Takes background results until nothing is pending.
+fn settle(library: &mut ClipLibrary) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while library.pending() > 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "probes did not finish"
+        );
+        library.collect();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[test]
+fn a_restart_with_unchanged_files_probes_nothing() {
+    let dir = TempDir::new().unwrap();
+    let prober = Arc::new(FakeProber::default());
+    prober.set("a.mp4", 15.0);
+    touch(dir.path(), "a.mp4", "a");
+    touch(dir.path(), "bad.mp4", "x");
+    let pools = [pool("ads", dir.path())];
+
+    let mut first = ClipLibrary::start(&pools, prober.clone(), Vec::new(), 2);
+    settle(&mut first);
+    let stored = first.take_changes();
+    assert_eq!(stored.saved.len(), 2, "the failure is stored too");
+    assert_eq!(prober.calls().len(), 2);
+    drop(first);
+
+    prober.reset_calls();
+    let second = ClipLibrary::start(&pools, prober.clone(), stored.saved, 2);
+    assert_eq!(second.pending(), 0);
+    assert_eq!(names(second.pool("ads").unwrap()), ["a.mp4"]);
+    assert_eq!(second.pool("ads").unwrap().clips()[0].duration, secs(15));
+    assert_eq!(second.issues().count(), 1, "bad.mp4 is still reported");
+    assert!(prober.calls().is_empty());
+}
+
+#[test]
+fn a_new_file_is_probed_in_the_background_and_joins_its_pool_when_collected() {
+    let dir = TempDir::new().unwrap();
+    let prober = Arc::new(FakeProber::default());
+    prober.set("a.mp4", 15.0);
+    prober.set("b.mp4", 30.0);
+    touch(dir.path(), "a.mp4", "a");
+    let pools = [pool("ads", dir.path())];
+    let mut library = ClipLibrary::start(&pools, prober.clone(), Vec::new(), 1);
+    settle(&mut library);
+    prober.reset_calls();
+    library.take_changes();
+
+    touch(dir.path(), "b.mp4", "b");
+    assert_eq!(library.rescan(), 1);
+    assert_eq!(
+        names(library.pool("ads").unwrap()),
+        ["a.mp4"],
+        "not before it is probed"
+    );
+    assert_eq!(library.rescan(), 0, "a pending file is not queued twice");
+    settle(&mut library);
+    assert_eq!(names(library.pool("ads").unwrap()), ["a.mp4", "b.mp4"]);
+    assert_eq!(prober.calls(), ["b.mp4"]);
+    let changes = library.take_changes();
+    assert_eq!(changes.saved.len(), 1);
+    assert_eq!(changes.saved[0].probed, Ok(secs(30)));
+}
+
+#[test]
+fn a_changed_modified_time_is_probed_again_in_the_background() {
+    let dir = TempDir::new().unwrap();
+    let prober = Arc::new(FakeProber::default());
+    prober.set("a.mp4", 15.0);
+    let path = touch(dir.path(), "a.mp4", "a");
+    let pools = [pool("ads", dir.path())];
+    let mut library = ClipLibrary::start(&pools, prober.clone(), Vec::new(), 1);
+    settle(&mut library);
+    prober.reset_calls();
+
+    assert_eq!(library.rescan(), 0);
+    let later = fs::metadata(&path).unwrap().modified().unwrap() + Duration::from_secs(60);
+    fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(later)
+        .unwrap();
+    assert_eq!(library.rescan(), 1);
+    settle(&mut library);
+    assert_eq!(prober.calls(), ["a.mp4"]);
+    assert_eq!(names(library.pool("ads").unwrap()), ["a.mp4"]);
+}
+
+#[test]
+fn a_deleted_file_leaves_its_pool_and_the_store() {
+    let dir = TempDir::new().unwrap();
+    let prober = Arc::new(FakeProber::default());
+    prober.set("a.mp4", 15.0);
+    prober.set("b.mp4", 15.0);
+    touch(dir.path(), "a.mp4", "a");
+    let b = touch(dir.path(), "b.mp4", "b");
+    let pools = [pool("ads", dir.path())];
+    let mut library = ClipLibrary::start(&pools, prober.clone(), Vec::new(), 1);
+    settle(&mut library);
+    library.take_changes();
+
+    let canonical = b.canonicalize().unwrap();
+    fs::remove_file(&b).unwrap();
+    library.rescan();
+    assert_eq!(names(library.pool("ads").unwrap()), ["a.mp4"]);
+    let changes = library.take_changes();
+    assert_eq!(changes.removed, [canonical]);
+    assert!(changes.saved.is_empty());
+}
+
+#[test]
+fn a_stored_result_for_a_file_that_is_gone_is_removed_at_start() {
+    let dir = TempDir::new().unwrap();
+    let prober = Arc::new(FakeProber::default());
+    let gone = ProbeRecord {
+        path: dir.path().join("gone.mp4"),
+        stamp: Stamp {
+            modified_ns: 1,
+            size: 1,
+        },
+        probed: Ok(secs(10)),
+    };
+    let mut library = ClipLibrary::start(&[pool("ads", dir.path())], prober, vec![gone.clone()], 1);
+    assert_eq!(library.take_changes().removed, [gone.path]);
+}
+
+#[test]
+fn start_does_not_wait_for_slow_probes() {
+    let dir = TempDir::new().unwrap();
+    let inner = Arc::new(FakeProber::default());
+    for n in 0..2000 {
+        let name = format!("{n:04}.mp4");
+        inner.set(&name, 90.0);
+        touch(dir.path(), &name, "clip");
+    }
+    let prober = SlowProber {
+        inner: inner.clone(),
+        delay: Duration::from_millis(350),
+    };
+    let started = std::time::Instant::now();
+    let library = ClipLibrary::start(&[pool("ads", dir.path())], prober, Vec::new(), 2);
+    let took = started.elapsed();
+    assert_eq!(library.pending(), 2000);
+    assert!(library.pool("ads").unwrap().clips().is_empty());
+    // Probing them in turn would take 700 s.
+    assert!(took < Duration::from_secs(5), "start took {took:?}");
+    eprintln!("start with 2000 unprobed clips took {took:?}");
+    drop(library);
+    // Dropping the library stops the workers before the queued jobs.
+    std::thread::sleep(Duration::from_millis(800));
+    let calls = inner.calls().len();
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(inner.calls().len(), calls, "workers stopped");
+    assert!(calls <= 4, "{calls} probes after drop");
+}
+
+#[test]
+fn start_with_every_clip_cached_probes_nothing_and_fills_the_pools() {
+    let dir = TempDir::new().unwrap();
+    let prober = Arc::new(FakeProber::default());
+    for n in 0..2000 {
+        let name = format!("{n:04}.mp4");
+        prober.set(&name, 90.0);
+        touch(dir.path(), &name, "clip");
+    }
+    let pools = [pool("ads", dir.path())];
+    let mut first = ClipLibrary::start(&pools, prober.clone(), Vec::new(), 2);
+    settle(&mut first);
+    let known = first.take_changes().saved;
+    drop(first);
+    prober.reset_calls();
+
+    let started = std::time::Instant::now();
+    let library = ClipLibrary::start(&pools, prober.clone(), known, 2);
+    let took = started.elapsed();
+    eprintln!("start with 2000 cached clips took {took:?}");
+    assert_eq!(library.pool("ads").unwrap().clips().len(), 2000);
+    assert!(prober.calls().is_empty());
+}

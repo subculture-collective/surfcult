@@ -57,6 +57,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "library_series_index",
         sql: include_str!("../../migrations/0009_library_series_index.sql"),
     },
+    Migration {
+        version: 10,
+        name: "clip_probes",
+        sql: include_str!("../../migrations/0010_clip_probes.sql"),
+    },
 ];
 
 /// Applies the migrations the database has not seen yet. Each one runs in its

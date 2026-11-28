@@ -19,6 +19,11 @@
 //! cached by path, modified time and size, so a rescan only probes files that
 //! are new or changed.
 //!
+//! [`ClipLibrary::start`] does not probe in the caller's thread: it takes
+//! durations from stored [`ProbeRecord`]s and probes the other files on
+//! background threads, and [`ClipLibrary::collect`] adds them to their pools
+//! as they finish. [`ClipLibrary::take_changes`] gives the results to store.
+//!
 //! This module does not choose or rotate clips; the schedule generator and the
 //! tuner do that.
 
@@ -26,7 +31,7 @@ mod library;
 mod pool;
 mod probe;
 
-pub use library::ClipLibrary;
+pub use library::{ClipLibrary, ProbeChanges, ProbeRecord, Probed, Stamp};
 pub use pool::{Clip, Issue, IssueKind, PathRefused, Pool};
 pub use probe::{FfprobeProber, ProbeError, Prober};
 
